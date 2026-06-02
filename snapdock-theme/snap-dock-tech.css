@@ -1,0 +1,162 @@
+/* Snap Dock Tech - Custom Theme Styles */
+
+/* === Glowing Buttons === */
+.btn,
+button[type="submit"],
+.button,
+[class*="button--primary"],
+.shopify-payment-button__button {
+  transition: all 0.25s ease;
+}
+
+.btn:hover,
+button[type="submit"]:hover,
+.button:hover,
+[class*="button--primary"]:hover {
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.45);
+  transform: translateY(-1px);
+}
+
+/* === Product Card Hover === */
+.product-card,
+.card-wrapper,
+[class*="card-product"],
+.grid__item {
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.card-wrapper:hover,
+[class*="card-product"]:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 12px 40px rgba(56, 189, 248, 0.15);
+}
+
+/* === Product Image Zoom === */
+.card__media img,
+.product__media img,
+[class*="media"] img {
+  transition: transform 0.4s ease;
+  overflow: hidden;
+}
+
+.card-wrapper:hover .card__media img,
+.card-wrapper:hover [class*="media"] img {
+  transform: scale(1.04);
+}
+
+/* === Sale Badge Pulse === */
+@keyframes badge-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.45); }
+  50% { box-shadow: 0 0 0 6px rgba(56, 189, 248, 0); }
+}
+
+.badge--sale,
+[class*="badge"][class*="sale"],
+.price__badge-sale {
+  animation: badge-pulse 2.5s infinite;
+}
+
+/* === Frosted Glass Header === */
+.header-wrapper,
+header.header,
+.shopify-section-header-sticky {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* === Announcement Bar Gradient === */
+.announcement-bar__message,
+.announcement-bar {
+  background: linear-gradient(90deg, #0ea5e9, #38bdf8, #0284c7) !important;
+  color: #0a0f1e !important;
+  font-weight: 600 !important;
+}
+
+/* === Price Color === */
+.price,
+.price__regular,
+.price-item--regular,
+.price--large {
+  color: #38bdf8;
+}
+
+.price--on-sale .price-item--sale {
+  color: #38bdf8;
+}
+
+/* === Input Focus Glow === */
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2) !important;
+  border-color: #38bdf8 !important;
+}
+
+/* === Custom Scrollbar === */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0f1e;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #38bdf8;
+}
+
+/* === Cart Drawer Tech Styling === */
+#cart-drawer,
+.cart-drawer,
+[id*="cart-drawer"],
+cart-drawer {
+  background: #0a0f1e !important;
+  border-left: 1px solid rgba(56, 189, 248, 0.2) !important;
+}
+
+/* === Link Hover Accent === */
+.header__menu-item:hover,
+.header__active-menu-item {
+  color: #38bdf8 !important;
+}
+
+.footer__list-item a:hover {
+  color: #38bdf8;
+  transition: color 0.2s ease;
+}
+
+/* === Section Glow Separator === */
+.shopify-section + .shopify-section {
+  border-top: 1px solid rgba(56, 189, 248, 0.06);
+}
+
+/* === Swatch Selected Glow === */
+.swatch--selected,
+.color-swatch--selected,
+[class*="variant--selected"] {
+  box-shadow: 0 0 0 2px #38bdf8 !important;
+}
+
+/* === Quantity Stepper === */
+.quantity__button:hover {
+  background: #38bdf8;
+  color: #0a0f1e;
+  transition: all 0.2s ease;
+}
+
+/* === Loading Spinner Accent === */
+.loading-overlay__spinner circle {
+  stroke: #38bdf8;
+}
+
+/* === Sticky ATC Bar === */
+.product-form__buttons .button--primary {
+  background: #38bdf8;
+  color: #0a0f1e;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
