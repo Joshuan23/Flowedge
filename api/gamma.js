@@ -5,20 +5,37 @@ function bsGamma(S, K, T, sigma, r = 0.05) {
   return normalPDF(d1) / (S * sigma * Math.sqrt(T));
 }
 
-const IV = { SPY: 0.14, QQQ: 0.18, NVDA: 0.55, AAPL: 0.27, TSLA: 0.65, META: 0.38, MSFT: 0.24, AMD: 0.55 };
 const ASSET_CLASS = { SPY: 'etf', QQQ: 'etf', IWM: 'etf', GLD: 'etf', TLT: 'etf' };
 
 function parseNum(s) {
   if (!s || s === '--') return 0;
   return parseInt(String(s).replace(/,/g, '')) || 0;
 }
+
 function parseDTE(expiryDate) {
   if (!expiryDate || expiryDate === '--') return 7;
-  const now = new Date(); const year = now.getFullYear();
-  const d = new Date(`${expiryDate} ${year}`);
+  const now = new Date();
+  // Strip time — compare calendar dates only
+  const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let d = new Date(`${expiryDate} ${now.getFullYear()}`);
   if (isNaN(d)) return 7;
-  if (d < now) d.setFullYear(year + 1);
-  return Math.max(1, Math.ceil((d - now) / 86400000));
+  const expMidnight = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  // Only advance year if expiry is strictly before today
+  if (expMidnight < todayMidnight) expMidnight.setFullYear(now.getFullYear() + 1);
+  const dte = (expMidnight - todayMidnight) / 86400000;
+  return Math.max(0.5, dte); // 0DTE uses 0.5 to avoid gamma blowup
+}
+
+// Calculate 30-day realised vol from daily closes, then apply IV premium
+function calcIV(closes) {
+  if (!closes || closes.length < 5) return 0.20;
+  const valid = closes.filter(Boolean);
+  const logRets = valid.slice(1).map((c, i) => Math.log(c / valid[i]));
+  const mean = logRets.reduce((s, x) => s + x, 0) / logRets.length;
+  const variance = logRets.reduce((s, x) => s + (x - mean) ** 2, 0) / logRets.length;
+  const hv = Math.sqrt(variance * 252);
+  // IV typically trades at a 20-40% premium to HV (volatility risk premium)
+  return Math.max(0.05, hv * 1.3);
 }
 
 export default async function handler(req) {
@@ -26,11 +43,10 @@ export default async function handler(req) {
   const symbol = (searchParams.get('symbol') || 'SPY').toUpperCase();
   const filterExpiry = searchParams.get('expiry') || null;
   const assetclass = ASSET_CLASS[symbol] || 'stocks';
-  const sigma = IV[symbol] || 0.30;
 
   try {
     const [priceRes, optRes] = await Promise.all([
-      fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=2d`, {
+      fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1mo`, {
         headers: { 'User-Agent': 'Mozilla/5.0' }
       }),
       fetch(`https://api.nasdaq.com/api/quote/${symbol}/option-chain?assetclass=${assetclass}&limit=200&expiryoption=allWeeks&callput=callput`, {
@@ -40,11 +56,19 @@ export default async function handler(req) {
 
     const priceData = await priceRes.json();
     const optData = await optRes.json();
-    const spot = priceData?.chart?.result?.[0]?.meta?.regularMarketPrice;
+
+    const chartResult = priceData?.chart?.result?.[0];
+    const spot = chartResult?.meta?.regularMarketPrice;
     if (!spot) throw new Error('Could not get spot price');
 
+    // Dynamic IV from 30-day historical vol
+    const closes = chartResult?.indicators?.quote?.[0]?.close || [];
+    const sigma = calcIV(closes);
+
     const rows = optData?.data?.table?.rows || [];
-    const availableExpiries = [...new Set(rows.filter(r => r.expiryDate && r.expiryDate !== '--').map(r => r.expiryDate))];
+    const availableExpiries = [...new Set(
+      rows.filter(r => r.expiryDate && r.expiryDate !== '--').map(r => r.expiryDate)
+    )];
 
     const strikeMap = {};
     let totalCallVol = 0, totalPutVol = 0;
@@ -77,9 +101,11 @@ export default async function handler(req) {
 
     const netGex = gexByStrike.reduce((s, x) => s + x.gex, 0);
     const gammaWall = gexByStrike.reduce((max, x) => x.gex > max.gex ? x : max).strike;
-    const putWall = gexByStrike.filter(x => x.strike <= spot && x.putOI > 0)
+    const putWall = gexByStrike
+      .filter(x => x.strike <= spot && x.putOI > 0)
       .reduce((max, x) => x.putOI > max.putOI ? x : max, { putOI: 0, strike: null }).strike;
-    const callWall = gexByStrike.filter(x => x.strike >= spot && x.callOI > 0)
+    const callWall = gexByStrike
+      .filter(x => x.strike >= spot && x.callOI > 0)
       .reduce((max, x) => x.callOI > max.callOI ? x : max, { callOI: 0, strike: null }).strike;
     const flipCandidate = gexByStrike.find(x => x.gex > 0 && x.strike >= spot * 0.92);
     const flipLevel = flipCandidate?.strike ?? null;
@@ -88,7 +114,7 @@ export default async function handler(req) {
     return new Response(JSON.stringify({
       symbol, spot, netGex, gammaWall, putWall, callWall, flipLevel,
       totalCallVol, totalPutVol, pcVolumeRatio,
-      availableExpiries,
+      availableExpiries, impliedVol: parseFloat((sigma * 100).toFixed(1)),
       gexByStrike,
     }), {
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
