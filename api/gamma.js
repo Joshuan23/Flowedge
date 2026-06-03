@@ -118,11 +118,45 @@ export default async function handler(req) {
       .sort((a, b) => b.balancedOI - a.balancedOI)
       .slice(0, 5);
 
+    // Heatmap: per-(strike, expiry) GEX, independent of expiry filter
+    const heatRaw = {};
+    for (const row of rows) {
+      const k = parseFloat(row.strike);
+      if (!k || Math.abs(k - spot) / spot > 0.12) continue;
+      const exp = row.expiryDate;
+      if (!exp || exp === '--') continue;
+      const cOI = parseNum(row.c_Openinterest), pOI = parseNum(row.p_Openinterest);
+      if (cOI + pOI === 0) continue;
+      const dte = parseDTE(exp);
+      const cellGex = (cOI - pOI) * bsGamma(spot, k, dte / 365, sigma) * 100 * spot;
+      const key = `${k}|${exp}`;
+      if (!heatRaw[key]) heatRaw[key] = { strike: k, expiry: exp, callOI: 0, putOI: 0, gex: 0 };
+      heatRaw[key].callOI += cOI;
+      heatRaw[key].putOI += pOI;
+      heatRaw[key].gex += cellGex;
+    }
+    const heatCells = Object.values(heatRaw);
+    // Top 8 expiries by soonest DTE
+    const heatExpiries = [...new Set(heatCells.map(c => c.expiry))]
+      .sort((a, b) => parseDTE(a) - parseDTE(b))
+      .slice(0, 8);
+    // Top 28 strikes by total OI across all expiries
+    const strikeTotals = {};
+    heatCells.forEach(c => { strikeTotals[c.strike] = (strikeTotals[c.strike] || 0) + c.callOI + c.putOI; });
+    const heatStrikes = Object.entries(strikeTotals)
+      .sort((a, b) => b[1] - a[1]).slice(0, 28)
+      .map(([k]) => parseFloat(k)).sort((a, b) => a - b);
+    const heatmap = {
+      expiries: heatExpiries,
+      strikes: heatStrikes,
+      cells: heatCells.filter(c => heatExpiries.includes(c.expiry) && heatStrikes.includes(c.strike)),
+    };
+
     return new Response(JSON.stringify({
       symbol, spot, netGex, gammaWall, putWall, callWall, flipLevel,
       totalCallVol, totalPutVol, pcVolumeRatio,
       availableExpiries, impliedVol: parseFloat((sigma * 100).toFixed(1)),
-      gexByStrike, kingNodes,
+      gexByStrike, kingNodes, heatmap,
     }), {
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
     });

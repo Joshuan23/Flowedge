@@ -364,77 +364,97 @@ function AlertsPanel({ stocks }) {
   );
 }
 
-function KingNodeLadder({ spot, kingNodes, impliedVol }) {
-  if (!spot || !kingNodes?.length) return null;
+function OIHeatMap({ heatmap, spot, kingNodes }) {
+  if (!heatmap?.cells?.length) return null;
 
-  const all = [spot, ...kingNodes.map(n => n.strike)];
-  const pad = Math.max((Math.max(...all) - Math.min(...all)) * 0.10, spot * 0.004);
-  const hi = Math.max(...all) + pad;
-  const lo = Math.min(...all) - pad;
-  const range = hi - lo || 1;
+  const { expiries, strikes, cells } = heatmap;
+  const cellMap = {};
+  cells.forEach(c => {
+    if (!cellMap[c.strike]) cellMap[c.strike] = {};
+    cellMap[c.strike][c.expiry] = c;
+  });
 
-  const W = 300, H = 240, LEFT = 46, RIGHT = 72;
-  const chartW = W - LEFT - RIGHT;
-  const toY = p => ((hi - p) / range) * H;
+  const maxAbs = Math.max(...cells.map(c => Math.abs(c.gex || 0)), 1);
+  const kingSet = new Set((kingNodes || []).map(n => n.strike));
+  const sortedStrikes = [...strikes].sort((a, b) => b - a);
 
-  const iv = (impliedVol || 20) / 100;
-  const sigma = spot * iv * Math.sqrt(7 / 365);
-  const upper1 = spot + sigma;
-  const lower1 = spot - sigma;
+  const abbrevExp = (exp) => {
+    const [mon, day] = exp.split(' ');
+    const m = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
+    return `${m[mon] ?? mon}/${parseInt(day)}`;
+  };
 
-  const nearest = [...kingNodes].sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot))[0];
+  const cellBg = (gex) => {
+    if (!gex) return 'rgba(255,255,255,0.02)';
+    const alpha = Math.min(Math.pow(Math.abs(gex) / maxAbs, 0.45) * 0.82, 0.82);
+    return gex > 0 ? `rgba(16,185,129,${alpha})` : `rgba(239,68,68,${alpha})`;
+  };
+
+  const fmtCell = (gex) => {
+    if (!gex) return '';
+    const abs = Math.abs(gex), s = gex >= 0 ? '+' : '-';
+    if (abs >= 1e9) return `${s}$${(abs/1e9).toFixed(1)}B`;
+    if (abs >= 1e6) return `${s}$${(abs/1e6).toFixed(1)}M`;
+    if (abs >= 1e3) return `${s}$${(abs/1e3).toFixed(0)}K`;
+    return `${s}$${abs.toFixed(0)}`;
+  };
+
+  const colW = Math.max(54, Math.floor(240 / expiries.length));
 
   return (
-    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block", overflow: "visible" }}>
-      {/* Expected 7-day move band */}
-      <rect
-        x={LEFT} y={Math.max(0, toY(Math.min(upper1, hi)))}
-        width={chartW}
-        height={Math.abs(toY(Math.max(lower1, lo)) - toY(Math.min(upper1, hi)))}
-        fill="rgba(99,102,241,0.07)"
-      />
-      <line x1={LEFT} y1={toY(Math.min(upper1, hi))} x2={LEFT + chartW} y2={toY(Math.min(upper1, hi))}
-        stroke="rgba(99,102,241,0.3)" strokeWidth={0.8} strokeDasharray="3,2" />
-      <line x1={LEFT} y1={toY(Math.max(lower1, lo))} x2={LEFT + chartW} y2={toY(Math.max(lower1, lo))}
-        stroke="rgba(99,102,241,0.3)" strokeWidth={0.8} strokeDasharray="3,2" />
-      <text x={LEFT + chartW / 2} y={toY(Math.min(upper1, hi)) - 3}
-        textAnchor="middle" fontSize={7} fill="rgba(139,92,246,0.7)" fontFamily="monospace">+1σ 7d</text>
-      <text x={LEFT + chartW / 2} y={toY(Math.max(lower1, lo)) + 9}
-        textAnchor="middle" fontSize={7} fill="rgba(139,92,246,0.7)" fontFamily="monospace">-1σ 7d</text>
-
-      {/* King node lines */}
-      {kingNodes.map((node, i) => {
-        const y = toY(node.strike);
-        const isTarget = node.strike === nearest?.strike;
-        return (
-          <g key={node.strike}>
-            <line x1={LEFT} y1={y} x2={LEFT + chartW} y2={y}
-              stroke={isTarget ? "#eab308" : "#78350f"}
-              strokeWidth={isTarget ? 1.5 : 1}
-              strokeDasharray={isTarget ? "none" : "4,3"} />
-            <text x={LEFT - 4} y={y + 3.5} textAnchor="end" fontSize={8}
-              fill={isTarget ? "#eab308" : "#a16207"} fontFamily="monospace" fontWeight={isTarget ? "bold" : "normal"}>
-              {node.strike % 1 === 0 ? node.strike.toFixed(0) : node.strike.toFixed(1)}
-            </text>
-            <text x={LEFT + chartW + 5} y={y + 3.5} fontSize={8}
-              fill={isTarget ? "#eab308" : "#a16207"} fontFamily="monospace">
-              {isTarget ? "♛ TARGET" : `♛ #${i + 1}`}
-            </text>
-          </g>
-        );
-      })}
-
-      {/* Spot price line */}
-      <line x1={LEFT} y1={toY(spot)} x2={LEFT + chartW} y2={toY(spot)}
-        stroke="#f9fafb" strokeWidth={2} />
-      <text x={LEFT - 4} y={toY(spot) + 3.5} textAnchor="end" fontSize={8}
-        fill="#f9fafb" fontFamily="monospace" fontWeight="bold">
-        {spot.toFixed(spot >= 100 ? 1 : 2)}
-      </text>
-      <text x={LEFT + chartW + 5} y={toY(spot) + 3.5} fontSize={8} fill="#9ca3af" fontFamily="monospace">
-        SPOT
-      </text>
-    </svg>
+    <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 420 }}>
+      <table style={{ borderCollapse: 'collapse', fontSize: 9, fontFamily: 'monospace', tableLayout: 'fixed', minWidth: 46 + expiries.length * colW }}>
+        <thead>
+          <tr>
+            <th style={{ width: 46, padding: '3px 4px', textAlign: 'right', color: '#374151', fontSize: 8, fontWeight: 400, borderBottom: '1px solid rgba(255,255,255,0.06)', position: 'sticky', top: 0, background: '#0d1117' }}>
+              STRIKE
+            </th>
+            {expiries.map(exp => (
+              <th key={exp} style={{ width: colW, padding: '3px 2px', textAlign: 'center', color: '#4b5563', fontSize: 8, fontWeight: 600, borderBottom: '1px solid rgba(255,255,255,0.06)', position: 'sticky', top: 0, background: '#0d1117' }}>
+                {abbrevExp(exp)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {sortedStrikes.map(strike => {
+            const isSpot = spot && Math.abs(strike - spot) < 2.5;
+            const isKing = kingSet.has(strike);
+            const rowBg = isKing ? 'rgba(234,179,8,0.07)' : isSpot ? 'rgba(245,158,11,0.07)' : 'transparent';
+            const strikeColor = isKing ? '#eab308' : isSpot ? '#f59e0b' : '#6b7280';
+            return (
+              <tr key={strike} style={{ background: rowBg }}>
+                <td style={{ padding: '2px 4px', textAlign: 'right', color: strikeColor, fontWeight: isKing || isSpot ? 700 : 400, borderRight: '1px solid rgba(255,255,255,0.05)', whiteSpace: 'nowrap' }}>
+                  {isKing && <span style={{ marginRight: 2 }}>♛</span>}
+                  {strike % 1 === 0 ? strike.toFixed(0) : strike.toFixed(1)}
+                </td>
+                {expiries.map(exp => {
+                  const c = cellMap[strike]?.[exp];
+                  const gex = c?.gex || 0;
+                  return (
+                    <td key={exp}
+                      title={c ? `$${strike} ${exp}: ${(c.callOI||0).toLocaleString()}c / ${(c.putOI||0).toLocaleString()}p` : ''}
+                      style={{
+                        padding: '2px 3px', textAlign: 'right', background: cellBg(gex),
+                        color: gex > 0 ? '#86efac' : gex < 0 ? '#fca5a5' : '#1f2937',
+                        fontSize: 8, border: '1px solid rgba(0,0,0,0.15)',
+                        whiteSpace: 'nowrap',
+                      }}>
+                      {fmtCell(gex)}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div style={{ display: 'flex', gap: 14, marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.05)', justifyContent: 'center' }}>
+        <span style={{ fontSize: 8, color: '#86efac', fontFamily: 'monospace' }}>■ Dealer long (call&gt;put)</span>
+        <span style={{ fontSize: 8, color: '#eab308', fontFamily: 'monospace' }}>♛ King node</span>
+        <span style={{ fontSize: 8, color: '#fca5a5', fontFamily: 'monospace' }}>■ Dealer short (put&gt;call)</span>
+      </div>
+    </div>
   );
 }
 
@@ -625,33 +645,16 @@ function GammaPanel({ stocks }) {
                 );
               })}
 
-              {/* King node price ladder chart */}
-              {data.kingNodes?.length > 0 && (
-                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(234,179,8,0.15)" }}>
-                  <div style={{ fontSize: 9, color: "#a16207", letterSpacing: "0.08em", marginBottom: 6 }}>
-                    PRICE LADDER · 7-DAY EXPECTED RANGE
-                  </div>
-                  <KingNodeLadder spot={spot} kingNodes={data.kingNodes} impliedVol={data.impliedVol} />
-                  {(() => {
-                    const above = data.kingNodes.filter(n => n.strike > spot).sort((a, b) => a.strike - b.strike)[0];
-                    const below = data.kingNodes.filter(n => n.strike < spot).sort((a, b) => b.strike - a.strike)[0];
-                    return (
-                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-                        {above && (
-                          <span style={{ fontSize: 9, fontFamily: "monospace", color: "#a5b4fc" }}>
-                            ▲ ${above.strike % 1 === 0 ? above.strike.toFixed(0) : above.strike.toFixed(1)} ({((above.strike - spot) / spot * 100).toFixed(1)}%)
-                          </span>
-                        )}
-                        {below && (
-                          <span style={{ fontSize: 9, fontFamily: "monospace", color: "#f87171" }}>
-                            ▼ ${below.strike % 1 === 0 ? below.strike.toFixed(0) : below.strike.toFixed(1)} ({((below.strike - spot) / spot * 100).toFixed(1)}%)
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              )}
+            </div>
+          )}
+
+          {/* OI Heat Map */}
+          {data.heatmap?.cells?.length > 0 && (
+            <div style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+              <div style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em", marginBottom: 8 }}>
+                OI HEAT MAP — GEX PER STRIKE × EXPIRY
+              </div>
+              <OIHeatMap heatmap={data.heatmap} spot={spot} kingNodes={data.kingNodes} />
             </div>
           )}
 
