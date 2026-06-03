@@ -111,11 +111,18 @@ export default async function handler(req) {
     const flipLevel = flipCandidate?.strike ?? null;
     const pcVolumeRatio = totalCallVol > 0 ? (totalPutVol / totalCallVol).toFixed(2) : null;
 
+    // King nodes: strikes with high OI on BOTH sides — strongest pinning levels
+    const kingNodes = [...gexByStrike]
+      .filter(x => x.callOI > 0 && x.putOI > 0)
+      .map(x => ({ strike: x.strike, balancedOI: Math.min(x.callOI, x.putOI), callOI: x.callOI, putOI: x.putOI }))
+      .sort((a, b) => b.balancedOI - a.balancedOI)
+      .slice(0, 5);
+
     return new Response(JSON.stringify({
       symbol, spot, netGex, gammaWall, putWall, callWall, flipLevel,
       totalCallVol, totalPutVol, pcVolumeRatio,
       availableExpiries, impliedVol: parseFloat((sigma * 100).toFixed(1)),
-      gexByStrike,
+      gexByStrike, kingNodes,
     }), {
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
     });

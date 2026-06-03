@@ -104,7 +104,12 @@ async function calcGamma(symbol, filterExpiry) {
   const flipCandidate = gexByStrike.find(x => x.gex > 0 && x.strike >= spot * 0.92);
   const flipLevel = flipCandidate?.strike ?? null;
   const pcVolumeRatio = totalCallVol > 0 ? (totalPutVol / totalCallVol).toFixed(2) : null;
-  return { symbol, spot, netGex, gammaWall, putWall, callWall, flipLevel, totalCallVol, totalPutVol, pcVolumeRatio, availableExpiries, impliedVol: parseFloat((sigma * 100).toFixed(1)), gexByStrike };
+  const kingNodes = [...gexByStrike]
+    .filter(x => x.callOI > 0 && x.putOI > 0)
+    .map(x => ({ strike: x.strike, balancedOI: Math.min(x.callOI, x.putOI), callOI: x.callOI, putOI: x.putOI }))
+    .sort((a, b) => b.balancedOI - a.balancedOI)
+    .slice(0, 5);
+  return { symbol, spot, netGex, gammaWall, putWall, callWall, flipLevel, totalCallVol, totalPutVol, pcVolumeRatio, availableExpiries, impliedVol: parseFloat((sigma * 100).toFixed(1)), gexByStrike, kingNodes };
 }
 
 export default defineConfig({

@@ -409,6 +409,7 @@ function GammaPanel({ stocks }) {
   const gexList = data?.gexByStrike || [];
   const maxAbsGex = gexList.reduce((m, x) => Math.max(m, Math.abs(x.gex)), 1);
   const maxVol = gexList.reduce((m, x) => Math.max(m, x.callVol + x.putVol), 1);
+  const kingNodeStrikes = new Set((data?.kingNodes || []).map(x => x.strike));
 
   const signal = (() => {
     if (!data) return null;
@@ -518,6 +519,40 @@ function GammaPanel({ stocks }) {
             ))}
           </div>
 
+          {/* King Nodes */}
+          {data.kingNodes?.length > 0 && (
+            <div style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(234,179,8,0.04)", border: "1px solid rgba(234,179,8,0.2)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                <span style={{ fontSize: 12 }}>♛</span>
+                <span style={{ fontSize: 10, color: "#eab308", letterSpacing: "0.1em", fontWeight: 700 }}>KING NODES</span>
+                <span style={{ fontSize: 9, color: "#4b5563", marginLeft: 2 }}>highest two-sided OI — strongest pin levels</span>
+              </div>
+              {data.kingNodes.map((node, i) => {
+                const isAbove = node.strike > spot;
+                const distPct = spot ? (((node.strike - spot) / spot) * 100).toFixed(1) : null;
+                return (
+                  <div key={node.strike} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 9, color: "#eab308", fontWeight: 700, width: 12 }}>#{i + 1}</span>
+                      <span style={{ fontSize: 12, fontFamily: "monospace", color: "#eab308", fontWeight: 700 }}>
+                        ${node.strike % 1 === 0 ? node.strike.toFixed(0) : node.strike.toFixed(1)}
+                      </span>
+                      {distPct && (
+                        <span style={{ fontSize: 9, color: isAbove ? "#a5b4fc" : "#f87171" }}>
+                          {isAbove ? "▲" : "▼"} {Math.abs(distPct)}%
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, fontSize: 9, fontFamily: "monospace" }}>
+                      <span style={{ color: "#10b981" }}>{fmtVol(node.callOI)}c</span>
+                      <span style={{ color: "#ef4444" }}>{fmtVol(node.putOI)}p</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {/* GEX by Strike with Volume + Expiry */}
           <div style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
             <div style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em", marginBottom: 8 }}>
@@ -526,19 +561,21 @@ function GammaPanel({ stocks }) {
             <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 320, overflowY: "auto" }}>
               {[...gexList].reverse().map(row => {
                 const isSpot = spot && Math.abs(row.strike - spot) < 2.5;
+                const isKing = kingNodeStrikes.has(row.strike);
                 const barPct = Math.max(1, (Math.abs(row.gex) / maxAbsGex) * 100);
                 const gexColor = row.gex >= 0 ? "#10b981" : "#ef4444";
                 const cVolPct = Math.max(0, (row.callVol / maxVol) * 100);
                 const pVolPct = Math.max(0, (row.putVol / maxVol) * 100);
                 return (
                   <div key={row.strike} style={{
-                    borderLeft: isSpot ? "2px solid #f59e0b" : "2px solid transparent",
-                    background: isSpot ? "rgba(245,158,11,0.06)" : "none",
+                    borderLeft: isKing ? "2px solid #eab308" : isSpot ? "2px solid #f59e0b" : "2px solid transparent",
+                    background: isKing ? "rgba(234,179,8,0.06)" : isSpot ? "rgba(245,158,11,0.06)" : "none",
                     paddingLeft: 4, paddingBottom: 2,
                   }}>
                     {/* Strike + expiry date */}
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-                      <span style={{ fontSize: 10, fontFamily: "monospace", color: isSpot ? "#f59e0b" : "#6b7280", fontWeight: isSpot ? 700 : 400 }}>
+                      <span style={{ fontSize: 10, fontFamily: "monospace", color: isKing ? "#eab308" : isSpot ? "#f59e0b" : "#6b7280", fontWeight: isKing || isSpot ? 700 : 400 }}>
+                        {isKing && <span style={{ marginRight: 3, fontSize: 8 }}>♛</span>}
                         ${row.strike % 1 === 0 ? row.strike.toFixed(0) : row.strike.toFixed(1)}
                         {row.expiryDate ? <span style={{ fontSize: 9, color: "#374151", marginLeft: 5 }}>{row.expiryDate}</span> : null}
                       </span>
