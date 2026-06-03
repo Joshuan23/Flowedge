@@ -384,14 +384,14 @@ export default function App() {
     setError("");
     try {
       const res = await fetch(`/api/quotes?symbols=${TICKERS.join(",")}`);
-      if (!res.ok) throw new Error("API error");
       const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       const results = data?.quoteResponse?.result || [];
       if (!results.length) throw new Error("No data returned");
       setStocks(results);
       setLastUpdate(new Date().toLocaleTimeString());
     } catch (e) {
-      setError("Could not load market data. " + e.message);
+      setError(e.message);
     } finally {
       setLoading(false);
     }

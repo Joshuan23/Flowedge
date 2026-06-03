@@ -14,7 +14,7 @@ function fetchChart(symbol) {
         try {
           const data = JSON.parse(Buffer.concat(chunks).toString());
           const meta = data?.chart?.result?.[0]?.meta;
-          if (!meta) return reject(new Error(`No data for ${symbol}`));
+          if (!meta) return reject(new Error('No data for ' + symbol));
           const prev = meta.chartPreviousClose || meta.regularMarketPrice;
           resolve({
             symbol: meta.symbol,
@@ -31,7 +31,7 @@ function fetchChart(symbol) {
       });
     });
     req.on('error', reject);
-    req.setTimeout(8000, () => { req.destroy(); reject(new Error(`timeout: ${symbol}`)); });
+    req.setTimeout(8000, () => { req.destroy(); reject(new Error('timeout: ' + symbol)); });
   });
 }
 
