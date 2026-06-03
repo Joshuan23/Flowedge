@@ -1,0 +1,17 @@
+{
+  "buildCommand": "cd flowedge && npm install && npm run build",
+  "outputDirectory": "flowedge/dist",
+  "installCommand": "cd flowedge && npm install",
+  "functions": {
+    "api/quotes.js": {
+      "maxDuration": 10
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/$1" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "env": {
+    "NODE_OPTIONS": "--max-http-header-size=65536"
+  }
+}
