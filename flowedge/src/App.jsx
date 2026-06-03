@@ -366,12 +366,214 @@ function AlertsPanel({ stocks }) {
 
 function GammaPanel({ stocks }) {
   const [symbol, setSymbol] = useState("SPY");
+  const [expiry, setExpiry] = useState(null);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   const fmtGex = (n) => {
     if (n == null) return "—";
+    const abs = Math.abs(n);
+    const s = n >= 0 ? "+" : "-";
+    if (abs >= 1e9) return `${s}$${(abs / 1e9).toFixed(1)}B`;
+    if (abs >= 1e6) return `${s}$${(abs / 1e6).toFixed(0)}M`;
+    return `${s}$${abs.toFixed(0)}`;
+  };
+  const fmtVol = (n) => {
+    if (!n) return "—";
+    if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K`;
+    return String(n);
+  };
+
+  const fetchGamma = useCallback(async (sym, exp) => {
+    setLoading(true);
+    setError("");
+    setData(null);
+    try {
+      const url = `/api/gamma?symbol=${sym}${exp ? `&expiry=${encodeURIComponent(exp)}` : ''}`;
+      const res = await fetch(url);
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+      setData(d);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchGamma(symbol, expiry); }, [symbol, expiry, fetchGamma]);
+
+  const spot = data?.spot;
+  const gexList = data?.gexByStrike || [];
+  const maxAbsGex = gexList.reduce((m, x) => Math.max(m, Math.abs(x.gex)), 1);
+  const maxVol = gexList.reduce((m, x) => Math.max(m, x.callVol + x.putVol), 1);
+
+  const signal = (() => {
+    if (!data) return null;
+    const { netGex, flipLevel, gammaWall, putWall, callWall } = data;
+    const regime = netGex >= 0 ? "POSITIVE GAMMA" : "NEGATIVE GAMMA";
+    const regimeColor = netGex >= 0 ? "#10b981" : "#ef4444";
+    const msg = netGex >= 0
+      ? `Dealers long gamma — sell rallies, buy dips. Price gravitates toward $${gammaWall} gamma wall.`
+      : `Dealers short gamma — amplifying moves. Watch $${flipLevel ?? putWall} flip level for regime change.`;
+    return { regime, regimeColor, msg };
+  })();
+
+  const chipStyle = (active) => ({
+    padding: "3px 8px", borderRadius: 4, fontSize: 10, fontWeight: 700,
+    cursor: "pointer", border: "none",
+    background: active ? "rgba(99,102,241,0.35)" : "rgba(255,255,255,0.05)",
+    color: active ? "#a5b4fc" : "#4b5563",
+  });
+
+  const selectStyle = {
+    background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: 6, padding: "7px 10px", color: "#f9fafb", fontSize: 12,
+    fontFamily: "monospace", outline: "none", cursor: "pointer",
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Symbol + Refresh */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <select value={symbol} onChange={e => { setSymbol(e.target.value); setExpiry(null); }} style={{ ...selectStyle, flex: 1 }}>
+          {TICKERS.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <button onClick={() => fetchGamma(symbol, expiry)} style={{
+          background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
+          borderRadius: 6, padding: "7px 12px", color: "#9ca3af", fontSize: 11,
+          cursor: "pointer", fontWeight: 600,
+        }}>↻</button>
+      </div>
+
+      {/* Expiry chips */}
+      {data?.availableExpiries?.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button onClick={() => setExpiry(null)} style={chipStyle(!expiry)}>All</button>
+          {data.availableExpiries.map(e => (
+            <button key={e} onClick={() => setExpiry(e)} style={chipStyle(expiry === e)}>{e}</button>
+          ))}
+        </div>
+      )}
+
+      {loading && <div style={{ textAlign: "center", color: "#4b5563", fontSize: 12, padding: 20 }}>Fetching options chain...</div>}
+      {error && <div style={{ color: "#ef4444", fontSize: 11, padding: "10px 12px", borderRadius: 8, background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}>{error}</div>}
+
+      {data && signal && (
+        <>
+          {/* Net GEX + Regime */}
+          <div style={{ padding: "12px 14px", borderRadius: 8, background: "rgba(255,255,255,0.03)", border: `1px solid ${signal.regimeColor}33` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <span style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em" }}>NET GEX</span>
+              <span style={{ fontSize: 10, fontWeight: 700, color: signal.regimeColor, letterSpacing: "0.08em" }}>{signal.regime}</span>
+            </div>
+            <div style={{ fontSize: 22, fontFamily: "monospace", fontWeight: 700, color: signal.regimeColor, marginBottom: 8 }}>
+              {fmtGex(data.netGex)}
+            </div>
+            <p style={{ fontSize: 11, color: "#6b7280", margin: 0, lineHeight: 1.7 }}>{signal.msg}</p>
+          </div>
+
+          {/* Volume summary + P/C ratio */}
+          <div style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+            <div style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em", marginBottom: 8 }}>TODAY'S VOLUME</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 10, color: "#4b5563", marginBottom: 2 }}>CALL VOL</div>
+                <div style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 700, color: "#10b981" }}>{fmtVol(data.totalCallVol)}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: "#4b5563", marginBottom: 2 }}>PUT VOL</div>
+                <div style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 700, color: "#ef4444" }}>{fmtVol(data.totalPutVol)}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: "#4b5563", marginBottom: 2 }}>P/C RATIO</div>
+                <div style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 700, color: parseFloat(data.pcVolumeRatio) > 1 ? "#ef4444" : parseFloat(data.pcVolumeRatio) < 0.7 ? "#10b981" : "#a5b4fc" }}>
+                  {data.pcVolumeRatio ?? "—"}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Key Levels */}
+          <div style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+            <div style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em", marginBottom: 8 }}>KEY LEVELS</div>
+            {[
+              { label: "Gamma Wall", val: data.gammaWall, color: "#10b981", desc: "Strongest magnet" },
+              { label: "Flip Level", val: data.flipLevel, color: "#f59e0b", desc: "Regime changes here" },
+              { label: "Call Wall", val: data.callWall, color: "#a5b4fc", desc: "Resistance" },
+              { label: "Put Wall", val: data.putWall, color: "#f87171", desc: "Support" },
+              { label: "Current", val: spot ? spot.toFixed(2) : null, color: "#f9fafb", desc: "Price now" },
+            ].filter(x => x.val).map(({ label, val, color, desc }) => (
+              <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                <div>
+                  <span style={{ fontSize: 11, color, fontWeight: 700 }}>{label}</span>
+                  <span style={{ fontSize: 10, color: "#374151", marginLeft: 6 }}>{desc}</span>
+                </div>
+                <span style={{ fontSize: 12, fontFamily: "monospace", color, fontWeight: 700 }}>
+                  ${parseFloat(val).toFixed(label === "Current" ? 2 : 0)}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {/* GEX by Strike with Volume + Expiry */}
+          <div style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+            <div style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em", marginBottom: 8 }}>
+              GEX BY STRIKE — <span style={{ color: "#10b981" }}>■</span> Call &nbsp;<span style={{ color: "#ef4444" }}>■</span> Put vol
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 320, overflowY: "auto" }}>
+              {[...gexList].reverse().map(row => {
+                const isSpot = spot && Math.abs(row.strike - spot) < 2.5;
+                const barPct = Math.max(1, (Math.abs(row.gex) / maxAbsGex) * 100);
+                const gexColor = row.gex >= 0 ? "#10b981" : "#ef4444";
+                const cVolPct = Math.max(0, (row.callVol / maxVol) * 100);
+                const pVolPct = Math.max(0, (row.putVol / maxVol) * 100);
+                return (
+                  <div key={row.strike} style={{
+                    borderLeft: isSpot ? "2px solid #f59e0b" : "2px solid transparent",
+                    background: isSpot ? "rgba(245,158,11,0.06)" : "none",
+                    paddingLeft: 4, paddingBottom: 2,
+                  }}>
+                    {/* Strike + expiry date */}
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                      <span style={{ fontSize: 10, fontFamily: "monospace", color: isSpot ? "#f59e0b" : "#6b7280", fontWeight: isSpot ? 700 : 400 }}>
+                        ${row.strike % 1 === 0 ? row.strike.toFixed(0) : row.strike.toFixed(1)}
+                        {row.expiryDate ? <span style={{ fontSize: 9, color: "#374151", marginLeft: 5 }}>{row.expiryDate}</span> : null}
+                      </span>
+                      <span style={{ fontSize: 9, fontFamily: "monospace", color: gexColor }}>{fmtGex(row.gex)}</span>
+                    </div>
+                    {/* GEX bar */}
+                    <div style={{ height: 7, background: "rgba(255,255,255,0.04)", borderRadius: 1, marginBottom: 2 }}>
+                      <div style={{ width: `${barPct}%`, height: "100%", borderRadius: 1, background: `${gexColor}cc` }} />
+                    </div>
+                    {/* Volume bars: call (green) + put (red) */}
+                    <div style={{ display: "flex", gap: 1, height: 4 }}>
+                      <div style={{ flex: 1, background: "rgba(255,255,255,0.04)", borderRadius: 1 }}>
+                        <div style={{ width: `${cVolPct}%`, height: "100%", borderRadius: 1, background: "#10b98166" }} />
+                      </div>
+                      <div style={{ flex: 1, background: "rgba(255,255,255,0.04)", borderRadius: 1 }}>
+                        <div style={{ width: `${pVolPct}%`, height: "100%", borderRadius: 1, background: "#ef444466" }} />
+                      </div>
+                    </div>
+                    {/* Volume numbers (only if non-zero) */}
+                    {(row.callVol > 0 || row.putVol > 0) && (
+                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 1 }}>
+                        <span style={{ fontSize: 8, color: "#10b981", fontFamily: "monospace" }}>{row.callVol ? fmtVol(row.callVol) + 'c' : ''}</span>
+                        <span style={{ fontSize: 8, color: "#ef4444", fontFamily: "monospace" }}>{row.putVol ? fmtVol(row.putVol) + 'p' : ''}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
     const abs = Math.abs(n);
     const s = n >= 0 ? "+" : "-";
     if (abs >= 1e9) return `${s}$${(abs / 1e9).toFixed(1)}B`;

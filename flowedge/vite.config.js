@@ -54,7 +54,7 @@ function parseDTE(expiryDate) {
   return Math.max(1, Math.ceil((d - now) / 86400000));
 }
 
-async function calcGamma(symbol) {
+async function calcGamma(symbol, filterExpiry) {
   const assetclass = ASSET_CLASS[symbol] || 'stocks';
   const sigma = IV_MAP[symbol] || 0.30;
   const [priceData, optData] = await Promise.all([
@@ -65,15 +65,21 @@ async function calcGamma(symbol) {
   const spot = priceData?.chart?.result?.[0]?.meta?.regularMarketPrice;
   if (!spot) throw new Error('Could not get spot price');
   const rows = optData?.data?.table?.rows || [];
+  const availableExpiries = [...new Set(rows.filter(r => r.expiryDate && r.expiryDate !== '--').map(r => r.expiryDate))];
   const strikeMap = {};
+  let totalCallVol = 0, totalPutVol = 0;
   for (const row of rows) {
     const k = parseFloat(row.strike); if (!k) continue;
     if (Math.abs(k - spot) / spot > 0.15) continue;
+    if (filterExpiry && row.expiryDate !== filterExpiry) continue;
     const T = parseDTE(row.expiryDate) / 365;
     const gamma = bsGamma(spot, k, T, sigma);
     const cOI = parseOI(row.c_Openinterest), pOI = parseOI(row.p_Openinterest);
-    if (!strikeMap[k]) strikeMap[k] = { strike: k, callOI: 0, putOI: 0, gex: 0 };
+    const cVol = parseOI(row.c_Volume), pVol = parseOI(row.p_Volume);
+    totalCallVol += cVol; totalPutVol += pVol;
+    if (!strikeMap[k]) strikeMap[k] = { strike: k, callOI: 0, putOI: 0, callVol: 0, putVol: 0, gex: 0, expiryDate: row.expiryDate, dte: parseDTE(row.expiryDate) };
     strikeMap[k].callOI += cOI; strikeMap[k].putOI += pOI;
+    strikeMap[k].callVol += cVol; strikeMap[k].putVol += pVol;
     strikeMap[k].gex += (cOI - pOI) * gamma * 100 * spot;
   }
   const gexByStrike = Object.values(strikeMap).sort((a, b) => a.strike - b.strike);
@@ -86,7 +92,8 @@ async function calcGamma(symbol) {
     .reduce((max, x) => x.callOI > max.callOI ? x : max, { callOI: 0, strike: null }).strike;
   const flipCandidate = gexByStrike.find(x => x.gex > 0 && x.strike >= spot * 0.92);
   const flipLevel = flipCandidate?.strike ?? null;
-  return { symbol, spot, netGex, gammaWall, putWall, callWall, flipLevel, gexByStrike };
+  const pcVolumeRatio = totalCallVol > 0 ? (totalPutVol / totalCallVol).toFixed(2) : null;
+  return { symbol, spot, netGex, gammaWall, putWall, callWall, flipLevel, totalCallVol, totalPutVol, pcVolumeRatio, availableExpiries, gexByStrike };
 }
 
 export default defineConfig({
@@ -108,8 +115,10 @@ export default defineConfig({
 
         server.middlewares.use('/api/gamma', async (req, res) => {
           try {
-            const symbol = (new URL(req.url, 'http://localhost').searchParams.get('symbol') || 'SPY').toUpperCase();
-            const data = await calcGamma(symbol);
+            const sp = new URL(req.url, 'http://localhost').searchParams;
+            const symbol = (sp.get('symbol') || 'SPY').toUpperCase();
+            const filterExpiry = sp.get('expiry') || null;
+            const data = await calcGamma(symbol, filterExpiry);
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(data));
           } catch (e) {
