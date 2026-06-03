@@ -1,6 +1,82 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
-const TICKERS = ["NVDA", "AAPL", "TSLA", "SPY", "QQQ", "META", "MSFT", "AMD"];
+const DEFAULT_WATCHLIST = [
+  "SPY","QQQ","IWM","NVDA","AAPL","MSFT","TSLA","META","AMZN","GOOGL",
+  "AMD","PLTR","COIN","V","JPM","GLD","TLT","VXX",
+];
+
+// All tickers available in the datalist / gamma selector
+const ALL_TICKERS = [
+  // ETFs
+  "SPY","QQQ","IWM","DIA","MDY","VOO","VTI","VEA","VWO",
+  "GLD","SLV","GDX","GDXJ","USO","UNG",
+  "TLT","HYG","LQD","IEF","SHY","AGG",
+  "XLF","XLK","XLE","XLV","XLI","XLU","XLP","XLB","XLRE","XLY","XLC",
+  "EEM","EFA","IEMG","KWEB","MCHI","EWJ","EWZ","EWY",
+  "ARKK","ARKG","ARKF","ARKW","ARKQ",
+  "TQQQ","SQQQ","SPXL","SPXU","UPRO","UVXY","VXX","SVXY",
+  "SMH","SOXX","IGV","CIBR","HACK",
+  "LABU","LABD","FAS","FAZ","SOXL","SOXS","NAIL","HIBL",
+  // Mega cap
+  "AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","TSLA","AVGO","ORCL",
+  // Semis
+  "AMD","INTC","QCOM","MU","AMAT","LRCX","KLAC","MRVL","SMCI","ARM",
+  "TXN","NXPI","ADI","MCHP","ON","SWKS","QRVO","MTSI","MPWR","ENTG",
+  // Software/Cloud
+  "CRM","ADBE","NOW","WDAY","INTU","PLTR","AI","PATH","U","NET",
+  "SNOW","DDOG","CRWD","ZS","PANW","OKTA","FTNT","CYBR","MDB","HUBS",
+  "TWLO","BILL","TTD","GTLB","SMAR","DOCN","PTC","ANSS","CDNS","SNPS",
+  // Consumer tech / fintech
+  "COIN","MSTR","HOOD","RBLX","ROKU","SPOT","ZM","DKNG","SOFI","UPST",
+  "AFRM","CVNA","OPEN","ETSY","CART","PCTY","PAYC","WEX","FLYW",
+  // Financials
+  "JPM","BAC","GS","MS","WFC","C","USB","PNC","TFC","KEY","RF","FITB",
+  "V","MA","AXP","BLK","COF","SCHW","BX","KKR","APO","ARES","CG",
+  "MCO","SPGI","ICE","CME","NDAQ","CBOE","FDS","MSCI",
+  "MET","PRU","AFL","ALL","PGR","CB","TRV","HIG","UNM","GL",
+  // Healthcare
+  "UNH","JNJ","LLY","PFE","ABBV","MRK","TMO","DHR","BMY","AMGN",
+  "GILD","ISRG","CVS","CI","HUM","ELV","CNC","MOH","VRTX","REGN",
+  "BIIB","MRNA","BNTX","NVAX","SRPT","ALNY","RARE","BMRN","ACAD",
+  "IQV","IQVIA","SYK","BSX","ABT","MDT","BDX","DXCM","PODD","INSP",
+  // Consumer disc
+  "AMZN","HD","LOW","MCD","YUM","NKE","SBUX","TGT","WMT","COST",
+  "DIS","NFLX","BKNG","EXPE","ABNB","LYFT","UBER","DASH",
+  "GM","F","RIVN","LCID","NIO","XPEV","LI","TSLA",
+  "GME","AMC","BBBY","PLBY","RH","W","OSTK",
+  // Energy
+  "XOM","CVX","COP","EOG","SLB","OXY","PXD","VLO","PSX","MPC",
+  "HAL","BKR","DVN","FANG","HES","LNG","CTRA","MRO","APA","BP","SHEL",
+  "NOG","CIVI","MTDR","SM","CRC","GPOR","AR","EQT","RRC","SWN",
+  // Industrials/Aero/Defense
+  "BA","CAT","GE","HON","RTX","LMT","NOC","GD","L3H","KTOS","RKLB",
+  "UNP","CSX","NSC","CP","CNI","FDX","UPS","DE","AGCO","CNH",
+  "MMM","EMR","ROK","ETN","IR","PH","GWW","CARR","OTIS","TT","XYL",
+  // Telecom/Media
+  "T","VZ","TMUS","CMCSA","CHTR","WBD","SNAP","PINS","RDDT","X",
+  "MTCH","IAC","PARA","SIRI","DIS","NFLX","WBD",
+  // REITs
+  "AMT","PLD","EQIX","SPG","O","PSA","DLR","WELL","AVB","EQR","VNO",
+  "CCI","SBAC","AMT","IRM","MPW","VICI","GLPI",
+  // Materials
+  "FCX","NEM","GOLD","AA","CLF","STLD","NUE","X","RS","CMC",
+  "LIN","APD","ECL","DD","DOW","EMN","CE","ALB","SQM","LTHM","PLL",
+  // Crypto-adjacent
+  "COIN","MSTR","RIOT","MARA","CLSK","CIFR","HUT","BTBT","BTDR","WGMI",
+];
+
+// ETF set for NASDAQ API asset class routing
+const ETF_SET = new Set([
+  "SPY","QQQ","IWM","DIA","MDY","VOO","VTI","VEA","VWO",
+  "GLD","SLV","GDX","GDXJ","USO","UNG",
+  "TLT","HYG","LQD","IEF","SHY","AGG",
+  "XLF","XLK","XLE","XLV","XLI","XLU","XLP","XLB","XLRE","XLY","XLC",
+  "EEM","EFA","IEMG","KWEB","MCHI","EWJ","EWZ","EWY",
+  "ARKK","ARKG","ARKF","ARKW","ARKQ",
+  "TQQQ","SQQQ","SPXL","SPXU","UPRO","UVXY","VXX","SVXY",
+  "SMH","SOXX","IGV","CIBR","HACK","LABU","LABD","FAS","FAZ",
+  "SOXL","SOXS","NAIL","HIBL",
+]);
 
 const fmt = (n) => {
   if (!n) return "$0";
@@ -23,7 +99,7 @@ function StatBox({ label, value, color = "#a5b4fc", sub }) {
   );
 }
 
-function StockCard({ data, index }) {
+function StockCard({ data, index, onRemove }) {
   const [vis, setVis] = useState(false);
   useEffect(() => { setTimeout(() => setVis(true), index * 80); }, []);
   const up = data.regularMarketChangePercent >= 0;
@@ -42,7 +118,15 @@ function StockCard({ data, index }) {
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div>
-          <div style={{ fontWeight: 800, fontSize: 15, color: "#f9fafb" }}>{data.symbol}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div style={{ fontWeight: 800, fontSize: 15, color: "#f9fafb" }}>{data.symbol}</div>
+            {onRemove && (
+              <button onClick={onRemove} title="Remove from watchlist" style={{
+                background: "none", border: "none", color: "#374151", cursor: "pointer",
+                fontSize: 13, padding: 0, lineHeight: 1, marginTop: 1,
+              }}>×</button>
+            )}
+          </div>
           <div style={{ fontSize: 11, color: "#4b5563", marginTop: 1 }}>{data.shortName || ""}</div>
         </div>
         <div style={{ textAlign: "right" }}>
@@ -113,7 +197,7 @@ function PortfolioPanel({ stocks }) {
   const [positions, setPositions] = useState(() => {
     try { return JSON.parse(localStorage.getItem("fe_portfolio") || "[]"); } catch { return []; }
   });
-  const [form, setForm] = useState({ symbol: TICKERS[0], shares: "", costBasis: "" });
+  const [form, setForm] = useState({ symbol: "", shares: "", costBasis: "" });
   const [adding, setAdding] = useState(false);
 
   useEffect(() => {
@@ -207,9 +291,9 @@ function PortfolioPanel({ stocks }) {
       {adding ? (
         <div style={{ padding: 12, borderRadius: 8, background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.2)" }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <select value={form.symbol} onChange={e => setForm(f => ({ ...f, symbol: e.target.value }))} style={{ ...inputStyle, cursor: "pointer" }}>
-              {TICKERS.map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
+            <input list="all-tickers-dl" placeholder="Ticker symbol (e.g. AAPL)" value={form.symbol}
+              onChange={e => setForm(f => ({ ...f, symbol: e.target.value.toUpperCase() }))}
+              style={inputStyle} />
             <input placeholder="Shares" type="number" value={form.shares} onChange={e => setForm(f => ({ ...f, shares: e.target.value }))} style={inputStyle} />
             <input placeholder="Avg cost per share" type="number" value={form.costBasis} onChange={e => setForm(f => ({ ...f, costBasis: e.target.value }))} style={inputStyle} />
             <div style={{ display: "flex", gap: 8 }}>
@@ -238,7 +322,7 @@ function AlertsPanel({ stocks }) {
   const [alerts, setAlerts] = useState(() => {
     try { return JSON.parse(localStorage.getItem("fe_alerts") || "[]"); } catch { return []; }
   });
-  const [form, setForm] = useState({ symbol: TICKERS[0], price: "", direction: "above" });
+  const [form, setForm] = useState({ symbol: "", price: "", direction: "above" });
   const [adding, setAdding] = useState(false);
   const firedRef = useRef(new Set());
 
@@ -328,9 +412,9 @@ function AlertsPanel({ stocks }) {
       {adding ? (
         <div style={{ padding: 12, borderRadius: 8, background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.2)" }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <select value={form.symbol} onChange={e => setForm(f => ({ ...f, symbol: e.target.value }))} style={{ ...inputStyle, cursor: "pointer" }}>
-              {TICKERS.map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
+            <input list="all-tickers-dl" placeholder="Ticker symbol (e.g. TSLA)" value={form.symbol}
+              onChange={e => setForm(f => ({ ...f, symbol: e.target.value.toUpperCase() }))}
+              style={inputStyle} />
             <select value={form.direction} onChange={e => setForm(f => ({ ...f, direction: e.target.value }))} style={{ ...inputStyle, cursor: "pointer" }}>
               <option value="above">Price goes above</option>
               <option value="below">Price goes below</option>
@@ -460,6 +544,7 @@ function OIHeatMap({ heatmap, spot, kingNodes }) {
 
 function GammaPanel({ stocks }) {
   const [symbol, setSymbol] = useState("SPY");
+  const [symbolInput, setSymbolInput] = useState("SPY");
   const [expiry, setExpiry] = useState(null);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -533,9 +618,23 @@ function GammaPanel({ stocks }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {/* Symbol + Refresh */}
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <select value={symbol} onChange={e => { setSymbol(e.target.value); setExpiry(null); }} style={{ ...selectStyle, flex: 1 }}>
-          {TICKERS.map(t => <option key={t} value={t}>{t}</option>)}
-        </select>
+        <input
+          list="all-tickers-dl"
+          value={symbolInput}
+          onChange={e => setSymbolInput(e.target.value.toUpperCase())}
+          onKeyDown={e => {
+            if (e.key === 'Enter') {
+              const s = symbolInput.trim().toUpperCase();
+              if (s) { setSymbol(s); setExpiry(null); }
+            }
+          }}
+          onBlur={() => {
+            const s = symbolInput.trim().toUpperCase();
+            if (s && s !== symbol) { setSymbol(s); setExpiry(null); }
+          }}
+          placeholder="Any ticker — SPY, NVDA, TSLA..."
+          style={{ ...selectStyle, flex: 1 }}
+        />
         <button onClick={() => fetchGamma(symbol, expiry)} style={{
           background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
           borderRadius: 6, padding: "7px 12px", color: "#9ca3af", fontSize: 11,
@@ -720,6 +819,11 @@ function GammaPanel({ stocks }) {
 const TABS = ["Signals", "Portfolio", "Alerts", "Gamma"];
 
 export default function App() {
+  const [watchlist, setWatchlist] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("fe_watchlist")) || DEFAULT_WATCHLIST; }
+    catch { return DEFAULT_WATCHLIST; }
+  });
+  const [addInput, setAddInput] = useState("");
   const [stocks, setStocks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -727,16 +831,30 @@ export default function App() {
   const [lastUpdate, setLastUpdate] = useState("");
   const [tab, setTab] = useState("Signals");
 
+  useEffect(() => { localStorage.setItem("fe_watchlist", JSON.stringify(watchlist)); }, [watchlist]);
+
+  const addToWatchlist = (raw) => {
+    const sym = raw.trim().toUpperCase().replace(/[^A-Z.]/g, '');
+    if (!sym || watchlist.includes(sym)) return;
+    setWatchlist(prev => [...prev, sym]);
+  };
+
+  const removeFromWatchlist = (sym) => {
+    setWatchlist(prev => prev.filter(s => s !== sym));
+    setStocks(prev => prev.filter(s => s.symbol !== sym));
+  };
+
   useEffect(() => {
     const p = setInterval(() => setPulse(x => !x), 1000);
     return () => clearInterval(p);
   }, []);
 
   const fetchStocks = useCallback(async () => {
+    if (!watchlist.length) return;
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`/api/quotes?symbols=${TICKERS.join(",")}`);
+      const res = await fetch(`/api/quotes?symbols=${watchlist.join(",")}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       const results = data?.quoteResponse?.result || [];
@@ -748,7 +866,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [watchlist]);
 
   useEffect(() => { fetchStocks(); }, [fetchStocks]);
 
@@ -823,11 +941,38 @@ export default function App() {
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", minHeight: "calc(100vh - 190px)" }}>
             <div style={{ padding: 16, borderRight: "1px solid rgba(255,255,255,0.06)" }}>
-              <div style={{ fontSize: 11, color: "#4b5563", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 14, paddingLeft: 4 }}>
-                Live Prices
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, paddingLeft: 4 }}>
+                <span style={{ fontSize: 11, color: "#4b5563", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                  Live Prices · {watchlist.length} tickers
+                </span>
               </div>
+              {/* Add ticker to watchlist */}
+              <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+                <input
+                  list="all-tickers-dl"
+                  value={addInput}
+                  onChange={e => setAddInput(e.target.value.toUpperCase())}
+                  onKeyDown={e => { if (e.key === 'Enter' && addInput.trim()) { addToWatchlist(addInput); setAddInput(""); } }}
+                  placeholder="+ Add ticker…"
+                  style={{
+                    flex: 1, background: "rgba(255,255,255,0.04)", border: "1px dashed rgba(255,255,255,0.12)",
+                    borderRadius: 6, padding: "6px 10px", color: "#9ca3af", fontSize: 11,
+                    fontFamily: "monospace", outline: "none",
+                  }}
+                />
+                <button
+                  onClick={() => { if (addInput.trim()) { addToWatchlist(addInput); setAddInput(""); } }}
+                  style={{
+                    background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)",
+                    borderRadius: 6, padding: "6px 12px", color: "#a5b4fc",
+                    fontSize: 11, fontWeight: 700, cursor: "pointer",
+                  }}>Add</button>
+              </div>
+              <datalist id="all-tickers-dl">
+                {ALL_TICKERS.map(t => <option key={t} value={t} />)}
+              </datalist>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} />)}
+                {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} />)}
               </div>
             </div>
 

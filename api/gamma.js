@@ -5,7 +5,16 @@ function bsGamma(S, K, T, sigma, r = 0.05) {
   return normalPDF(d1) / (S * sigma * Math.sqrt(T));
 }
 
-const ASSET_CLASS = { SPY: 'etf', QQQ: 'etf', IWM: 'etf', GLD: 'etf', TLT: 'etf' };
+const ETF_SET = new Set([
+  'SPY','QQQ','IWM','DIA','MDY','VOO','VTI','VEA','VWO',
+  'GLD','SLV','GDX','GDXJ','USO','UNG',
+  'TLT','HYG','LQD','IEF','SHY','AGG',
+  'XLF','XLK','XLE','XLV','XLI','XLU','XLP','XLB','XLRE','XLY','XLC',
+  'EEM','EFA','IEMG','KWEB','MCHI','EWJ','EWZ','EWY',
+  'ARKK','ARKG','ARKF','ARKW','ARKQ',
+  'TQQQ','SQQQ','SPXL','SPXU','UPRO','UVXY','VXX','SVXY',
+  'SMH','SOXX','IGV','CIBR','HACK','LABU','LABD','FAS','FAZ','SOXL','SOXS',
+]);
 
 function parseNum(s) {
   if (!s || s === '--') return 0;
@@ -42,7 +51,7 @@ export default async function handler(req) {
   const { searchParams } = new URL(req.url);
   const symbol = (searchParams.get('symbol') || 'SPY').toUpperCase();
   const filterExpiry = searchParams.get('expiry') || null;
-  const assetclass = ASSET_CLASS[symbol] || 'stocks';
+  const assetclass = ETF_SET.has(symbol) ? 'etf' : 'stocks';
 
   try {
     const [priceRes, optRes] = await Promise.all([

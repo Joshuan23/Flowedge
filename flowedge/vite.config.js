@@ -42,7 +42,16 @@ function bsGamma(S, K, T, sigma, r = 0.05) {
   const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
   return normalPDF(d1) / (S * sigma * Math.sqrt(T));
 }
-const ASSET_CLASS = { SPY: 'etf', QQQ: 'etf', IWM: 'etf', GLD: 'etf', TLT: 'etf' };
+const ETF_SET = new Set([
+  'SPY','QQQ','IWM','DIA','MDY','VOO','VTI','VEA','VWO',
+  'GLD','SLV','GDX','GDXJ','USO','UNG',
+  'TLT','HYG','LQD','IEF','SHY','AGG',
+  'XLF','XLK','XLE','XLV','XLI','XLU','XLP','XLB','XLRE','XLY','XLC',
+  'EEM','EFA','IEMG','KWEB','MCHI','EWJ','EWZ','EWY',
+  'ARKK','ARKG','ARKF','ARKW','ARKQ',
+  'TQQQ','SQQQ','SPXL','SPXU','UPRO','UVXY','VXX','SVXY',
+  'SMH','SOXX','IGV','CIBR','HACK','LABU','LABD','FAS','FAZ','SOXL','SOXS',
+]);
 function parseOI(s) { if (!s || s === '--') return 0; return parseInt(String(s).replace(/,/g, '')) || 0; }
 function parseDTE(expiryDate) {
   if (!expiryDate || expiryDate === '--') return 7;
@@ -64,7 +73,7 @@ function calcIV(closes) {
 }
 
 async function calcGamma(symbol, filterExpiry) {
-  const assetclass = ASSET_CLASS[symbol] || 'stocks';
+  const assetclass = ETF_SET.has(symbol) ? 'etf' : 'stocks';
   const [priceData, optData] = await Promise.all([
     httpsGet(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1mo`),
     httpsGet(`https://api.nasdaq.com/api/quote/${symbol}/option-chain?assetclass=${assetclass}&limit=200&expiryoption=allWeeks&callput=callput`,
