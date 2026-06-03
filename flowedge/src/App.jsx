@@ -364,6 +364,80 @@ function AlertsPanel({ stocks }) {
   );
 }
 
+function KingNodeLadder({ spot, kingNodes, impliedVol }) {
+  if (!spot || !kingNodes?.length) return null;
+
+  const all = [spot, ...kingNodes.map(n => n.strike)];
+  const pad = Math.max((Math.max(...all) - Math.min(...all)) * 0.10, spot * 0.004);
+  const hi = Math.max(...all) + pad;
+  const lo = Math.min(...all) - pad;
+  const range = hi - lo || 1;
+
+  const W = 300, H = 240, LEFT = 46, RIGHT = 72;
+  const chartW = W - LEFT - RIGHT;
+  const toY = p => ((hi - p) / range) * H;
+
+  const iv = (impliedVol || 20) / 100;
+  const sigma = spot * iv * Math.sqrt(7 / 365);
+  const upper1 = spot + sigma;
+  const lower1 = spot - sigma;
+
+  const nearest = [...kingNodes].sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot))[0];
+
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block", overflow: "visible" }}>
+      {/* Expected 7-day move band */}
+      <rect
+        x={LEFT} y={Math.max(0, toY(Math.min(upper1, hi)))}
+        width={chartW}
+        height={Math.abs(toY(Math.max(lower1, lo)) - toY(Math.min(upper1, hi)))}
+        fill="rgba(99,102,241,0.07)"
+      />
+      <line x1={LEFT} y1={toY(Math.min(upper1, hi))} x2={LEFT + chartW} y2={toY(Math.min(upper1, hi))}
+        stroke="rgba(99,102,241,0.3)" strokeWidth={0.8} strokeDasharray="3,2" />
+      <line x1={LEFT} y1={toY(Math.max(lower1, lo))} x2={LEFT + chartW} y2={toY(Math.max(lower1, lo))}
+        stroke="rgba(99,102,241,0.3)" strokeWidth={0.8} strokeDasharray="3,2" />
+      <text x={LEFT + chartW / 2} y={toY(Math.min(upper1, hi)) - 3}
+        textAnchor="middle" fontSize={7} fill="rgba(139,92,246,0.7)" fontFamily="monospace">+1σ 7d</text>
+      <text x={LEFT + chartW / 2} y={toY(Math.max(lower1, lo)) + 9}
+        textAnchor="middle" fontSize={7} fill="rgba(139,92,246,0.7)" fontFamily="monospace">-1σ 7d</text>
+
+      {/* King node lines */}
+      {kingNodes.map((node, i) => {
+        const y = toY(node.strike);
+        const isTarget = node.strike === nearest?.strike;
+        return (
+          <g key={node.strike}>
+            <line x1={LEFT} y1={y} x2={LEFT + chartW} y2={y}
+              stroke={isTarget ? "#eab308" : "#78350f"}
+              strokeWidth={isTarget ? 1.5 : 1}
+              strokeDasharray={isTarget ? "none" : "4,3"} />
+            <text x={LEFT - 4} y={y + 3.5} textAnchor="end" fontSize={8}
+              fill={isTarget ? "#eab308" : "#a16207"} fontFamily="monospace" fontWeight={isTarget ? "bold" : "normal"}>
+              {node.strike % 1 === 0 ? node.strike.toFixed(0) : node.strike.toFixed(1)}
+            </text>
+            <text x={LEFT + chartW + 5} y={y + 3.5} fontSize={8}
+              fill={isTarget ? "#eab308" : "#a16207"} fontFamily="monospace">
+              {isTarget ? "♛ TARGET" : `♛ #${i + 1}`}
+            </text>
+          </g>
+        );
+      })}
+
+      {/* Spot price line */}
+      <line x1={LEFT} y1={toY(spot)} x2={LEFT + chartW} y2={toY(spot)}
+        stroke="#f9fafb" strokeWidth={2} />
+      <text x={LEFT - 4} y={toY(spot) + 3.5} textAnchor="end" fontSize={8}
+        fill="#f9fafb" fontFamily="monospace" fontWeight="bold">
+        {spot.toFixed(spot >= 100 ? 1 : 2)}
+      </text>
+      <text x={LEFT + chartW + 5} y={toY(spot) + 3.5} fontSize={8} fill="#9ca3af" fontFamily="monospace">
+        SPOT
+      </text>
+    </svg>
+  );
+}
+
 function GammaPanel({ stocks }) {
   const [symbol, setSymbol] = useState("SPY");
   const [expiry, setExpiry] = useState(null);
@@ -550,6 +624,34 @@ function GammaPanel({ stocks }) {
                   </div>
                 );
               })}
+
+              {/* King node price ladder chart */}
+              {data.kingNodes?.length > 0 && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(234,179,8,0.15)" }}>
+                  <div style={{ fontSize: 9, color: "#a16207", letterSpacing: "0.08em", marginBottom: 6 }}>
+                    PRICE LADDER · 7-DAY EXPECTED RANGE
+                  </div>
+                  <KingNodeLadder spot={spot} kingNodes={data.kingNodes} impliedVol={data.impliedVol} />
+                  {(() => {
+                    const above = data.kingNodes.filter(n => n.strike > spot).sort((a, b) => a.strike - b.strike)[0];
+                    const below = data.kingNodes.filter(n => n.strike < spot).sort((a, b) => b.strike - a.strike)[0];
+                    return (
+                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
+                        {above && (
+                          <span style={{ fontSize: 9, fontFamily: "monospace", color: "#a5b4fc" }}>
+                            ▲ ${above.strike % 1 === 0 ? above.strike.toFixed(0) : above.strike.toFixed(1)} ({((above.strike - spot) / spot * 100).toFixed(1)}%)
+                          </span>
+                        )}
+                        {below && (
+                          <span style={{ fontSize: 9, fontFamily: "monospace", color: "#f87171" }}>
+                            ▼ ${below.strike % 1 === 0 ? below.strike.toFixed(0) : below.strike.toFixed(1)} ({((below.strike - spot) / spot * 100).toFixed(1)}%)
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
             </div>
           )}
 
