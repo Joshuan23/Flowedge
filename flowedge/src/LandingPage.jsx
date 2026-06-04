@@ -46,8 +46,9 @@ export default function LandingPage() {
 
       {/* Nav */}
       <nav style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 24px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-        <div style={{ fontSize: 18, fontWeight: 900, letterSpacing: '-0.5px', background: 'linear-gradient(135deg,#6366f1,#a78bfa)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-          FlowEdge
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <img src="/icons/logo.png" alt="FlowEdge" style={{ width: 36, height: 36, borderRadius: 8 }} />
+          <span style={{ fontSize: 18, fontWeight: 900, letterSpacing: '-0.5px', background: 'linear-gradient(135deg,#6366f1,#a78bfa)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>FlowEdge</span>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <SignInButton mode="modal">
@@ -172,8 +173,9 @@ export default function LandingPage() {
 
       {/* Footer */}
       <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', padding: '20px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ fontSize: 14, fontWeight: 900, background: 'linear-gradient(135deg,#6366f1,#a78bfa)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-          FlowEdge
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <img src="/icons/logo.png" alt="FlowEdge" style={{ width: 24, height: 24, borderRadius: 6 }} />
+          <span style={{ fontSize: 14, fontWeight: 900, background: 'linear-gradient(135deg,#6366f1,#a78bfa)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>FlowEdge</span>
         </div>
         <div style={{ fontSize: 12, color: '#1f2937' }}>© 2026 FlowEdge</div>
       </div>

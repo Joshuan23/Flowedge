@@ -977,11 +977,7 @@ export default function App() {
         background: "rgba(255,255,255,0.02)",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{
-            width: 30, height: 30, borderRadius: 8,
-            background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
-            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15,
-          }}>⬡</div>
+          <img src="/icons/logo.png" alt="FlowEdge" style={{ width: 34, height: 34, borderRadius: 8 }} />
           <div>
             <div style={{ fontWeight: 800, fontSize: 15, letterSpacing: "-0.02em" }}>FlowEdge</div>
             <div style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em" }}>INSTITUTIONAL INTELLIGENCE</div>
