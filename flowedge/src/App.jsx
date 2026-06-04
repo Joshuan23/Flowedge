@@ -623,6 +623,24 @@ function GammaPanel({ stocks }) {
   const fmtP = n => n != null ? `$${n % 1 === 0 ? n.toFixed(0) : n.toFixed(2)}` : "—";
   const rrColor = rr => rr >= 2 ? "#10b981" : rr >= 1.5 ? "#f59e0b" : "#ef4444";
 
+  // Determine highest-probability direction from bias score + P/C + GEX regime
+  const bias = data?.biasScore ?? 0;
+  const pcAdj = (() => {
+    const pc = parseFloat(data?.pcVolumeRatio ?? 1);
+    if (pc < 0.7) return 0.1;
+    if (pc > 1.0) return -0.1;
+    return 0;
+  })();
+  const gexAdj = (data?.netGex ?? 0) >= 0 ? 0.05 : -0.05;
+  const composite = Math.max(-1, Math.min(1, bias + pcAdj + gexAdj));
+  const longProb = Math.round(((composite + 1) / 2) * 100);
+  const showLong = longProb >= 50;
+  const setupProb = Math.min(85, Math.max(52, showLong ? longProb : 100 - longProb));
+  const activeNode = showLong ? data?.buyKingNode : data?.sellKingNode;
+  const activeTP = showLong ? buyTP : sellTP;
+  const activeSL = showLong ? buySL : sellSL;
+  const activeRR = showLong ? buyRR : sellRR;
+
   const selectStyle = {
     background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
     borderRadius: 6, padding: "7px 10px", color: "#f9fafb", fontSize: 12,
@@ -704,58 +722,64 @@ function GammaPanel({ stocks }) {
             )}
           </div>
 
-          {/* v2.4 — Precise entry / TP / SL */}
-          {(buyTP || sellTP) && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-
-              {/* Long setup */}
-              {buyTP && buySL && (
-                <div style={{ padding: "10px 12px", borderRadius: 8, background: "rgba(16,185,129,0.05)", border: "1px solid rgba(16,185,129,0.2)" }}>
-                  <div style={{ fontSize: 9, color: "#10b981", fontWeight: 800, letterSpacing: "0.1em", marginBottom: 8 }}>▲ LONG SETUP</div>
-                  {[
-                    { label: "Entry", val: spot, pct: null, color: "#f9fafb" },
-                    { label: "TP", val: buyTP, pct: `+${data.buyKingNode.distancePct}%`, color: "#10b981" },
-                    { label: "SL", val: buySL, pct: `-${((spot - buySL) / spot * 100).toFixed(1)}%`, color: "#ef4444" },
-                  ].map(({ label, val, pct, color }) => (
-                    <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
-                      <span style={{ fontSize: 9, color: "#4b5563", width: 28 }}>{label}</span>
-                      <span style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 700, color }}>{fmtP(val)}</span>
-                      {pct && <span style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace" }}>{pct}</span>}
-                    </div>
-                  ))}
-                  {buyRR && (
-                    <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span style={{ fontSize: 8, color: "#4b5563" }}>R:R</span>
-                      <span style={{ fontSize: 11, fontFamily: "monospace", fontWeight: 800, color: rrColor(buyRR) }}>{buyRR} : 1</span>
-                    </div>
-                  )}
+          {/* v2.4 — Single highest-probability trade setup */}
+          {activeNode && activeTP && activeSL && (
+            <div style={{
+              padding: "12px 14px", borderRadius: 8,
+              background: showLong ? "rgba(16,185,129,0.05)" : "rgba(239,68,68,0.05)",
+              border: `1px solid ${showLong ? "rgba(16,185,129,0.2)" : "rgba(239,68,68,0.2)"}`,
+            }}>
+              {/* Header: direction label + probability % */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <span style={{ fontSize: 10, color: showLong ? "#10b981" : "#ef4444", fontWeight: 800, letterSpacing: "0.1em" }}>
+                  {showLong ? "▲ LONG SETUP" : "▼ SHORT SETUP"}
+                </span>
+                <div style={{ textAlign: "right" }}>
+                  <span style={{ fontSize: 20, fontFamily: "monospace", fontWeight: 800, color: showLong ? "#10b981" : "#ef4444" }}>
+                    {setupProb}%
+                  </span>
+                  <span style={{ fontSize: 9, color: "#4b5563", marginLeft: 4 }}>likely</span>
+                </div>
+              </div>
+              {/* Confidence bar */}
+              <div style={{ height: 3, background: "rgba(255,255,255,0.06)", borderRadius: 2, marginBottom: 12 }}>
+                <div style={{
+                  width: `${setupProb}%`, height: "100%", borderRadius: 2,
+                  background: showLong
+                    ? "linear-gradient(90deg, #10b98155, #10b981)"
+                    : "linear-gradient(90deg, #ef444455, #ef4444)",
+                  transition: "width 0.6s ease",
+                }} />
+              </div>
+              {/* Entry / TP / SL rows */}
+              {[
+                { label: "Entry", val: spot, pct: null, color: "#f9fafb" },
+                {
+                  label: "TP", val: activeTP,
+                  pct: showLong ? `+${activeNode.distancePct}%` : `-${activeNode.distancePct}%`,
+                  color: "#10b981",
+                },
+                {
+                  label: "SL", val: activeSL,
+                  pct: showLong
+                    ? `-${((spot - activeSL) / spot * 100).toFixed(1)}%`
+                    : `+${((activeSL - spot) / spot * 100).toFixed(1)}%`,
+                  color: "#ef4444",
+                },
+              ].map(({ label, val, pct, color }) => (
+                <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 }}>
+                  <span style={{ fontSize: 9, color: "#4b5563", width: 32, flexShrink: 0 }}>{label}</span>
+                  <span style={{ fontSize: 15, fontFamily: "monospace", fontWeight: 700, color }}>{fmtP(val)}</span>
+                  <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace", minWidth: 40, textAlign: "right" }}>{pct ?? ""}</span>
+                </div>
+              ))}
+              {/* R:R */}
+              {activeRR && (
+                <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 9, color: "#4b5563" }}>Risk : Reward</span>
+                  <span style={{ fontSize: 12, fontFamily: "monospace", fontWeight: 800, color: rrColor(activeRR) }}>{activeRR} : 1</span>
                 </div>
               )}
-
-              {/* Short setup */}
-              {sellTP && sellSL && (
-                <div style={{ padding: "10px 12px", borderRadius: 8, background: "rgba(239,68,68,0.05)", border: "1px solid rgba(239,68,68,0.2)" }}>
-                  <div style={{ fontSize: 9, color: "#ef4444", fontWeight: 800, letterSpacing: "0.1em", marginBottom: 8 }}>▼ SHORT SETUP</div>
-                  {[
-                    { label: "Entry", val: spot, pct: null, color: "#f9fafb" },
-                    { label: "TP", val: sellTP, pct: `-${data.sellKingNode.distancePct}%`, color: "#10b981" },
-                    { label: "SL", val: sellSL, pct: `+${((sellSL - spot) / spot * 100).toFixed(1)}%`, color: "#ef4444" },
-                  ].map(({ label, val, pct, color }) => (
-                    <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
-                      <span style={{ fontSize: 9, color: "#4b5563", width: 28 }}>{label}</span>
-                      <span style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 700, color }}>{fmtP(val)}</span>
-                      {pct && <span style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace" }}>{pct}</span>}
-                    </div>
-                  ))}
-                  {sellRR && (
-                    <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span style={{ fontSize: 8, color: "#4b5563" }}>R:R</span>
-                      <span style={{ fontSize: 11, fontFamily: "monospace", fontWeight: 800, color: rrColor(sellRR) }}>{sellRR} : 1</span>
-                    </div>
-                  )}
-                </div>
-              )}
-
             </div>
           )}
 
