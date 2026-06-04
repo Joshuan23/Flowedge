@@ -543,7 +543,14 @@ function OIHeatMap({ heatmap, spot, buyKingNode, sellKingNode }) {
   );
 }
 
+const CLERK_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+
 function ProGate({ children }) {
+  if (!CLERK_KEY) return children;
+  return <ProGateInner>{children}</ProGateInner>;
+}
+
+function ProGateInner({ children }) {
   const { isSignedIn, user, isLoaded } = useUser();
   const { getToken } = useAuth();
   const [checkingOut, setCheckingOut] = useState(false);
@@ -997,7 +1004,7 @@ export default function App() {
             borderRadius: 6, padding: "6px 14px", color: "#9ca3af", fontSize: 11,
             cursor: "pointer", fontWeight: 600,
           }}>↻ Refresh</button>
-          <UserButton afterSignOutUrl="/" appearance={{ elements: { avatarBox: { width: 28, height: 28 } } }} />
+          {CLERK_KEY && <UserButton afterSignOutUrl="/" appearance={{ elements: { avatarBox: { width: 28, height: 28 } } }} />}
         </div>
       </div>
 
