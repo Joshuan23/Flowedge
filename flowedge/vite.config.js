@@ -97,10 +97,12 @@ async function calcGamma(symbol, filterExpiry) {
     const cOI = parseOI(row.c_Openinterest), pOI = parseOI(row.p_Openinterest);
     const cVol = parseOI(row.c_Volume), pVol = parseOI(row.p_Volume);
     totalCallVol += cVol; totalPutVol += pVol;
-    if (!strikeMap[k]) strikeMap[k] = { strike: k, callOI: 0, putOI: 0, callVol: 0, putVol: 0, gex: 0, expiryDate: row.expiryDate, dte };
+    if (!strikeMap[k]) strikeMap[k] = { strike: k, callOI: 0, putOI: 0, callVol: 0, putVol: 0, gex: 0, callGex: 0, putGex: 0, expiryDate: row.expiryDate, dte };
     strikeMap[k].callOI += cOI; strikeMap[k].putOI += pOI;
     strikeMap[k].callVol += cVol; strikeMap[k].putVol += pVol;
     strikeMap[k].gex += (cOI - pOI) * gamma * 100 * spot;
+    strikeMap[k].callGex += cOI * gamma * 100 * spot;
+    strikeMap[k].putGex += pOI * gamma * 100 * spot;
   }
   const gexByStrike = Object.values(strikeMap).sort((a, b) => a.strike - b.strike);
   if (!gexByStrike.length) throw new Error('No options data');
@@ -113,11 +115,23 @@ async function calcGamma(symbol, filterExpiry) {
   const flipCandidate = gexByStrike.find(x => x.gex > 0 && x.strike >= spot * 0.92);
   const flipLevel = flipCandidate?.strike ?? null;
   const pcVolumeRatio = totalCallVol > 0 ? (totalPutVol / totalCallVol).toFixed(2) : null;
-  const kingNodes = [...gexByStrike]
-    .filter(x => x.callOI > 0 && x.putOI > 0)
-    .map(x => ({ strike: x.strike, balancedOI: Math.min(x.callOI, x.putOI), callOI: x.callOI, putOI: x.putOI }))
-    .sort((a, b) => b.balancedOI - a.balancedOI)
-    .slice(0, 5);
+  const scoreNode = (x, side) => {
+    const gexSide = side === 'buy' ? x.callGex : x.putGex;
+    const vol = side === 'buy' ? x.callVol : x.putVol;
+    return gexSide * (1 + Math.log1p(vol));
+  };
+  const buyKingNode = gexByStrike
+    .filter(x => x.strike > spot && x.callGex > 0)
+    .map(x => ({ ...x, score: scoreNode(x, 'buy') }))
+    .sort((a, b) => b.score - a.score)[0] ?? null;
+  const sellKingNode = gexByStrike
+    .filter(x => x.strike < spot && x.putGex > 0)
+    .map(x => ({ ...x, score: scoreNode(x, 'sell') }))
+    .sort((a, b) => b.score - a.score)[0] ?? null;
+  if (buyKingNode) buyKingNode.distancePct = +((buyKingNode.strike - spot) / spot * 100).toFixed(2);
+  if (sellKingNode) sellKingNode.distancePct = +((spot - sellKingNode.strike) / spot * 100).toFixed(2);
+  const totalScore = (buyKingNode?.score ?? 0) + (sellKingNode?.score ?? 0);
+  const biasScore = totalScore > 0 ? ((buyKingNode?.score ?? 0) - (sellKingNode?.score ?? 0)) / totalScore : 0;
   // Heatmap
   const heatRaw = {};
   for (const row of rows) {
@@ -148,7 +162,7 @@ async function calcGamma(symbol, filterExpiry) {
     strikes: heatStrikes,
     cells: heatCells.filter(c => heatExpiries.includes(c.expiry) && heatStrikes.includes(c.strike)),
   };
-  return { symbol, spot, netGex, gammaWall, putWall, callWall, flipLevel, totalCallVol, totalPutVol, pcVolumeRatio, availableExpiries, impliedVol: parseFloat((sigma * 100).toFixed(1)), gexByStrike, kingNodes, heatmap };
+  return { symbol, spot, netGex, gammaWall, putWall, callWall, flipLevel, totalCallVol, totalPutVol, pcVolumeRatio, availableExpiries, impliedVol: parseFloat((sigma * 100).toFixed(1)), gexByStrike, buyKingNode, sellKingNode, biasScore, heatmap };
 }
 
 export default defineConfig({

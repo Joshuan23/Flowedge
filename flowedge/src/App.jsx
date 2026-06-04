@@ -448,7 +448,7 @@ function AlertsPanel({ stocks }) {
   );
 }
 
-function OIHeatMap({ heatmap, spot, kingNodes }) {
+function OIHeatMap({ heatmap, spot, buyKingNode, sellKingNode }) {
   if (!heatmap?.cells?.length) return null;
 
   const { expiries, strikes, cells } = heatmap;
@@ -459,7 +459,6 @@ function OIHeatMap({ heatmap, spot, kingNodes }) {
   });
 
   const maxAbs = Math.max(...cells.map(c => Math.abs(c.gex || 0)), 1);
-  const kingSet = new Set((kingNodes || []).map(n => n.strike));
   const sortedStrikes = [...strikes].sort((a, b) => b - a);
 
   const abbrevExp = (exp) => {
@@ -503,13 +502,14 @@ function OIHeatMap({ heatmap, spot, kingNodes }) {
         <tbody>
           {sortedStrikes.map(strike => {
             const isSpot = spot && Math.abs(strike - spot) < 2.5;
-            const isKing = kingSet.has(strike);
-            const rowBg = isKing ? 'rgba(234,179,8,0.07)' : isSpot ? 'rgba(245,158,11,0.07)' : 'transparent';
-            const strikeColor = isKing ? '#eab308' : isSpot ? '#f59e0b' : '#6b7280';
+            const isBuyKing = strike === buyKingNode?.strike;
+            const isSellKing = strike === sellKingNode?.strike;
+            const rowBg = isBuyKing ? 'rgba(16,185,129,0.08)' : isSellKing ? 'rgba(239,68,68,0.08)' : isSpot ? 'rgba(245,158,11,0.07)' : 'transparent';
+            const strikeColor = isBuyKing ? '#10b981' : isSellKing ? '#ef4444' : isSpot ? '#f59e0b' : '#6b7280';
             return (
               <tr key={strike} style={{ background: rowBg }}>
-                <td style={{ padding: '2px 4px', textAlign: 'right', color: strikeColor, fontWeight: isKing || isSpot ? 700 : 400, borderRight: '1px solid rgba(255,255,255,0.05)', whiteSpace: 'nowrap' }}>
-                  {isKing && <span style={{ marginRight: 2 }}>♛</span>}
+                <td style={{ padding: '2px 4px', textAlign: 'right', color: strikeColor, fontWeight: isBuyKing || isSellKing || isSpot ? 700 : 400, borderRight: '1px solid rgba(255,255,255,0.05)', whiteSpace: 'nowrap' }}>
+                  {(isBuyKing || isSellKing) && <span style={{ marginRight: 2 }}>♛</span>}
                   {strike % 1 === 0 ? strike.toFixed(0) : strike.toFixed(1)}
                 </td>
                 {expiries.map(exp => {
@@ -588,7 +588,8 @@ function GammaPanel({ stocks }) {
   const gexList = data?.gexByStrike || [];
   const maxAbsGex = gexList.reduce((m, x) => Math.max(m, Math.abs(x.gex)), 1);
   const maxVol = gexList.reduce((m, x) => Math.max(m, x.callVol + x.putVol), 1);
-  const kingNodeStrikes = new Set((data?.kingNodes || []).map(x => x.strike));
+  const buyStrike = data?.buyKingNode?.strike ?? null;
+  const sellStrike = data?.sellKingNode?.strike ?? null;
 
   const signal = (() => {
     if (!data) return null;
@@ -712,40 +713,72 @@ function GammaPanel({ stocks }) {
             ))}
           </div>
 
-          {/* King Nodes */}
-          {data.kingNodes?.length > 0 && (
-            <div style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(234,179,8,0.04)", border: "1px solid rgba(234,179,8,0.2)" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
-                <span style={{ fontSize: 12 }}>♛</span>
-                <span style={{ fontSize: 10, color: "#eab308", letterSpacing: "0.1em", fontWeight: 700 }}>KING NODES</span>
-                <span style={{ fontSize: 9, color: "#4b5563", marginLeft: 2 }}>highest two-sided OI — strongest pin levels</span>
-              </div>
-              {data.kingNodes.map((node, i) => {
-                const isAbove = node.strike > spot;
-                const distPct = spot ? (((node.strike - spot) / spot) * 100).toFixed(1) : null;
-                return (
-                  <div key={node.strike} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <span style={{ fontSize: 9, color: "#eab308", fontWeight: 700, width: 12 }}>#{i + 1}</span>
-                      <span style={{ fontSize: 12, fontFamily: "monospace", color: "#eab308", fontWeight: 700 }}>
-                        ${node.strike % 1 === 0 ? node.strike.toFixed(0) : node.strike.toFixed(1)}
-                      </span>
-                      {distPct && (
-                        <span style={{ fontSize: 9, color: isAbove ? "#a5b4fc" : "#f87171" }}>
-                          {isAbove ? "▲" : "▼"} {Math.abs(distPct)}%
-                        </span>
-                      )}
+          {/* Directional King Nodes */}
+          {(data.buyKingNode || data.sellKingNode) && (() => {
+            const bias = data.biasScore ?? 0;
+            const biasPct = Math.round(Math.abs(bias) * 100);
+            const biasLabel = Math.abs(bias) < 0.15 ? "NEUTRAL" : bias > 0 ? "BULLISH" : "BEARISH";
+            const biasColor = Math.abs(bias) < 0.15 ? "#6b7280" : bias > 0 ? "#10b981" : "#ef4444";
+            const fmtS = n => n % 1 === 0 ? n.toFixed(0) : n.toFixed(1);
+            const nodeCard = (node, side) => {
+              if (!node) return <div />;
+              const isUp = side === 'buy';
+              const accent = isUp ? "#10b981" : "#ef4444";
+              const bg = isUp ? "rgba(16,185,129,0.05)" : "rgba(239,68,68,0.05)";
+              const border = isUp ? "rgba(16,185,129,0.25)" : "rgba(239,68,68,0.25)";
+              return (
+                <div style={{ padding: "10px 12px", borderRadius: 8, background: bg, border: `1px solid ${border}`, flex: 1 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                    <span style={{ fontSize: 9, color: accent, fontWeight: 800, letterSpacing: "0.1em" }}>
+                      ♛ {isUp ? "BUY TARGET" : "SELL TARGET"}
+                    </span>
+                    <span style={{ fontSize: 9, color: isUp ? "#a5b4fc" : "#f87171", fontFamily: "monospace" }}>
+                      {isUp ? "▲" : "▼"} {node.distancePct}%
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 26, fontFamily: "monospace", fontWeight: 800, color: accent, marginBottom: 6 }}>
+                    ${fmtS(node.strike)}
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 9, fontFamily: "monospace" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ color: "#4b5563" }}>{isUp ? "Call" : "Put"} OI</span>
+                      <span style={{ color: accent }}>{fmtVol(isUp ? node.callOI : node.putOI)}</span>
                     </div>
-                    <div style={{ display: "flex", gap: 8, fontSize: 9, fontFamily: "monospace" }}>
-                      <span style={{ color: "#10b981" }}>{fmtVol(node.callOI)}c</span>
-                      <span style={{ color: "#ef4444" }}>{fmtVol(node.putOI)}p</span>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ color: "#4b5563" }}>{isUp ? "Call" : "Put"} Vol</span>
+                      <span style={{ color: accent }}>{fmtVol(isUp ? node.callVol : node.putVol)}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ color: "#4b5563" }}>GEX pressure</span>
+                      <span style={{ color: accent }}>{fmtGex(isUp ? node.callGex : node.putGex)}</span>
                     </div>
                   </div>
-                );
-              })}
-
-            </div>
-          )}
+                </div>
+              );
+            };
+            return (
+              <div style={{ borderRadius: 8, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.07)", overflow: "hidden" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                  <span style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em", fontWeight: 700 }}>♛ KING NODES — DIRECTIONAL TARGETS</span>
+                  <span style={{ fontSize: 10, fontWeight: 800, color: biasColor, fontFamily: "monospace" }}>
+                    {biasLabel} {biasPct > 0 ? `${biasPct}%` : ""}
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: 8, padding: "10px 10px" }}>
+                  {nodeCard(data.buyKingNode, 'buy')}
+                  {nodeCard(data.sellKingNode, 'sell')}
+                </div>
+                <div style={{ padding: "6px 12px 10px", fontSize: 10, color: "#4b5563", lineHeight: 1.6 }}>
+                  {Math.abs(bias) < 0.15
+                    ? `Call and put pressure near balanced. Price likely to chop between $${fmtS(data.sellKingNode?.strike ?? spot)} and $${fmtS(data.buyKingNode?.strike ?? spot)}.`
+                    : bias > 0
+                      ? `Call gamma dominant — dealers hedging drives price toward $${fmtS(data.buyKingNode.strike)}. Buy pressure identified.`
+                      : `Put gamma dominant — dealers hedging drives price toward $${fmtS(data.sellKingNode.strike)}. Sell pressure identified.`
+                  }
+                </div>
+              </div>
+            );
+          })()}
 
           {/* OI Heat Map */}
           {data.heatmap?.cells?.length > 0 && (
@@ -753,7 +786,7 @@ function GammaPanel({ stocks }) {
               <div style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em", marginBottom: 8 }}>
                 OI HEAT MAP — GEX PER STRIKE × EXPIRY
               </div>
-              <OIHeatMap heatmap={data.heatmap} spot={spot} kingNodes={data.kingNodes} />
+              <OIHeatMap heatmap={data.heatmap} spot={spot} buyKingNode={data.buyKingNode} sellKingNode={data.sellKingNode} />
             </div>
           )}
 
@@ -765,21 +798,23 @@ function GammaPanel({ stocks }) {
             <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 320, overflowY: "auto" }}>
               {[...gexList].reverse().map(row => {
                 const isSpot = spot && Math.abs(row.strike - spot) < 2.5;
-                const isKing = kingNodeStrikes.has(row.strike);
+                const isBuyKing = row.strike === buyStrike;
+                const isSellKing = row.strike === sellStrike;
                 const barPct = Math.max(1, (Math.abs(row.gex) / maxAbsGex) * 100);
                 const gexColor = row.gex >= 0 ? "#10b981" : "#ef4444";
                 const cVolPct = Math.max(0, (row.callVol / maxVol) * 100);
                 const pVolPct = Math.max(0, (row.putVol / maxVol) * 100);
+                const kingAccent = isBuyKing ? "#10b981" : isSellKing ? "#ef4444" : null;
                 return (
                   <div key={row.strike} style={{
-                    borderLeft: isKing ? "2px solid #eab308" : isSpot ? "2px solid #f59e0b" : "2px solid transparent",
-                    background: isKing ? "rgba(234,179,8,0.06)" : isSpot ? "rgba(245,158,11,0.06)" : "none",
+                    borderLeft: kingAccent ? `2px solid ${kingAccent}` : isSpot ? "2px solid #f59e0b" : "2px solid transparent",
+                    background: isBuyKing ? "rgba(16,185,129,0.06)" : isSellKing ? "rgba(239,68,68,0.06)" : isSpot ? "rgba(245,158,11,0.06)" : "none",
                     paddingLeft: 4, paddingBottom: 2,
                   }}>
                     {/* Strike + expiry date */}
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-                      <span style={{ fontSize: 10, fontFamily: "monospace", color: isKing ? "#eab308" : isSpot ? "#f59e0b" : "#6b7280", fontWeight: isKing || isSpot ? 700 : 400 }}>
-                        {isKing && <span style={{ marginRight: 3, fontSize: 8 }}>♛</span>}
+                      <span style={{ fontSize: 10, fontFamily: "monospace", color: kingAccent ?? (isSpot ? "#f59e0b" : "#6b7280"), fontWeight: (isBuyKing || isSellKing || isSpot) ? 700 : 400 }}>
+                        {(isBuyKing || isSellKing) && <span style={{ marginRight: 3, fontSize: 8 }}>♛</span>}
                         ${row.strike % 1 === 0 ? row.strike.toFixed(0) : row.strike.toFixed(1)}
                         {row.expiryDate ? <span style={{ fontSize: 9, color: "#374151", marginLeft: 5 }}>{row.expiryDate}</span> : null}
                       </span>

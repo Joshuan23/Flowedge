@@ -97,12 +97,14 @@ export default async function handler(req) {
       totalCallVol += cVol;
       totalPutVol += pVol;
 
-      if (!strikeMap[k]) strikeMap[k] = { strike: k, callOI: 0, putOI: 0, callVol: 0, putVol: 0, gex: 0, expiryDate: row.expiryDate, dte };
+      if (!strikeMap[k]) strikeMap[k] = { strike: k, callOI: 0, putOI: 0, callVol: 0, putVol: 0, gex: 0, callGex: 0, putGex: 0, expiryDate: row.expiryDate, dte };
       strikeMap[k].callOI += cOI;
       strikeMap[k].putOI += pOI;
       strikeMap[k].callVol += cVol;
       strikeMap[k].putVol += pVol;
       strikeMap[k].gex += gex;
+      strikeMap[k].callGex += cOI * gamma * 100 * spot;
+      strikeMap[k].putGex += pOI * gamma * 100 * spot;
     }
 
     const gexByStrike = Object.values(strikeMap).sort((a, b) => a.strike - b.strike);
@@ -120,12 +122,26 @@ export default async function handler(req) {
     const flipLevel = flipCandidate?.strike ?? null;
     const pcVolumeRatio = totalCallVol > 0 ? (totalPutVol / totalCallVol).toFixed(2) : null;
 
-    // King nodes: strikes with high OI on BOTH sides — strongest pinning levels
-    const kingNodes = [...gexByStrike]
-      .filter(x => x.callOI > 0 && x.putOI > 0)
-      .map(x => ({ strike: x.strike, balancedOI: Math.min(x.callOI, x.putOI), callOI: x.callOI, putOI: x.putOI }))
-      .sort((a, b) => b.balancedOI - a.balancedOI)
-      .slice(0, 5);
+    // Directional king nodes — one buy target (above spot), one sell target (below spot)
+    // Score = gamma-weighted OI × log-boosted today's volume (fresh conviction)
+    const scoreNode = (x, side) => {
+      const gexSide = side === 'buy' ? x.callGex : x.putGex;
+      const vol = side === 'buy' ? x.callVol : x.putVol;
+      return gexSide * (1 + Math.log1p(vol));
+    };
+    const buyKingNode = gexByStrike
+      .filter(x => x.strike > spot && x.callGex > 0)
+      .map(x => ({ ...x, score: scoreNode(x, 'buy') }))
+      .sort((a, b) => b.score - a.score)[0] ?? null;
+    const sellKingNode = gexByStrike
+      .filter(x => x.strike < spot && x.putGex > 0)
+      .map(x => ({ ...x, score: scoreNode(x, 'sell') }))
+      .sort((a, b) => b.score - a.score)[0] ?? null;
+    if (buyKingNode) buyKingNode.distancePct = +((buyKingNode.strike - spot) / spot * 100).toFixed(2);
+    if (sellKingNode) sellKingNode.distancePct = +((spot - sellKingNode.strike) / spot * 100).toFixed(2);
+    // Normalised bias: +1 fully bullish, -1 fully bearish
+    const totalScore = (buyKingNode?.score ?? 0) + (sellKingNode?.score ?? 0);
+    const biasScore = totalScore > 0 ? ((buyKingNode?.score ?? 0) - (sellKingNode?.score ?? 0)) / totalScore : 0;
 
     // Heatmap: per-(strike, expiry) GEX, independent of expiry filter
     const heatRaw = {};
@@ -165,7 +181,7 @@ export default async function handler(req) {
       symbol, spot, netGex, gammaWall, putWall, callWall, flipLevel,
       totalCallVol, totalPutVol, pcVolumeRatio,
       availableExpiries, impliedVol: parseFloat((sigma * 100).toFixed(1)),
-      gexByStrike, kingNodes, heatmap,
+      gexByStrike, buyKingNode, sellKingNode, biasScore, heatmap,
     }), {
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
     });
