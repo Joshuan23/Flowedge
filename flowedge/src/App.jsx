@@ -601,6 +601,28 @@ function GammaPanel({ stocks }) {
 
   const spot = data?.spot;
 
+  // v2.4 — derive entry/TP/SL from king nodes + key levels
+  const buyTP = data?.buyKingNode?.strike ?? null;
+  const sellTP = data?.sellKingNode?.strike ?? null;
+  const buySL = (() => {
+    if (!spot || !buyTP) return null;
+    const pw = data?.putWall;
+    if (pw && pw < spot && (spot - pw) < (buyTP - spot) * 3) return pw;
+    return +(spot - (buyTP - spot) * 0.5).toFixed(2);
+  })();
+  const sellSL = (() => {
+    if (!spot || !sellTP) return null;
+    const cw = data?.callWall;
+    if (cw && cw > spot && (cw - spot) < (spot - sellTP) * 3) return cw;
+    return +(spot + (spot - sellTP) * 0.5).toFixed(2);
+  })();
+  const buyRR = spot && buyTP && buySL && spot > buySL
+    ? +((buyTP - spot) / (spot - buySL)).toFixed(2) : null;
+  const sellRR = spot && sellTP && sellSL && sellSL > spot
+    ? +((spot - sellTP) / (sellSL - spot)).toFixed(2) : null;
+  const fmtP = n => n != null ? `$${n % 1 === 0 ? n.toFixed(0) : n.toFixed(2)}` : "—";
+  const rrColor = rr => rr >= 2 ? "#10b981" : rr >= 1.5 ? "#f59e0b" : "#ef4444";
+
   const selectStyle = {
     background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
     borderRadius: 6, padding: "7px 10px", color: "#f9fafb", fontSize: 12,
@@ -681,6 +703,61 @@ function GammaPanel({ stocks }) {
               </span>
             )}
           </div>
+
+          {/* v2.4 — Precise entry / TP / SL */}
+          {(buyTP || sellTP) && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+
+              {/* Long setup */}
+              {buyTP && buySL && (
+                <div style={{ padding: "10px 12px", borderRadius: 8, background: "rgba(16,185,129,0.05)", border: "1px solid rgba(16,185,129,0.2)" }}>
+                  <div style={{ fontSize: 9, color: "#10b981", fontWeight: 800, letterSpacing: "0.1em", marginBottom: 8 }}>▲ LONG SETUP</div>
+                  {[
+                    { label: "Entry", val: spot, pct: null, color: "#f9fafb" },
+                    { label: "TP", val: buyTP, pct: `+${data.buyKingNode.distancePct}%`, color: "#10b981" },
+                    { label: "SL", val: buySL, pct: `-${((spot - buySL) / spot * 100).toFixed(1)}%`, color: "#ef4444" },
+                  ].map(({ label, val, pct, color }) => (
+                    <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
+                      <span style={{ fontSize: 9, color: "#4b5563", width: 28 }}>{label}</span>
+                      <span style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 700, color }}>{fmtP(val)}</span>
+                      {pct && <span style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace" }}>{pct}</span>}
+                    </div>
+                  ))}
+                  {buyRR && (
+                    <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontSize: 8, color: "#4b5563" }}>R:R</span>
+                      <span style={{ fontSize: 11, fontFamily: "monospace", fontWeight: 800, color: rrColor(buyRR) }}>{buyRR} : 1</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Short setup */}
+              {sellTP && sellSL && (
+                <div style={{ padding: "10px 12px", borderRadius: 8, background: "rgba(239,68,68,0.05)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                  <div style={{ fontSize: 9, color: "#ef4444", fontWeight: 800, letterSpacing: "0.1em", marginBottom: 8 }}>▼ SHORT SETUP</div>
+                  {[
+                    { label: "Entry", val: spot, pct: null, color: "#f9fafb" },
+                    { label: "TP", val: sellTP, pct: `-${data.sellKingNode.distancePct}%`, color: "#10b981" },
+                    { label: "SL", val: sellSL, pct: `+${((sellSL - spot) / spot * 100).toFixed(1)}%`, color: "#ef4444" },
+                  ].map(({ label, val, pct, color }) => (
+                    <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
+                      <span style={{ fontSize: 9, color: "#4b5563", width: 28 }}>{label}</span>
+                      <span style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 700, color }}>{fmtP(val)}</span>
+                      {pct && <span style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace" }}>{pct}</span>}
+                    </div>
+                  ))}
+                  {sellRR && (
+                    <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontSize: 8, color: "#4b5563" }}>R:R</span>
+                      <span style={{ fontSize: 11, fontFamily: "monospace", fontWeight: 800, color: rrColor(sellRR) }}>{sellRR} : 1</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+            </div>
+          )}
 
           {/* Heat map — king nodes highlighted as rows inside */}
           {data.heatmap?.cells?.length > 0 && (
