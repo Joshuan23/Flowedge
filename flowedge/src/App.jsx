@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useUser, useAuth, SignInButton, UserButton } from "@clerk/clerk-react";
 
 const DEFAULT_WATCHLIST = [
   "SPY","QQQ","IWM","NVDA","AAPL","MSFT","TSLA","META","AMZN","GOOGL",
@@ -542,6 +543,115 @@ function OIHeatMap({ heatmap, spot, buyKingNode, sellKingNode }) {
   );
 }
 
+function ProGate({ children }) {
+  const { isSignedIn, user, isLoaded } = useUser();
+  const { getToken } = useAuth();
+  const [checkingOut, setCheckingOut] = useState(false);
+  const [justUpgraded] = useState(() => new URLSearchParams(window.location.search).get('upgraded') === '1');
+
+  useEffect(() => {
+    if (justUpgraded) window.history.replaceState({}, '', '/');
+  }, [justUpgraded]);
+
+  const handleUpgrade = async () => {
+    setCheckingOut(true);
+    try {
+      const token = await getToken();
+      const res = await fetch('/api/create-checkout', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      });
+      const { url, error } = await res.json();
+      if (error) throw new Error(error);
+      window.location.href = url;
+    } catch (e) {
+      alert(e.message);
+      setCheckingOut(false);
+    }
+  };
+
+  const btnBase = {
+    width: '100%', border: 'none', borderRadius: 8, padding: '11px 0',
+    fontWeight: 800, fontSize: 13, cursor: 'pointer',
+  };
+
+  if (!isLoaded) {
+    return <div style={{ padding: 40, textAlign: 'center', color: '#4b5563', fontSize: 12 }}>Loading...</div>;
+  }
+
+  if (!isSignedIn) {
+    return (
+      <div style={{ padding: 32, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14 }}>
+        <div style={{ fontSize: 30 }}>🔒</div>
+        <div style={{ fontWeight: 800, fontSize: 14, color: '#f9fafb' }}>Sign in to access Gamma</div>
+        <p style={{ fontSize: 12, color: '#6b7280', textAlign: 'center', margin: 0 }}>
+          Options flow, gamma exposure &amp; precise trade setups
+        </p>
+        <SignInButton mode="modal">
+          <button style={{ ...btnBase, width: 'auto', padding: '10px 28px', background: '#6366f1', color: '#fff' }}>
+            Sign In / Create Account
+          </button>
+        </SignInButton>
+      </div>
+    );
+  }
+
+  if (justUpgraded && !user.publicMetadata?.isPro) {
+    return (
+      <div style={{ padding: 32, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14 }}>
+        <div style={{ fontSize: 30 }}>✅</div>
+        <div style={{ fontWeight: 800, fontSize: 14, color: '#10b981' }}>Payment successful!</div>
+        <p style={{ fontSize: 12, color: '#6b7280', textAlign: 'center', margin: 0 }}>
+          Your account is being activated. This takes a few seconds.
+        </p>
+        <button onClick={() => window.location.reload()} style={{ ...btnBase, width: 'auto', padding: '9px 24px', background: '#10b981', color: '#fff' }}>
+          Reload to access Pro →
+        </button>
+      </div>
+    );
+  }
+
+  if (!user.publicMetadata?.isPro) {
+    return (
+      <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ padding: '18px 16px', borderRadius: 10, background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.22)' }}>
+          <div style={{ fontSize: 10, color: '#a5b4fc', fontWeight: 800, letterSpacing: '0.1em', marginBottom: 12 }}>🔒 PRO FEATURE</div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: '#f9fafb', marginBottom: 12 }}>Gamma Intelligence</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginBottom: 18 }}>
+            {[
+              'Options flow heat map (strike × expiry)',
+              'Gamma exposure by strike',
+              'Precise entry · TP · SL',
+              'King node directional targets',
+              'Put / call pressure scoring',
+            ].map(f => (
+              <div key={f} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#9ca3af' }}>
+                <span style={{ color: '#10b981', flexShrink: 0 }}>✓</span>{f}
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 26, fontFamily: 'monospace', fontWeight: 800, color: '#f9fafb', marginBottom: 14 }}>
+            $19.99<span style={{ fontSize: 13, color: '#6b7280', fontWeight: 400 }}> / month</span>
+          </div>
+          <button onClick={handleUpgrade} disabled={checkingOut} style={{
+            ...btnBase,
+            background: checkingOut ? 'rgba(99,102,241,0.4)' : 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+            color: '#fff', opacity: checkingOut ? 0.8 : 1,
+            cursor: checkingOut ? 'wait' : 'pointer',
+          }}>
+            {checkingOut ? 'Redirecting to Stripe...' : 'Upgrade to Pro →'}
+          </button>
+          <p style={{ fontSize: 10, color: '#374151', textAlign: 'center', margin: '10px 0 0' }}>
+            Cancel anytime · Secured by Stripe
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return children;
+}
+
 const TICKER_GROUPS = [
   { label: "ETFs — Broad Market", tickers: ["SPY","QQQ","IWM","DIA","MDY","VOO","VTI"] },
   { label: "ETFs — Sector", tickers: ["XLF","XLK","XLE","XLV","XLI","XLU","XLP","XLB","XLRE","XLY","XLC"] },
@@ -887,6 +997,7 @@ export default function App() {
             borderRadius: 6, padding: "6px 14px", color: "#9ca3af", fontSize: 11,
             cursor: "pointer", fontWeight: 600,
           }}>↻ Refresh</button>
+          <UserButton afterSignOutUrl="/" appearance={{ elements: { avatarBox: { width: 28, height: 28 } } }} />
         </div>
       </div>
 
@@ -986,7 +1097,7 @@ export default function App() {
                 )}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                 {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
-                {tab === "Gamma" && <GammaPanel stocks={stocks} />}
+                {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
               </div>
             </div>
           </div>
