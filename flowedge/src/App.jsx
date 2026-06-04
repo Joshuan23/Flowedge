@@ -646,7 +646,7 @@ function ProGateInner({ children }) {
             color: '#fff', opacity: checkingOut ? 0.8 : 1,
             cursor: checkingOut ? 'wait' : 'pointer',
           }}>
-            {checkingOut ? 'Redirecting to Stripe...' : 'Upgrade to Pro →'}
+            {checkingOut ? 'Redirecting to Stripe...' : 'Start 7-Day Free Trial →'}
           </button>
           <p style={{ fontSize: 10, color: '#374151', textAlign: 'center', margin: '10px 0 0' }}>
             Cancel anytime · Secured by Stripe

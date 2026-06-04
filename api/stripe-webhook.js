@@ -35,7 +35,8 @@ export default async function handler(req, res) {
       case 'checkout.session.completed': {
         const session = event.data.object;
         const userId = session.client_reference_id;
-        if (userId && session.payment_status === 'paid') {
+        // grant access for paid and free-trial checkouts
+        if (userId) {
           await clerk.users.updateUser(userId, {
             publicMetadata: { isPro: true },
           });

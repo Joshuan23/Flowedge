@@ -50,6 +50,7 @@ export default async function handler(req, res) {
       customer: customerId,
       line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
       client_reference_id: userId,
+      subscription_data: { trial_period_days: 7 },
       success_url: `${origin}/?upgraded=1`,
       cancel_url: `${origin}/`,
     });
