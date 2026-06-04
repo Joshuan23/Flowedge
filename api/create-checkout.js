@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { createClerkClient } from '@clerk/backend';
+import { createClerkClient, verifyToken } from '@clerk/backend';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
@@ -15,7 +15,7 @@ export default async function handler(req, res) {
     const token = req.headers.authorization?.replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
-    const payload = await clerk.verifyToken(token);
+    const payload = await verifyToken(token, { secretKey: process.env.CLERK_SECRET_KEY });
     const userId = payload.sub;
 
     // Retrieve or create a Stripe customer, stored in Clerk private metadata
