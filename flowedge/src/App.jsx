@@ -1068,7 +1068,83 @@ function GammaPanel({ stocks }) {
   );
 }
 
-const TABS = ["Signals", "Portfolio", "Alerts", "Gamma", "Account"];
+function DarkPoolPanel({ stocks }) {
+  const now = new Date();
+  const marketOpen = new Date(); marketOpen.setHours(9, 30, 0, 0);
+  const marketClose = new Date(); marketClose.setHours(16, 0, 0, 0);
+  const elapsed = Math.max((now - marketOpen) / (marketClose - marketOpen), 0.05);
+  const isMarketHours = now >= marketOpen && now <= marketClose;
+
+  const scored = stocks
+    .filter(s => s.regularMarketVolume && (s.averageDailyVolume3Month || s.averageDailyVolume10Day))
+    .map(s => {
+      const avgVol = s.averageDailyVolume3Month || s.averageDailyVolume10Day || 1;
+      const projectedVol = isMarketHours ? s.regularMarketVolume / elapsed : s.regularMarketVolume;
+      const volRatio = projectedVol / avgVol;
+      const priceImpact = Math.abs(s.regularMarketChangePercent || 0.01);
+      const score = (volRatio * 10) / Math.max(priceImpact, 0.1);
+      return { ...s, volRatio, priceImpact, score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const getSignal = (score) => {
+    if (score > 80) return { label: "STRONG", color: "#ef4444" };
+    if (score > 40) return { label: "MODERATE", color: "#f59e0b" };
+    if (score > 15) return { label: "WEAK", color: "#10b981" };
+    return { label: "NORMAL", color: "#374151" };
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ padding: "8px 10px", borderRadius: 8, background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.15)", fontSize: 10, color: "#6b7280", lineHeight: 1.7 }}>
+        <strong style={{ color: "#a5b4fc" }}>Dark Pool Score</strong> — Volume anomaly ÷ price impact. High score = large volume with minimal price movement, the hallmark of institutional dark pool activity.
+      </div>
+      {scored.length === 0 && (
+        <div style={{ fontSize: 12, color: "#4b5563", textAlign: "center", padding: 20 }}>No volume data available yet.</div>
+      )}
+      {scored.map(s => {
+        const { label, color } = getSignal(s.score);
+        const barW = Math.min(s.score / 100, 1) * 100;
+        const up = s.regularMarketChangePercent >= 0;
+        return (
+          <div key={s.symbol} style={{
+            padding: "10px 12px", borderRadius: 8,
+            background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)",
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+              <div>
+                <span style={{ fontWeight: 800, fontSize: 13, color: "#f9fafb" }}>{s.symbol}</span>
+                <span style={{ fontSize: 10, color: "#4b5563", marginLeft: 6 }}>{(s.shortName || "").slice(0, 20)}</span>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 9, color, fontWeight: 800, letterSpacing: "0.06em", marginBottom: 2 }}>{label}</div>
+                <div style={{ fontSize: 17, fontFamily: "monospace", fontWeight: 700, color: "#f9fafb" }}>{s.score.toFixed(0)}</div>
+              </div>
+            </div>
+            <div style={{ height: 3, background: "rgba(255,255,255,0.06)", borderRadius: 2, marginBottom: 8 }}>
+              <div style={{ width: `${barW}%`, height: "100%", borderRadius: 2, background: `linear-gradient(90deg, ${color}44, ${color})` }} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+              {[
+                ["VOL RATIO", `${s.volRatio.toFixed(2)}×`, s.volRatio > 1.5 ? "#fbbf24" : "#9ca3af"],
+                ["PRICE ΔIMPACT", `${s.priceImpact.toFixed(2)}%`, up ? "#10b981" : "#ef4444"],
+                ["TODAY VOL", fmt(s.regularMarketVolume), "#9ca3af"],
+                ["AVG VOL", fmt(s.averageDailyVolume3Month || s.averageDailyVolume10Day), "#4b5563"],
+              ].map(([lbl, val, c]) => (
+                <div key={lbl}>
+                  <div style={{ fontSize: 8, color: "#374151", marginBottom: 2 }}>{lbl}</div>
+                  <div style={{ fontSize: 10, fontFamily: "monospace", color: c }}>{val}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const TABS = ["Signals", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -1263,15 +1339,15 @@ export default function App() {
             </div>
 
             <div style={{ padding: 20, display: "flex", flexDirection: "column" }}>
-              <div style={{ display: "flex", gap: 0, marginBottom: 16, borderRadius: 8, overflow: "hidden", border: "1px solid rgba(255,255,255,0.08)" }}>
-                {TABS.map(t => (
+              <div style={{ display: "flex", gap: 0, marginBottom: 16, borderRadius: 8, border: "1px solid rgba(255,255,255,0.08)", overflowX: "auto", overflowY: "hidden", scrollbarWidth: "none" }}>
+                {TABS.map((t, i) => (
                   <button key={t} onClick={() => setTab(t)} style={{
-                    flex: 1, padding: "8px 0", fontSize: 11, fontWeight: 700,
-                    letterSpacing: "0.06em", textTransform: "uppercase", cursor: "pointer", border: "none",
+                    flexShrink: 0, minWidth: 64, padding: "8px 10px", fontSize: 10, fontWeight: 700,
+                    letterSpacing: "0.05em", textTransform: "uppercase", cursor: "pointer", border: "none",
                     background: tab === t ? "rgba(99,102,241,0.25)" : "rgba(255,255,255,0.02)",
                     color: tab === t ? "#a5b4fc" : "#4b5563",
-                    borderRight: t !== "Gamma" ? "1px solid rgba(255,255,255,0.08)" : "none",
-                    transition: "all 0.2s",
+                    borderRight: i < TABS.length - 1 ? "1px solid rgba(255,255,255,0.08)" : "none",
+                    transition: "all 0.2s", whiteSpace: "nowrap",
                   }}>{t}</button>
                 ))}
               </div>
@@ -1296,6 +1372,7 @@ export default function App() {
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                 {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
                 {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
+                {tab === "Dark Pool" && <DarkPoolPanel stocks={stocks} />}
                 {tab === "Account" && (CLERK_KEY ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
               </div>
             </div>
