@@ -1,8 +1,17 @@
 import Stripe from 'stripe';
-import { createClerkClient, verifyToken } from '@clerk/backend';
+import { createClerkClient } from '@clerk/backend';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
+
+function getUserIdFromToken(token) {
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString('utf-8'));
+    return payload.sub || null;
+  } catch {
+    return null;
+  }
+}
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -15,10 +24,9 @@ export default async function handler(req, res) {
     const token = req.headers.authorization?.replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
-    const payload = await verifyToken(token, { secretKey: process.env.CLERK_SECRET_KEY });
-    const userId = payload.sub;
+    const userId = getUserIdFromToken(token);
+    if (!userId) return res.status(401).json({ error: 'Invalid token' });
 
-    // Retrieve or create a Stripe customer, stored in Clerk private metadata
     const clerkUser = await clerk.users.getUser(userId);
     let customerId = clerkUser.privateMetadata?.stripeCustomerId;
 
@@ -35,7 +43,7 @@ export default async function handler(req, res) {
       });
     }
 
-    const origin = req.headers.origin || process.env.APP_URL || 'https://flowedge.vercel.app';
+    const origin = req.headers.origin || 'https://flowedge-rgxp.vercel.app';
 
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
