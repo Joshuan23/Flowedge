@@ -1,6 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useUser, useAuth, SignInButton, UserButton } from "@clerk/clerk-react";
 
+function useIsMobile() {
+  const [m, setM] = useState(() => window.innerWidth < 640);
+  useEffect(() => {
+    const h = () => setM(window.innerWidth < 640);
+    window.addEventListener('resize', h);
+    return () => window.removeEventListener('resize', h);
+  }, []);
+  return m;
+}
+
 const DEFAULT_WATCHLIST = [
   "SPY","QQQ","IWM","NVDA","AAPL","MSFT","TSLA","META","AMZN","GOOGL",
   "AMD","PLTR","COIN","V","JPM","GLD","TLT","VXX",
@@ -100,7 +110,34 @@ function StatBox({ label, value, color = "#a5b4fc", sub }) {
   );
 }
 
-function StockCard({ data, index, onRemove }) {
+function ChartModal({ symbol, onClose }) {
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.9)',
+      zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: '#080b12', border: '1px solid rgba(255,255,255,0.1)',
+        borderRadius: 12, width: '95vw', maxWidth: 860, overflow: 'hidden',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+          <span style={{ fontWeight: 800, fontSize: 15 }}>{symbol}</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#6b7280', cursor: 'pointer', fontSize: 24, lineHeight: 1 }}>×</button>
+        </div>
+        <iframe
+          key={symbol}
+          src={`https://s.tradingview.com/widgetembed/?frameElementId=tv_${symbol}&symbol=${encodeURIComponent(symbol)}&interval=D&hidesidetoolbar=1&hidetoptoolbar=0&theme=dark&style=1&locale=en&hide_legend=0&save_image=0`}
+          style={{ width: '100%', height: 440, border: 'none', display: 'block' }}
+          allowTransparency="true"
+          scrolling="no"
+          title={`${symbol} chart`}
+        />
+      </div>
+    </div>
+  );
+}
+
+function StockCard({ data, index, onRemove, onChart }) {
   const [vis, setVis] = useState(false);
   useEffect(() => { setTimeout(() => setVis(true), index * 80); }, []);
   const up = data.regularMarketChangePercent >= 0;
@@ -108,6 +145,11 @@ function StockCard({ data, index, onRemove }) {
   const rangePct = data.regularMarketDayHigh && data.regularMarketDayLow
     ? ((data.regularMarketPrice - data.regularMarketDayLow) / (data.regularMarketDayHigh - data.regularMarketDayLow)) * 100
     : 50;
+
+  const now = Date.now() / 1000;
+  const et = data.earningsTimestamp;
+  const earningsDays = et && et > now && et < now + 14 * 86400
+    ? Math.ceil((et - now) / 86400) : null;
 
   return (
     <div style={{
@@ -120,7 +162,16 @@ function StockCard({ data, index, onRemove }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <div style={{ fontWeight: 800, fontSize: 15, color: "#f9fafb" }}>{data.symbol}</div>
+            <div
+              onClick={onChart}
+              style={{ fontWeight: 800, fontSize: 15, color: "#f9fafb", cursor: "pointer", textDecoration: "underline", textDecorationStyle: "dotted", textUnderlineOffset: 3 }}
+              title="View chart"
+            >{data.symbol}</div>
+            {earningsDays !== null && (
+              <span style={{ fontSize: 9, fontWeight: 800, background: "rgba(251,191,36,0.15)", color: "#fbbf24", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 4, padding: "1px 5px", letterSpacing: "0.04em" }}>
+                EARN {earningsDays}D
+              </span>
+            )}
             {onRemove && (
               <button onClick={onRemove} title="Remove from watchlist" style={{
                 background: "none", border: "none", color: "#374151", cursor: "pointer",
@@ -543,6 +594,113 @@ function OIHeatMap({ heatmap, spot, buyKingNode, sellKingNode }) {
   );
 }
 
+function AccountPanel() {
+  const { user } = useUser();
+  const { getToken } = useAuth();
+  const [referral, setReferral] = useState(null);
+  const [loadingRef, setLoadingRef] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [notifStatus, setNotifStatus] = useState(() =>
+    typeof Notification !== 'undefined' ? Notification.permission : 'default'
+  );
+
+  const fetchReferral = useCallback(async () => {
+    setLoadingRef(true);
+    try {
+      const token = await getToken();
+      const res = await fetch('/api/referral', { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      if (!data.error) setReferral(data);
+    } catch {}
+    setLoadingRef(false);
+  }, [getToken]);
+
+  useEffect(() => { fetchReferral(); }, [fetchReferral]);
+
+  const enableNotifs = async () => {
+    const p = await Notification.requestPermission();
+    setNotifStatus(p);
+  };
+
+  const copyLink = () => {
+    navigator.clipboard.writeText(`https://flowedge-rgxp.vercel.app?ref=${referral.code}`);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const row = (label, val) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+      <span style={{ color: '#6b7280' }}>{label}</span>
+      <span style={{ fontWeight: 600 }}>{val}</span>
+    </div>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* Subscription */}
+      <div style={{ padding: 14, borderRadius: 10, background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.2)' }}>
+        <div style={{ fontSize: 10, color: '#a5b4fc', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 10 }}>SUBSCRIPTION</div>
+        {row('Plan', user?.publicMetadata?.isPro ? '✅ Pro' : 'Free')}
+        {row('Email', user?.emailAddresses?.[0]?.emailAddress || '—')}
+      </div>
+
+      {/* Referral */}
+      <div style={{ padding: 14, borderRadius: 10, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <div style={{ fontSize: 10, color: '#a5b4fc', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 8 }}>REFER A FRIEND</div>
+        <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 12px', lineHeight: 1.6 }}>
+          Your friend gets 1 month free · You get 1 month free when they subscribe.
+        </p>
+        {loadingRef ? (
+          <div style={{ fontSize: 12, color: '#4b5563' }}>Generating link…</div>
+        ) : referral ? (
+          <>
+            <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 7, padding: '9px 12px', fontSize: 12, fontFamily: 'monospace', color: '#c4b5fd', marginBottom: 10, wordBreak: 'break-all' }}>
+              flowedge-rgxp.vercel.app?ref={referral.code}
+            </div>
+            <button onClick={copyLink} style={{
+              width: '100%', borderRadius: 8, padding: '9px 0', fontWeight: 800, fontSize: 12, cursor: 'pointer',
+              background: copied ? 'rgba(16,185,129,0.15)' : 'rgba(99,102,241,0.15)',
+              border: `1px solid ${copied ? 'rgba(16,185,129,0.35)' : 'rgba(99,102,241,0.35)'}`,
+              color: copied ? '#10b981' : '#a5b4fc',
+            }}>{copied ? '✓ Copied!' : 'Copy Referral Link'}</button>
+            {referral.referralCount > 0 && (
+              <div style={{ fontSize: 11, color: '#4b5563', textAlign: 'center', marginTop: 8 }}>
+                {referral.referralCount} referral{referral.referralCount > 1 ? 's' : ''}
+              </div>
+            )}
+          </>
+        ) : (
+          <button onClick={fetchReferral} style={{ fontSize: 12, color: '#6366f1', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+            Generate my referral link →
+          </button>
+        )}
+      </div>
+
+      {/* Notifications */}
+      <div style={{ padding: 14, borderRadius: 10, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <div style={{ fontSize: 10, color: '#a5b4fc', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 10 }}>NOTIFICATIONS</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>
+              {notifStatus === 'granted' ? '✅ Enabled' : notifStatus === 'denied' ? '🚫 Blocked' : 'Not enabled'}
+            </div>
+            <div style={{ fontSize: 11, color: '#4b5563', marginTop: 2 }}>Alert notifications</div>
+          </div>
+          {notifStatus === 'default' && (
+            <button onClick={enableNotifs} style={{
+              background: 'rgba(99,102,241,0.15)', border: '1px solid rgba(99,102,241,0.35)',
+              borderRadius: 8, padding: '7px 14px', color: '#a5b4fc', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+            }}>Enable</button>
+          )}
+          {notifStatus === 'denied' && (
+            <span style={{ fontSize: 11, color: '#6b7280' }}>Enable in browser settings</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const CLERK_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
 function ProGate({ children }) {
@@ -910,9 +1068,13 @@ function GammaPanel({ stocks }) {
   );
 }
 
-const TABS = ["Signals", "Portfolio", "Alerts", "Gamma"];
+const TABS = ["Signals", "Portfolio", "Alerts", "Gamma", "Account"];
 
 export default function App() {
+  const isMobile = useIsMobile();
+  const { isSignedIn, user } = useUser();
+  const { getToken } = useAuth();
+
   const [watchlist, setWatchlist] = useState(() => {
     try { return JSON.parse(localStorage.getItem("fe_watchlist")) || DEFAULT_WATCHLIST; }
     catch { return DEFAULT_WATCHLIST; }
@@ -924,8 +1086,40 @@ export default function App() {
   const [pulse, setPulse] = useState(true);
   const [lastUpdate, setLastUpdate] = useState("");
   const [tab, setTab] = useState("Signals");
+  const [chartSymbol, setChartSymbol] = useState(null);
+  const syncTimer = useRef(null);
 
+  // Persist watchlist to localStorage
   useEffect(() => { localStorage.setItem("fe_watchlist", JSON.stringify(watchlist)); }, [watchlist]);
+
+  // Load watchlist from cloud on sign-in, then keep it synced
+  useEffect(() => {
+    if (!isSignedIn) return;
+    (async () => {
+      try {
+        const token = await getToken();
+        const res = await fetch('/api/watchlist', { headers: { Authorization: `Bearer ${token}` } });
+        const { watchlist: cloud } = await res.json();
+        if (cloud?.length) setWatchlist(cloud);
+      } catch {}
+    })();
+  }, [isSignedIn]);
+
+  // Debounced cloud save on watchlist change
+  useEffect(() => {
+    if (!isSignedIn) return;
+    clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(async () => {
+      try {
+        const token = await getToken();
+        await fetch('/api/watchlist', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ watchlist }),
+        });
+      } catch {}
+    }, 1500);
+  }, [watchlist, isSignedIn]);
 
   const addToWatchlist = (raw) => {
     const sym = raw.trim().toUpperCase().replace(/[^A-Z.]/g, '');
@@ -973,7 +1167,8 @@ export default function App() {
     <div style={{ minHeight: "100vh", background: "#080b12", fontFamily: "'DM Sans', sans-serif", color: "#f9fafb" }}>
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "14px 24px", borderBottom: "1px solid rgba(255,255,255,0.07)",
+        padding: isMobile ? "10px 14px" : "14px 24px",
+        borderBottom: "1px solid rgba(255,255,255,0.07)",
         background: "rgba(255,255,255,0.02)",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -1062,8 +1257,8 @@ export default function App() {
               <datalist id="all-tickers-dl">
                 {ALL_TICKERS.map(t => <option key={t} value={t} />)}
               </datalist>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} />)}
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 12 }}>
+                {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} />)}
               </div>
             </div>
 
@@ -1101,11 +1296,13 @@ export default function App() {
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                 {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
                 {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
+                {tab === "Account" && (CLERK_KEY ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
               </div>
             </div>
           </div>
         </>
       )}
+      {chartSymbol && <ChartModal symbol={chartSymbol} onClose={() => setChartSymbol(null)} />}
     </div>
   );
 }
