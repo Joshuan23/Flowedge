@@ -1161,7 +1161,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [pulse, setPulse] = useState(true);
   const [lastUpdate, setLastUpdate] = useState("");
-  const [tab, setTab] = useState("Signals");
+  const [tab, setTab] = useState("Watch");
   const [chartSymbol, setChartSymbol] = useState(null);
   const syncTimer = useRef(null);
 
@@ -1234,6 +1234,11 @@ export default function App() {
 
   useEffect(() => { fetchStocks(); }, [fetchStocks]);
 
+  // When resizing from mobile to desktop, "Watch" tab has no desktop equivalent
+  useEffect(() => {
+    if (!isMobile && tab === "Watch") setTab("Signals");
+  }, [isMobile]);
+
   const bullCount = stocks.filter(s => s.regularMarketChangePercent >= 0).length;
   const totalVol = stocks.reduce((s, d) => s + (d.regularMarketVolume || 0) * (d.regularMarketPrice || 0), 0);
   const avgChange = stocks.length ? stocks.reduce((s, d) => s + (d.regularMarketChangePercent || 0), 0) / stocks.length : 0;
@@ -1270,7 +1275,7 @@ export default function App() {
             background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
             borderRadius: 6, padding: "6px 14px", color: "#9ca3af", fontSize: 11,
             cursor: "pointer", fontWeight: 600,
-          }}>↻ Refresh</button>
+          }}>{isMobile ? "↻" : "↻ Refresh"}</button>
           {CLERK_KEY && <UserButton afterSignOutUrl="/" appearance={{ elements: { avatarBox: { width: 28, height: 28 } } }} />}
         </div>
       </div>
@@ -1291,83 +1296,81 @@ export default function App() {
         </div>
       ) : (
         <>
+          {/* Stats bar */}
           <div style={{
-            display: "grid", gridTemplateColumns: "repeat(4, 1fr)",
-            padding: "18px 24px", gap: 24, borderBottom: "1px solid rgba(255,255,255,0.06)"
+            display: "grid",
+            gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)",
+            padding: isMobile ? "12px 14px" : "18px 24px",
+            gap: isMobile ? 12 : 24,
+            borderBottom: "1px solid rgba(255,255,255,0.06)",
           }}>
-            <StatBox label="Total Volume Value" value={fmt(totalVol)} color="#a5b4fc" sub="tracked tickers" />
+            <StatBox label="Volume" value={fmt(totalVol)} color="#a5b4fc" sub="tracked tickers" />
             <StatBox label="Bullish" value={`${bullCount}/${stocks.length}`} color="#10b981" sub="positive today" />
-            <StatBox label="Avg Change" value={pct(avgChange)} color={avgChange >= 0 ? "#10b981" : "#ef4444"} sub="across watchlist" />
+            <StatBox label="Avg Chg" value={pct(avgChange)} color={avgChange >= 0 ? "#10b981" : "#ef4444"} sub="across watchlist" />
             <StatBox label="Market" value={isOpen ? "OPEN" : "CLOSED"} color={isOpen ? "#10b981" : "#6b7280"} sub="US equities" />
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", minHeight: "calc(100vh - 190px)" }}>
-            <div style={{ padding: 16, borderRight: "1px solid rgba(255,255,255,0.06)" }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, paddingLeft: 4 }}>
-                <span style={{ fontSize: 11, color: "#4b5563", letterSpacing: "0.1em", textTransform: "uppercase" }}>
-                  Live Prices · {watchlist.length} tickers
-                </span>
-              </div>
-              {/* Add ticker to watchlist */}
-              <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-                <input
-                  list="all-tickers-dl"
-                  value={addInput}
-                  onChange={e => setAddInput(e.target.value.toUpperCase())}
-                  onKeyDown={e => { if (e.key === 'Enter' && addInput.trim()) { addToWatchlist(addInput); setAddInput(""); } }}
-                  placeholder="+ Add ticker…"
-                  style={{
-                    flex: 1, background: "rgba(255,255,255,0.04)", border: "1px dashed rgba(255,255,255,0.12)",
-                    borderRadius: 6, padding: "6px 10px", color: "#9ca3af", fontSize: 11,
-                    fontFamily: "monospace", outline: "none",
-                  }}
-                />
-                <button
-                  onClick={() => { if (addInput.trim()) { addToWatchlist(addInput); setAddInput(""); } }}
-                  style={{
-                    background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)",
-                    borderRadius: 6, padding: "6px 12px", color: "#a5b4fc",
-                    fontSize: 11, fontWeight: 700, cursor: "pointer",
-                  }}>Add</button>
-              </div>
-              <datalist id="all-tickers-dl">
-                {ALL_TICKERS.map(t => <option key={t} value={t} />)}
-              </datalist>
-              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 12 }}>
-                {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} />)}
-              </div>
-            </div>
-
-            <div style={{ padding: 20, display: "flex", flexDirection: "column" }}>
-              <div style={{ display: "flex", gap: 0, marginBottom: 16, borderRadius: 8, border: "1px solid rgba(255,255,255,0.08)", overflowX: "auto", overflowY: "hidden", scrollbarWidth: "none" }}>
-                {TABS.map((t, i) => (
+          {isMobile ? (
+            /* ── Mobile: full-width stacked layout ── */
+            <>
+              <div style={{
+                position: "sticky", top: 0, zIndex: 10,
+                display: "flex", overflowX: "auto", scrollbarWidth: "none",
+                background: "#0d1117", borderBottom: "1px solid rgba(255,255,255,0.07)",
+              }}>
+                {(["Watch", ...TABS]).map(t => (
                   <button key={t} onClick={() => setTab(t)} style={{
-                    flexShrink: 0, minWidth: 64, padding: "8px 10px", fontSize: 10, fontWeight: 700,
-                    letterSpacing: "0.05em", textTransform: "uppercase", cursor: "pointer", border: "none",
-                    background: tab === t ? "rgba(99,102,241,0.25)" : "rgba(255,255,255,0.02)",
-                    color: tab === t ? "#a5b4fc" : "#4b5563",
-                    borderRight: i < TABS.length - 1 ? "1px solid rgba(255,255,255,0.08)" : "none",
-                    transition: "all 0.2s", whiteSpace: "nowrap",
+                    flexShrink: 0, padding: "11px 14px", fontSize: 11, fontWeight: 700,
+                    letterSpacing: "0.05em", textTransform: "uppercase",
+                    border: "none", borderBottom: `2px solid ${tab === t ? "#6366f1" : "transparent"}`,
+                    background: "transparent", color: tab === t ? "#a5b4fc" : "#4b5563",
+                    cursor: "pointer", whiteSpace: "nowrap", transition: "color 0.2s",
                   }}>{t}</button>
                 ))}
               </div>
 
-              <div style={{ flex: 1, overflowY: "auto" }}>
-                {tab === "Signals" && (
-                  <>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                      {stocks.slice(0, 5).map((s, i) => <SignalCard key={s.symbol} data={s} index={i} />)}
+              <div style={{ padding: "14px 14px 100px" }}>
+                {tab === "Watch" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <input
+                        list="all-tickers-dl"
+                        value={addInput}
+                        onChange={e => setAddInput(e.target.value.toUpperCase())}
+                        onKeyDown={e => { if (e.key === 'Enter' && addInput.trim()) { addToWatchlist(addInput); setAddInput(""); } }}
+                        placeholder="+ Add ticker…"
+                        style={{
+                          flex: 1, background: "rgba(255,255,255,0.04)", border: "1px dashed rgba(255,255,255,0.12)",
+                          borderRadius: 6, padding: "9px 10px", color: "#9ca3af", fontSize: 13,
+                          fontFamily: "monospace", outline: "none",
+                        }}
+                      />
+                      <button
+                        onClick={() => { if (addInput.trim()) { addToWatchlist(addInput); setAddInput(""); } }}
+                        style={{
+                          background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)",
+                          borderRadius: 6, padding: "9px 16px", color: "#a5b4fc",
+                          fontSize: 13, fontWeight: 700, cursor: "pointer",
+                        }}>Add</button>
                     </div>
-                    <div style={{
-                      marginTop: 16, padding: 14, borderRadius: 8,
-                      background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)"
-                    }}>
+                    <datalist id="all-tickers-dl">
+                      {ALL_TICKERS.map(t => <option key={t} value={t} />)}
+                    </datalist>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} />)}
+                    </div>
+                  </div>
+                )}
+                {tab === "Signals" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {stocks.slice(0, 5).map((s, i) => <SignalCard key={s.symbol} data={s} index={i} />)}
+                    <div style={{ padding: 14, borderRadius: 8, background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)" }}>
                       <div style={{ fontSize: 10, color: "#a5b4fc", fontWeight: 700, letterSpacing: "0.08em", marginBottom: 6 }}>🔒 PRO FEATURES</div>
                       <p style={{ fontSize: 11, color: "#6b7280", margin: 0, lineHeight: 1.7 }}>
                         Real-time sweep detection · Dark pool prints · Gamma exposure · Institutional flow alerts
                       </p>
                     </div>
-                  </>
+                  </div>
                 )}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                 {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
@@ -1375,8 +1378,85 @@ export default function App() {
                 {tab === "Dark Pool" && <DarkPoolPanel stocks={stocks} />}
                 {tab === "Account" && (CLERK_KEY ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
               </div>
+            </>
+          ) : (
+            /* ── Desktop: two-column layout ── */
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", minHeight: "calc(100vh - 190px)" }}>
+              <div style={{ padding: 16, borderRight: "1px solid rgba(255,255,255,0.06)" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, paddingLeft: 4 }}>
+                  <span style={{ fontSize: 11, color: "#4b5563", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                    Live Prices · {watchlist.length} tickers
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+                  <input
+                    list="all-tickers-dl"
+                    value={addInput}
+                    onChange={e => setAddInput(e.target.value.toUpperCase())}
+                    onKeyDown={e => { if (e.key === 'Enter' && addInput.trim()) { addToWatchlist(addInput); setAddInput(""); } }}
+                    placeholder="+ Add ticker…"
+                    style={{
+                      flex: 1, background: "rgba(255,255,255,0.04)", border: "1px dashed rgba(255,255,255,0.12)",
+                      borderRadius: 6, padding: "6px 10px", color: "#9ca3af", fontSize: 11,
+                      fontFamily: "monospace", outline: "none",
+                    }}
+                  />
+                  <button
+                    onClick={() => { if (addInput.trim()) { addToWatchlist(addInput); setAddInput(""); } }}
+                    style={{
+                      background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)",
+                      borderRadius: 6, padding: "6px 12px", color: "#a5b4fc",
+                      fontSize: 11, fontWeight: 700, cursor: "pointer",
+                    }}>Add</button>
+                </div>
+                <datalist id="all-tickers-dl">
+                  {ALL_TICKERS.map(t => <option key={t} value={t} />)}
+                </datalist>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} />)}
+                </div>
+              </div>
+
+              <div style={{ padding: 20, display: "flex", flexDirection: "column" }}>
+                <div style={{ display: "flex", gap: 0, marginBottom: 16, borderRadius: 8, border: "1px solid rgba(255,255,255,0.08)", overflowX: "auto", overflowY: "hidden", scrollbarWidth: "none" }}>
+                  {TABS.map((t, i) => (
+                    <button key={t} onClick={() => setTab(t)} style={{
+                      flexShrink: 0, minWidth: 64, padding: "8px 10px", fontSize: 10, fontWeight: 700,
+                      letterSpacing: "0.05em", textTransform: "uppercase", cursor: "pointer", border: "none",
+                      background: tab === t ? "rgba(99,102,241,0.25)" : "rgba(255,255,255,0.02)",
+                      color: tab === t ? "#a5b4fc" : "#4b5563",
+                      borderRight: i < TABS.length - 1 ? "1px solid rgba(255,255,255,0.08)" : "none",
+                      transition: "all 0.2s", whiteSpace: "nowrap",
+                    }}>{t}</button>
+                  ))}
+                </div>
+
+                <div style={{ flex: 1, overflowY: "auto" }}>
+                  {tab === "Signals" && (
+                    <>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        {stocks.slice(0, 5).map((s, i) => <SignalCard key={s.symbol} data={s} index={i} />)}
+                      </div>
+                      <div style={{
+                        marginTop: 16, padding: 14, borderRadius: 8,
+                        background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)"
+                      }}>
+                        <div style={{ fontSize: 10, color: "#a5b4fc", fontWeight: 700, letterSpacing: "0.08em", marginBottom: 6 }}>🔒 PRO FEATURES</div>
+                        <p style={{ fontSize: 11, color: "#6b7280", margin: 0, lineHeight: 1.7 }}>
+                          Real-time sweep detection · Dark pool prints · Gamma exposure · Institutional flow alerts
+                        </p>
+                      </div>
+                    </>
+                  )}
+                  {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
+                  {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
+                  {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
+                  {tab === "Dark Pool" && <DarkPoolPanel stocks={stocks} />}
+                  {tab === "Account" && (CLERK_KEY ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
+                </div>
+              </div>
             </div>
-          </div>
+          )}
         </>
       )}
       {chartSymbol && <ChartModal symbol={chartSymbol} onClose={() => setChartSymbol(null)} />}
