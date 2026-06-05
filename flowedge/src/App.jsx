@@ -1192,6 +1192,23 @@ function GammaPanel({ stocks }) {
 
   useEffect(() => { fetchGamma(symbol, expiry); }, [symbol, expiry, fetchGamma]);
 
+  // Auto-refresh gamma every 60 seconds
+  const [gammaRefreshIn, setGammaRefreshIn] = useState(60);
+  const gammaTimerRef = useRef(null);
+  useEffect(() => {
+    setGammaRefreshIn(60);
+    gammaTimerRef.current = setInterval(() => {
+      setGammaRefreshIn(prev => {
+        if (prev <= 1) {
+          if (!loading) fetchGamma(symbol, expiry);
+          return 60;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(gammaTimerRef.current);
+  }, [symbol, expiry, fetchGamma]);
+
   const spot = data?.spot;
 
   // v2.4 — derive entry/TP/SL from king nodes + key levels
@@ -1337,11 +1354,11 @@ function GammaPanel({ stocks }) {
             </optgroup>
           ))}
         </select>
-        <button onClick={() => fetchGamma(symbol, expiry)} style={{
+        <button onClick={() => { fetchGamma(symbol, expiry); setGammaRefreshIn(60); }} style={{
           background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
-          borderRadius: 6, padding: "7px 12px", color: "#9ca3af", fontSize: 11,
-          cursor: "pointer", fontWeight: 600,
-        }}>↻</button>
+          borderRadius: 6, padding: "7px 10px", color: "#9ca3af", fontSize: 10,
+          cursor: "pointer", fontWeight: 600, whiteSpace: "nowrap",
+        }}>{loading ? "…" : `↻ ${gammaRefreshIn}s`}</button>
       </div>
 
       {/* Expiry chips */}
@@ -1792,6 +1809,23 @@ export default function App() {
 
   useEffect(() => { fetchStocks(); }, [fetchStocks]);
 
+  // Auto-refresh quotes every 60 seconds
+  const [nextRefresh, setNextRefresh] = useState(60);
+  const refreshRef = useRef(null);
+  useEffect(() => {
+    setNextRefresh(60);
+    refreshRef.current = setInterval(() => {
+      setNextRefresh(prev => {
+        if (prev <= 1) {
+          fetchStocks();
+          return 60;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(refreshRef.current);
+  }, [fetchStocks]);
+
   // When resizing from mobile to desktop, "Watch" tab has no desktop equivalent
   useEffect(() => {
     if (!isMobile && tab === "Watch") setTab("Signals");
@@ -1839,10 +1873,10 @@ export default function App() {
               transition: "all 0.5s"
             }} />
             <span style={{ fontSize: 11, color: error ? "#ef4444" : "#10b981", fontFamily: "monospace" }}>
-              {loading ? "LOADING..." : error ? "ERROR" : `LIVE · ${lastUpdate}`}
+              {loading ? "LOADING..." : error ? "ERROR" : `LIVE · ${lastUpdate} · ${nextRefresh}s`}
             </span>
           </div>
-          <button onClick={fetchStocks} style={{
+          <button onClick={() => { fetchStocks(); setNextRefresh(60); }} style={{
             background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
             borderRadius: 6, padding: "6px 14px", color: "#9ca3af", fontSize: 11,
             cursor: "pointer", fontWeight: 600,
@@ -1860,7 +1894,7 @@ export default function App() {
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "60vh", gap: 12 }}>
           <div style={{ fontSize: 32 }}>⚠</div>
           <div style={{ color: "#ef4444", fontWeight: 700 }}>{error}</div>
-          <button onClick={fetchStocks} style={{
+          <button onClick={() => { fetchStocks(); setNextRefresh(60); }} style={{
             background: "#6366f1", border: "none", borderRadius: 8, padding: "10px 24px",
             color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: 13,
           }}>Try Again</button>
