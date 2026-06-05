@@ -1,7 +1,15 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { useUser, useAuth, SignInButton, UserButton } from "@clerk/clerk-react";
+import { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from "react";
+import { SignInButton, UserButton } from "@clerk/clerk-react";
 
 const CLERK_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+
+export const AuthContext = createContext({
+  isSignedIn: false,
+  user: null,
+  isLoaded: true,
+  getToken: async () => null,
+  clerkAvailable: false,
+});
 
 function useIsMobile() {
   const [m, setM] = useState(() => window.innerWidth < 640);
@@ -609,8 +617,7 @@ function OIHeatMap({ heatmap, spot, buyKingNode, sellKingNode }) {
 }
 
 function AccountPanel() {
-  const { user } = useUser();
-  const { getToken } = useAuth();
+  const { user, getToken } = useContext(AuthContext);
   const [referral, setReferral] = useState(null);
   const [loadingRef, setLoadingRef] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -1027,8 +1034,7 @@ function ProGate({ children }) {
 }
 
 function ProGateInner({ children }) {
-  const { isSignedIn, user, isLoaded } = useUser();
-  const { getToken } = useAuth();
+  const { isSignedIn, user, isLoaded, getToken, clerkAvailable } = useContext(AuthContext);
   const [checkingOut, setCheckingOut] = useState(false);
   const [justUpgraded] = useState(() => new URLSearchParams(window.location.search).get('upgraded') === '1');
 
@@ -1070,11 +1076,17 @@ function ProGateInner({ children }) {
         <p style={{ fontSize: 12, color: '#6b7280', textAlign: 'center', margin: 0 }}>
           Options flow, gamma exposure &amp; precise trade setups
         </p>
-        <SignInButton mode="modal">
-          <button style={{ ...btnBase, width: 'auto', padding: '10px 28px', background: '#6366f1', color: '#fff' }}>
-            Sign In / Create Account
-          </button>
-        </SignInButton>
+        {clerkAvailable ? (
+          <SignInButton mode="modal">
+            <button style={{ ...btnBase, width: 'auto', padding: '10px 28px', background: '#6366f1', color: '#fff' }}>
+              Sign In / Create Account
+            </button>
+          </SignInButton>
+        ) : (
+          <div style={{ fontSize: 11, color: '#6b7280', textAlign: 'center' }}>
+            Authentication unavailable — reload to try again
+          </div>
+        )}
       </div>
     );
   }
@@ -1721,8 +1733,7 @@ const TABS = ["Signals", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Account"]
 
 export default function App() {
   const isMobile = useIsMobile();
-  const { isSignedIn, user } = useUser();
-  const { getToken } = useAuth();
+  const { isSignedIn, user, getToken, clerkAvailable } = useContext(AuthContext);
 
   const [watchlist, setWatchlist] = useState(() => {
     try { return JSON.parse(localStorage.getItem("fe_watchlist")) || DEFAULT_WATCHLIST; }
@@ -1881,7 +1892,7 @@ export default function App() {
             borderRadius: 6, padding: "6px 14px", color: "#9ca3af", fontSize: 11,
             cursor: "pointer", fontWeight: 600,
           }}>{isMobile ? "↻" : "↻ Refresh"}</button>
-          {CLERK_KEY && <UserButton afterSignOutUrl="/" appearance={{ elements: { avatarBox: { width: 28, height: 28 } } }} />}
+          {clerkAvailable && <UserButton afterSignOutUrl="/" appearance={{ elements: { avatarBox: { width: 28, height: 28 } } }} />}
         </div>
       </div>
 

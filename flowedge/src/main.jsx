@@ -1,10 +1,21 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { ClerkProvider, useUser } from '@clerk/clerk-react'
-import App from './App'
+import { ClerkProvider, useUser, useAuth } from '@clerk/clerk-react'
+import App, { AuthContext } from './App'
 import LandingPage from './LandingPage'
 
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
+
+// Reads from Clerk and feeds AuthContext so App never calls Clerk hooks directly
+function ClerkAuthProvider({ children }) {
+  const { isSignedIn, user, isLoaded } = useUser()
+  const { getToken } = useAuth()
+  return (
+    <AuthContext.Provider value={{ isSignedIn, user, isLoaded, getToken, clerkAvailable: true }}>
+      {children}
+    </AuthContext.Provider>
+  )
+}
 
 function AppRouter() {
   const { isSignedIn, isLoaded } = useUser()
@@ -21,29 +32,23 @@ function AppRouter() {
     return <div style={{ background: '#0a0a0f', height: '100vh' }} />
   }
 
-  if (inApp || isSignedIn) return <App />
+  if (inApp || isSignedIn) return <ClerkAuthProvider><App /></ClerkAuthProvider>
   return <LandingPage />
 }
+
+// Null auth context — used when Clerk fails so App still renders with market data
+const NULL_AUTH = { isSignedIn: false, user: null, isLoaded: true, getToken: async () => null, clerkAvailable: false }
 
 class ClerkErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { failed: false }; }
   static getDerivedStateFromError() { return { failed: true }; }
   render() {
     if (this.state.failed) {
+      // Clerk failed — render App in read-only mode (market data still works)
       return (
-        <div style={{ minHeight: '100vh', background: '#080b12', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16, fontFamily: 'system-ui, sans-serif' }}>
-          <img src="/icons/logo.png" alt="FlowEdge" style={{ width: 48, height: 48, borderRadius: 10 }} />
-          <div style={{ color: '#f9fafb', fontSize: 17, fontWeight: 800 }}>FlowEdge</div>
-          <div style={{ color: '#6b7280', fontSize: 12, textAlign: 'center', maxWidth: 280 }}>
-            Authentication service failed to load. This is usually a temporary network issue.
-          </div>
-          <button
-            onClick={() => window.location.reload()}
-            style={{ background: '#6366f1', border: 'none', borderRadius: 8, padding: '10px 28px', color: '#fff', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}
-          >
-            Reload App
-          </button>
-        </div>
+        <AuthContext.Provider value={NULL_AUTH}>
+          <App />
+        </AuthContext.Provider>
       )
     }
     return this.props.children
