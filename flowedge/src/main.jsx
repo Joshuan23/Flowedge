@@ -6,7 +6,6 @@ import LandingPage from './LandingPage'
 
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
 
-// Rendered inside ClerkProvider — safe to call useUser here
 function AppRouter() {
   const { isSignedIn, isLoaded } = useUser()
   const [inApp, setInApp] = React.useState(() => {
@@ -26,14 +25,41 @@ function AppRouter() {
   return <LandingPage />
 }
 
+class ClerkErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { failed: false }; }
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    if (this.state.failed) {
+      return (
+        <div style={{ minHeight: '100vh', background: '#080b12', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16, fontFamily: 'system-ui, sans-serif' }}>
+          <img src="/icons/logo.png" alt="FlowEdge" style={{ width: 48, height: 48, borderRadius: 10 }} />
+          <div style={{ color: '#f9fafb', fontSize: 17, fontWeight: 800 }}>FlowEdge</div>
+          <div style={{ color: '#6b7280', fontSize: 12, textAlign: 'center', maxWidth: 280 }}>
+            Authentication service failed to load. This is usually a temporary network issue.
+          </div>
+          <button
+            onClick={() => window.location.reload()}
+            style={{ background: '#6366f1', border: 'none', borderRadius: 8, padding: '10px 28px', color: '#fff', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}
+          >
+            Reload App
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    {PUBLISHABLE_KEY ? (
-      <ClerkProvider publishableKey={PUBLISHABLE_KEY} afterSignInUrl="/" afterSignUpUrl="/">
-        <AppRouter />
-      </ClerkProvider>
-    ) : (
-      <App />
-    )}
+    <ClerkErrorBoundary>
+      {PUBLISHABLE_KEY ? (
+        <ClerkProvider publishableKey={PUBLISHABLE_KEY} afterSignInUrl="/" afterSignUpUrl="/">
+          <AppRouter />
+        </ClerkProvider>
+      ) : (
+        <App />
+      )}
+    </ClerkErrorBoundary>
   </React.StrictMode>,
 )

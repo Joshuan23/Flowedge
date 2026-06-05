@@ -1217,10 +1217,10 @@ function GammaPanel({ stocks }) {
   const rrColor = rr => rr >= 2 ? "#10b981" : rr >= 1.5 ? "#f59e0b" : "#ef4444";
 
   // ── Multi-factor signal scoring ──────────────────────────────────────────
-  // FACTOR 1: GEX king-node bias (-1 bullish → +1 bearish, from biasScore)
-  const bias = data?.biasScore ?? 0;       // already in [-1,+1], positive = bullish
+  // bias > 0 = bullish (buy king GEX > sell king GEX), from biasScore [-1,+1]
+  const bias = data?.biasScore ?? 0;
 
-  // FACTOR 2: P/C volume ratio (granular, -1 very bullish → +1 very bearish)
+  // P/C volume ratio: negative pcScore = bullish (call-heavy flow)
   const pcRaw = parseFloat(data?.pcVolumeRatio ?? 1);
   const pcScore = pcRaw < 0.5 ? -0.9
     : pcRaw < 0.7 ? -0.6
@@ -1230,67 +1230,82 @@ function GammaPanel({ stocks }) {
     : pcRaw < 1.6 ?  0.6
     :                0.9;
 
-  // FACTOR 3: king node distance quality for the dominant direction
-  // 2-5% from spot is the sweet spot for a reliable GEX magnet
+  // Composite: positive = bullish, negative = bearish
+  // bias > 0 → bullish; pcScore < 0 → bullish (-pcScore is positive)
+  const composite = bias * 0.55 - pcScore * 0.45;
+  const showLong = composite >= 0;
+  const confidence = Math.abs(composite);  // 0..1 signal strength
+
+  // Gate: BOTH GEX bias and P/C flow must agree — this is the main accuracy filter
+  const gexBullish = bias > 0.10;
+  const gexBearish = bias < -0.10;
+  const pcBullish  = pcScore < -0.15;   // meaningful call flow
+  const pcBearish  = pcScore >  0.15;   // meaningful put flow
+  const directionAgrees = (showLong  && gexBullish && pcBullish)
+                       || (!showLong && gexBearish && pcBearish);
+
+  // King node distance quality (2-5% = ideal GEX magnet range)
   const buyDistPct  = data?.buyKingNode?.distancePct  ?? 0;
   const sellDistPct = data?.sellKingNode?.distancePct ?? 0;
-  const distQuality = (pct) =>
-    pct < 1 ? 0.1 : pct < 2 ? 0.5 : pct < 5 ? 1 : pct < 8 ? 0.6 : 0.2;
+  const activeDistPct = showLong ? buyDistPct : sellDistPct;
+  const distQuality = activeDistPct < 1 ? 0.1
+    : activeDistPct < 2 ? 0.5
+    : activeDistPct < 5 ? 1.0
+    : activeDistPct < 8 ? 0.6
+    : 0.2;
 
-  // FACTOR 4: flip level proximity (near flip = choppy/dangerous)
+  // Flip level proximity — near flip = choppy/dangerous, suppress signal
   const flipPenalty = (() => {
     const fl = data?.flipLevel;
     if (!fl || !spot) return 0;
     const d = Math.abs(spot - fl) / spot * 100;
-    return d < 1 ? 0.8 : d < 2 ? 0.4 : 0;
+    return d < 1 ? 0.9 : d < 2 ? 0.5 : d < 3 ? 0.2 : 0;
   })();
 
-  // FACTOR 5: IV regime — very high IV boosts put-buying signals (premium selling favored)
   const iv = data?.impliedVol ?? 25;
-  const ivAdj = iv > 50 ? 0.1 : 0; // elevated IV = slight bearish lean (expensive premium)
 
-  // Composite directional score: negative = bullish, positive = bearish
-  const bullScore = -bias * 0.40 + (-pcScore) * 0.35;  // two primary factors
-  const composite = bullScore - ivAdj * 0.1;
-  const confidence = Math.abs(composite);               // 0..1 signal strength
+  // R:R gate — only show setup if risk/reward is worth taking
+  const activeTPval = showLong ? buyTP : sellTP;
+  const activeSLval = showLong ? buySL : sellSL;
+  const rrCheck = (() => {
+    if (!spot || !activeTPval || !activeSLval) return 0;
+    if (showLong && spot > activeSLval)
+      return (activeTPval - spot) / (spot - activeSLval);
+    if (!showLong && activeSLval > spot)
+      return (spot - activeTPval) / (activeSLval - spot);
+    return 0;
+  })();
 
-  // Primary direction
-  const showLong = composite >= 0;
+  // Full edge gate: direction agrees, confidence sufficient, target quality ok,
+  // not near flip level, R:R at least 1.2:1
+  const hasEdge = directionAgrees
+    && confidence >= 0.25
+    && distQuality >= 0.4
+    && flipPenalty < 0.5
+    && rrCheck >= 1.2;
 
-  // GATE: require GEX and P/C to agree on direction; otherwise NO EDGE
-  const gexBullish = bias > 0.05;   // GEX bias in favor of bulls
-  const pcBullish  = pcScore < -0.1; // call flow dominating
-  const gexBearish = bias < -0.05;
-  const pcBearish  = pcScore > 0.1;
-  const signalsAgree = (showLong && gexBullish && pcBullish)
-                    || (!showLong && gexBearish && pcBearish);
-
-  // Additional: require minimum king node distance quality
-  const activeDistPct  = showLong ? buyDistPct  : sellDistPct;
-  const targetQuality  = distQuality(activeDistPct);
-  const hasEdge = signalsAgree && confidence >= 0.20 && targetQuality >= 0.4 && flipPenalty < 0.6;
-
-  // Honest probability: never exceeds 76%, penalized when factors conflict
+  // Honest probability: capped at 74%, requires strong conviction to reach top
   const setupProb = hasEdge
-    ? Math.min(76, Math.round(50 + confidence * 26 + (targetQuality - 0.5) * 6))
+    ? Math.min(74, Math.round(52 + confidence * 16 + (distQuality - 0.5) * 4 + Math.min(rrCheck - 1.2, 1) * 3))
     : null;
 
-  // Warning flags for display
+  // Warning flags — surface what's working against the trade
   const warnings = [];
-  if (!signalsAgree) warnings.push(
-    showLong
-      ? `P/C ${pcRaw.toFixed(2)} — put flow conflicts with bullish GEX`
-      : `P/C ${pcRaw.toFixed(2)} — call flow conflicts with bearish GEX`
-  );
-  if (flipPenalty >= 0.4) warnings.push(`Near GEX flip $${data?.flipLevel?.toFixed(0)} — choppy zone`);
-  if (activeDistPct > 0 && activeDistPct < 1.5) warnings.push(`King node only ${activeDistPct}% away — weak magnet`);
-  if (activeDistPct > 8) warnings.push(`King node ${activeDistPct}% away — stretch target`);
-  if (iv > 50) warnings.push(`IV ${iv}% elevated — consider premium selling instead`);
+  if (data) {
+    if (!gexBullish && !gexBearish) warnings.push(`GEX bias near zero — no strong directional lean from options positioning`);
+    if (showLong && !pcBullish) warnings.push(`P/C ${pcRaw.toFixed(2)} — put flow present, conflicts with long`);
+    if (!showLong && !pcBearish) warnings.push(`P/C ${pcRaw.toFixed(2)} — call flow present, conflicts with short`);
+    if (flipPenalty >= 0.4) warnings.push(`Spot near GEX flip $${data?.flipLevel?.toFixed(0)} — volatility zone, avoid`);
+    if (activeDistPct > 0 && activeDistPct < 1.5) warnings.push(`King node only ${activeDistPct.toFixed(1)}% away — too close, weak magnet`);
+    if (activeDistPct > 8) warnings.push(`King node ${activeDistPct.toFixed(1)}% away — stretch target`);
+    if (rrCheck > 0 && rrCheck < 1.2) warnings.push(`R:R ${rrCheck.toFixed(1)}:1 — not worth the risk`);
+    if (iv > 50) warnings.push(`IV ${iv}% elevated — avoid buying options premium`);
+  }
 
   const activeNode = showLong ? data?.buyKingNode : data?.sellKingNode;
-  const activeTP = showLong ? buyTP : sellTP;
-  const activeSL = showLong ? buySL : sellSL;
-  const activeRR = showLong ? buyRR : sellRR;
+  const activeTP = activeTPval;
+  const activeSL = activeSLval;
+  const activeRR = rrCheck > 0 ? +rrCheck.toFixed(2) : null;
 
   const selectStyle = {
     background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",

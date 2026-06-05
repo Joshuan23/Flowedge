@@ -1,5 +1,5 @@
-const CACHE = 'flowedge-v2';
-const PRECACHE = ['/', '/manifest.json', '/icons/logo.png', '/icons/apple-touch-icon.png'];
+const CACHE = 'flowedge-v5';
+const PRECACHE = ['/manifest.json', '/icons/logo.png', '/icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(PRECACHE)));
@@ -18,15 +18,39 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
-  if (url.pathname.startsWith('/api/')) return; // always network for API
+  if (url.pathname.startsWith('/api/')) return;
+
+  // HTML: always network-first with no-cache to get latest app shell
+  if (url.pathname === '/' || url.pathname.endsWith('.html')) {
+    e.respondWith(
+      fetch(e.request, { cache: 'no-cache' })
+        .catch(() => caches.match('/'))
+    );
+    return;
+  }
+
+  // Hashed assets (JS/CSS with content hash): cache-first — they never change
+  if (url.pathname.startsWith('/assets/')) {
+    e.respondWith(
+      caches.match(e.request).then(cached => {
+        if (cached) return cached;
+        return fetch(e.request).then(res => {
+          caches.open(CACHE).then(c => c.put(e.request, res.clone()));
+          return res;
+        });
+      })
+    );
+    return;
+  }
+
+  // Everything else: network-first
   e.respondWith(
     fetch(e.request)
       .then(res => {
-        const clone = res.clone();
-        caches.open(CACHE).then(c => c.put(e.request, clone));
+        caches.open(CACHE).then(c => c.put(e.request, res.clone()));
         return res;
       })
-      .catch(() => caches.match(e.request).then(r => r || caches.match('/')))
+      .catch(() => caches.match(e.request))
   );
 });
 
