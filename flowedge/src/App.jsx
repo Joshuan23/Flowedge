@@ -1216,19 +1216,77 @@ function GammaPanel({ stocks }) {
   const fmtP = n => n != null ? `$${n % 1 === 0 ? n.toFixed(0) : n.toFixed(2)}` : "—";
   const rrColor = rr => rr >= 2 ? "#10b981" : rr >= 1.5 ? "#f59e0b" : "#ef4444";
 
-  // Determine highest-probability direction from bias score + P/C + GEX regime
-  const bias = data?.biasScore ?? 0;
-  const pcAdj = (() => {
-    const pc = parseFloat(data?.pcVolumeRatio ?? 1);
-    if (pc < 0.7) return 0.1;
-    if (pc > 1.0) return -0.1;
-    return 0;
+  // ── Multi-factor signal scoring ──────────────────────────────────────────
+  // FACTOR 1: GEX king-node bias (-1 bullish → +1 bearish, from biasScore)
+  const bias = data?.biasScore ?? 0;       // already in [-1,+1], positive = bullish
+
+  // FACTOR 2: P/C volume ratio (granular, -1 very bullish → +1 very bearish)
+  const pcRaw = parseFloat(data?.pcVolumeRatio ?? 1);
+  const pcScore = pcRaw < 0.5 ? -0.9
+    : pcRaw < 0.7 ? -0.6
+    : pcRaw < 0.9 ? -0.3
+    : pcRaw < 1.1 ?  0
+    : pcRaw < 1.3 ?  0.3
+    : pcRaw < 1.6 ?  0.6
+    :                0.9;
+
+  // FACTOR 3: king node distance quality for the dominant direction
+  // 2-5% from spot is the sweet spot for a reliable GEX magnet
+  const buyDistPct  = data?.buyKingNode?.distancePct  ?? 0;
+  const sellDistPct = data?.sellKingNode?.distancePct ?? 0;
+  const distQuality = (pct) =>
+    pct < 1 ? 0.1 : pct < 2 ? 0.5 : pct < 5 ? 1 : pct < 8 ? 0.6 : 0.2;
+
+  // FACTOR 4: flip level proximity (near flip = choppy/dangerous)
+  const flipPenalty = (() => {
+    const fl = data?.flipLevel;
+    if (!fl || !spot) return 0;
+    const d = Math.abs(spot - fl) / spot * 100;
+    return d < 1 ? 0.8 : d < 2 ? 0.4 : 0;
   })();
-  const gexAdj = (data?.netGex ?? 0) >= 0 ? 0.05 : -0.05;
-  const composite = Math.max(-1, Math.min(1, bias + pcAdj + gexAdj));
-  const longProb = Math.round(((composite + 1) / 2) * 100);
-  const showLong = longProb >= 50;
-  const setupProb = Math.min(85, Math.max(52, showLong ? longProb : 100 - longProb));
+
+  // FACTOR 5: IV regime — very high IV boosts put-buying signals (premium selling favored)
+  const iv = data?.impliedVol ?? 25;
+  const ivAdj = iv > 50 ? 0.1 : 0; // elevated IV = slight bearish lean (expensive premium)
+
+  // Composite directional score: negative = bullish, positive = bearish
+  const bullScore = -bias * 0.40 + (-pcScore) * 0.35;  // two primary factors
+  const composite = bullScore - ivAdj * 0.1;
+  const confidence = Math.abs(composite);               // 0..1 signal strength
+
+  // Primary direction
+  const showLong = composite >= 0;
+
+  // GATE: require GEX and P/C to agree on direction; otherwise NO EDGE
+  const gexBullish = bias > 0.05;   // GEX bias in favor of bulls
+  const pcBullish  = pcScore < -0.1; // call flow dominating
+  const gexBearish = bias < -0.05;
+  const pcBearish  = pcScore > 0.1;
+  const signalsAgree = (showLong && gexBullish && pcBullish)
+                    || (!showLong && gexBearish && pcBearish);
+
+  // Additional: require minimum king node distance quality
+  const activeDistPct  = showLong ? buyDistPct  : sellDistPct;
+  const targetQuality  = distQuality(activeDistPct);
+  const hasEdge = signalsAgree && confidence >= 0.20 && targetQuality >= 0.4 && flipPenalty < 0.6;
+
+  // Honest probability: never exceeds 76%, penalized when factors conflict
+  const setupProb = hasEdge
+    ? Math.min(76, Math.round(50 + confidence * 26 + (targetQuality - 0.5) * 6))
+    : null;
+
+  // Warning flags for display
+  const warnings = [];
+  if (!signalsAgree) warnings.push(
+    showLong
+      ? `P/C ${pcRaw.toFixed(2)} — put flow conflicts with bullish GEX`
+      : `P/C ${pcRaw.toFixed(2)} — call flow conflicts with bearish GEX`
+  );
+  if (flipPenalty >= 0.4) warnings.push(`Near GEX flip $${data?.flipLevel?.toFixed(0)} — choppy zone`);
+  if (activeDistPct > 0 && activeDistPct < 1.5) warnings.push(`King node only ${activeDistPct}% away — weak magnet`);
+  if (activeDistPct > 8) warnings.push(`King node ${activeDistPct}% away — stretch target`);
+  if (iv > 50) warnings.push(`IV ${iv}% elevated — consider premium selling instead`);
+
   const activeNode = showLong ? data?.buyKingNode : data?.sellKingNode;
   const activeTP = showLong ? buyTP : sellTP;
   const activeSL = showLong ? buySL : sellSL;
@@ -1315,8 +1373,27 @@ function GammaPanel({ stocks }) {
             )}
           </div>
 
-          {/* v2.4 — Single highest-probability trade setup */}
-          {activeNode && activeTP && activeSL && (
+          {/* Setup card — shows edge when signals agree, else warns to stay out */}
+          {!hasEdge ? (
+            <div style={{ padding: "12px 14px", borderRadius: 8, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.08)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <span style={{ fontSize: 10, color: "#6b7280", fontWeight: 800, letterSpacing: "0.1em" }}>⊘ NO CLEAR EDGE — STAY OUT</span>
+                <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace" }}>conf {(confidence * 100).toFixed(0)}%</span>
+              </div>
+              {warnings.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {warnings.map((w, i) => (
+                    <div key={i} style={{ fontSize: 11, color: "#f59e0b", display: "flex", alignItems: "flex-start", gap: 6 }}>
+                      <span style={{ flexShrink: 0, marginTop: 1 }}>⚠</span><span>{w}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!warnings.length && (
+                <p style={{ fontSize: 11, color: "#4b5563", margin: 0 }}>GEX and options flow are not aligned. Wait for both to agree before entering.</p>
+              )}
+            </div>
+          ) : activeNode && activeTP && activeSL && (
             <div style={{
               padding: "12px 14px", borderRadius: 8,
               background: showLong ? "rgba(16,185,129,0.05)" : "rgba(239,68,68,0.05)",
@@ -1331,7 +1408,7 @@ function GammaPanel({ stocks }) {
                   <span style={{ fontSize: 20, fontFamily: "monospace", fontWeight: 800, color: showLong ? "#10b981" : "#ef4444" }}>
                     {setupProb}%
                   </span>
-                  <span style={{ fontSize: 9, color: "#4b5563", marginLeft: 4 }}>likely</span>
+                  <span style={{ fontSize: 9, color: "#4b5563", marginLeft: 4 }}>edge score</span>
                 </div>
               </div>
               {/* Confidence bar */}
@@ -1371,6 +1448,16 @@ function GammaPanel({ stocks }) {
                 <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ fontSize: 9, color: "#4b5563" }}>Risk : Reward</span>
                   <span style={{ fontSize: 12, fontFamily: "monospace", fontWeight: 800, color: rrColor(activeRR) }}>{activeRR} : 1</span>
+                </div>
+              )}
+              {/* Warnings even on valid setups */}
+              {warnings.length > 0 && (
+                <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid rgba(255,255,255,0.05)", display: "flex", flexDirection: "column", gap: 3 }}>
+                  {warnings.map((w, i) => (
+                    <div key={i} style={{ fontSize: 10, color: "#f59e0b", display: "flex", alignItems: "flex-start", gap: 5 }}>
+                      <span style={{ flexShrink: 0 }}>⚠</span><span>{w}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
