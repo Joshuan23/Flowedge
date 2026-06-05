@@ -137,7 +137,7 @@ function ChartModal({ symbol, onClose }) {
   );
 }
 
-function StockCard({ data, index, onRemove, onChart }) {
+function StockCard({ data, index, onRemove, onChart, onTrade }) {
   const [vis, setVis] = useState(false);
   useEffect(() => { setTimeout(() => setVis(true), index * 80); }, []);
   const up = data.regularMarketChangePercent >= 0;
@@ -208,6 +208,18 @@ function StockCard({ data, index, onRemove, onChart }) {
       <div style={{ height: 3, background: "rgba(255,255,255,0.07)", borderRadius: 2 }}>
         <div style={{ width: `${rangePct}%`, height: "100%", borderRadius: 2, background: `linear-gradient(90deg, ${color}44, ${color})`, transition: "width 1s ease 0.5s" }} />
       </div>
+      {onTrade && (
+        <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+          <button onClick={() => onTrade(data.symbol, data.regularMarketPrice, 'buy')} style={{
+            flex: 1, padding: "6px 0", borderRadius: 6, border: "none", cursor: "pointer",
+            background: "rgba(16,185,129,0.15)", color: "#10b981", fontWeight: 800, fontSize: 11,
+          }}>Buy</button>
+          <button onClick={() => onTrade(data.symbol, data.regularMarketPrice, 'sell')} style={{
+            flex: 1, padding: "6px 0", borderRadius: 6, border: "none", cursor: "pointer",
+            background: "rgba(239,68,68,0.15)", color: "#ef4444", fontWeight: 800, fontSize: 11,
+          }}>Sell</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -676,6 +688,9 @@ function AccountPanel() {
         )}
       </div>
 
+      {/* Broker */}
+      <BrokerSection getToken={getToken} />
+
       {/* Notifications */}
       <div style={{ padding: 14, borderRadius: 10, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
         <div style={{ fontSize: 10, color: '#a5b4fc', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 10 }}>NOTIFICATIONS</div>
@@ -701,7 +716,308 @@ function AccountPanel() {
   );
 }
 
-const CLERK_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+function TradeModal({ symbol, price, initialSide, onClose, getToken, onFilled }) {
+  const [side, setSide] = useState(initialSide || 'buy');
+  const [qty, setQty] = useState('1');
+  const [orderType, setOrderType] = useState('market');
+  const [limitPrice, setLimitPrice] = useState(price ? price.toFixed(2) : '');
+  const [submitting, setSubmitting] = useState(false);
+  const [filled, setFilled] = useState(null);
+  const [err, setErr] = useState('');
+
+  const estPrice = orderType === 'limit' ? parseFloat(limitPrice || 0) : (price || 0);
+  const total = parseFloat(qty || 0) * estPrice;
+
+  const submit = async () => {
+    setSubmitting(true); setErr('');
+    try {
+      const token = await getToken();
+      const res = await fetch('/api/broker-order', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, qty, side, type: orderType, limitPrice: orderType === 'limit' ? limitPrice : undefined }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setFilled(data.order);
+      onFilled?.();
+    } catch (e) { setErr(e.message); }
+    finally { setSubmitting(false); }
+  };
+
+  const inp = {
+    background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)',
+    borderRadius: 7, padding: '9px 11px', color: '#f9fafb', fontSize: 14,
+    fontFamily: 'monospace', outline: 'none', width: '100%', boxSizing: 'border-box',
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 2000, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: '#0f1219', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '16px 16px 0 0', width: '100%', maxWidth: 480, padding: '20px 20px 36px' }}>
+
+        {/* Header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+          <div>
+            <span style={{ fontWeight: 800, fontSize: 18 }}>{symbol}</span>
+            {price && <span style={{ fontSize: 13, color: '#6b7280', marginLeft: 8, fontFamily: 'monospace' }}>${price.toFixed(2)}</span>}
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#6b7280', fontSize: 24, cursor: 'pointer', lineHeight: 1 }}>×</button>
+        </div>
+
+        {filled ? (
+          <div style={{ textAlign: 'center', padding: '20px 0' }}>
+            <div style={{ fontSize: 36, marginBottom: 10 }}>✅</div>
+            <div style={{ fontWeight: 800, fontSize: 15, color: '#10b981', marginBottom: 6 }}>Order Submitted</div>
+            <div style={{ fontSize: 12, color: '#6b7280' }}>
+              {filled.side?.toUpperCase()} {filled.qty} {filled.symbol} · {filled.type?.toUpperCase()}
+            </div>
+            <div style={{ fontSize: 11, color: '#4b5563', marginTop: 4 }}>Status: {filled.status}</div>
+            <button onClick={onClose} style={{ marginTop: 18, background: '#10b981', border: 'none', borderRadius: 9, padding: '10px 28px', color: '#fff', fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>Done</button>
+          </div>
+        ) : (
+          <>
+            {/* Buy / Sell toggle */}
+            <div style={{ display: 'flex', borderRadius: 9, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)', marginBottom: 14 }}>
+              {['buy', 'sell'].map(s => (
+                <button key={s} onClick={() => setSide(s)} style={{
+                  flex: 1, padding: '10px 0', fontWeight: 800, fontSize: 13, border: 'none', cursor: 'pointer',
+                  textTransform: 'uppercase', letterSpacing: '0.06em',
+                  background: side === s ? (s === 'buy' ? '#10b981' : '#ef4444') : 'rgba(255,255,255,0.03)',
+                  color: side === s ? '#fff' : '#4b5563',
+                }}>{s}</button>
+              ))}
+            </div>
+
+            {/* Order type */}
+            <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+              {['market', 'limit'].map(t => (
+                <button key={t} onClick={() => setOrderType(t)} style={{
+                  flex: 1, padding: '7px 0', fontSize: 11, fontWeight: 700, border: 'none', borderRadius: 6, cursor: 'pointer',
+                  textTransform: 'uppercase',
+                  background: orderType === t ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.05)',
+                  color: orderType === t ? '#a5b4fc' : '#4b5563',
+                }}>{t}</button>
+              ))}
+            </div>
+
+            {/* Qty + limit price */}
+            <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 10, color: '#4b5563', marginBottom: 4 }}>SHARES</div>
+                <input type="number" min="0.01" step="0.01" value={qty} onChange={e => setQty(e.target.value)} style={inp} />
+              </div>
+              {orderType === 'limit' && (
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 10, color: '#4b5563', marginBottom: 4 }}>LIMIT PRICE</div>
+                  <input type="number" min="0.01" step="0.01" value={limitPrice} onChange={e => setLimitPrice(e.target.value)} style={inp} />
+                </div>
+              )}
+            </div>
+
+            {/* Est. total */}
+            {total > 0 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', marginBottom: 14, borderTop: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                <span style={{ fontSize: 12, color: '#6b7280' }}>Est. {orderType === 'market' ? 'Value' : 'Total'}</span>
+                <span style={{ fontSize: 14, fontFamily: 'monospace', fontWeight: 700 }}>${total.toFixed(2)}</span>
+              </div>
+            )}
+
+            {err && <div style={{ fontSize: 11, color: '#ef4444', marginBottom: 10, padding: '8px 10px', borderRadius: 7, background: 'rgba(239,68,68,0.08)' }}>{err}</div>}
+
+            <button onClick={submit} disabled={submitting || !qty || parseFloat(qty) <= 0} style={{
+              width: '100%', border: 'none', borderRadius: 10, padding: '13px 0', fontWeight: 800, fontSize: 14,
+              cursor: submitting ? 'wait' : 'pointer',
+              background: side === 'buy' ? '#10b981' : '#ef4444',
+              color: '#fff', opacity: submitting ? 0.7 : 1,
+            }}>{submitting ? 'Placing order…' : `${side === 'buy' ? 'Buy' : 'Sell'} ${symbol}`}</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BrokerSection({ getToken }) {
+  const [status, setStatus] = useState(null);
+  const [account, setAccount] = useState(null);
+  const [form, setForm] = useState({ key: '', secret: '', mode: 'paper' });
+  const [connecting, setConnecting] = useState(false);
+  const [err, setErr] = useState('');
+  const [showForm, setShowForm] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const token = await getToken();
+      const r = await fetch('/api/broker-connect', { headers: { Authorization: `Bearer ${token}` } });
+      const d = await r.json();
+      setStatus(d);
+      if (d.connected) {
+        const r2 = await fetch('/api/broker-account', { headers: { Authorization: `Bearer ${token}` } });
+        const d2 = await r2.json();
+        if (!d2.error) setAccount(d2);
+      }
+    } catch {}
+  }, [getToken]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const connect = async () => {
+    if (!form.key || !form.secret) return;
+    setConnecting(true); setErr('');
+    try {
+      const token = await getToken();
+      const res = await fetch('/api/broker-connect', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alpacaKey: form.key, alpacaSecret: form.secret, mode: form.mode }),
+      });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      setShowForm(false);
+      await load();
+    } catch (e) { setErr(e.message); }
+    finally { setConnecting(false); }
+  };
+
+  const disconnect = async () => {
+    if (!confirm('Disconnect your Alpaca account?')) return;
+    const token = await getToken();
+    await fetch('/api/broker-connect', { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    setStatus(null); setAccount(null);
+  };
+
+  const inp = {
+    background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+    borderRadius: 6, padding: '8px 10px', color: '#f9fafb', fontSize: 12,
+    fontFamily: 'monospace', outline: 'none', width: '100%', boxSizing: 'border-box',
+  };
+
+  const fmtMoney = n => n != null ? `$${parseFloat(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—';
+
+  return (
+    <div style={{ padding: 14, borderRadius: 10, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <div style={{ fontSize: 10, color: '#a5b4fc', fontWeight: 800, letterSpacing: '0.08em' }}>BROKER (ALPACA)</div>
+        {status?.connected && (
+          <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 4, background: 'rgba(16,185,129,0.15)', color: '#10b981', fontWeight: 700 }}>
+            {account?.mode === 'live' ? 'LIVE' : 'PAPER'}
+          </span>
+        )}
+      </div>
+
+      {!status?.connected && !showForm && (
+        <>
+          <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 12px', lineHeight: 1.6 }}>
+            Connect your Alpaca account to place trades directly from FlowEdge. Free paper trading available instantly.
+          </p>
+          <button onClick={() => setShowForm(true)} style={{
+            width: '100%', borderRadius: 8, padding: '9px 0', fontWeight: 800, fontSize: 12, cursor: 'pointer',
+            background: 'rgba(99,102,241,0.15)', border: '1px solid rgba(99,102,241,0.35)', color: '#a5b4fc',
+          }}>Connect Alpaca Account →</button>
+        </>
+      )}
+
+      {showForm && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', borderRadius: 7, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.08)', marginBottom: 4 }}>
+            {['paper', 'live'].map(m => (
+              <button key={m} onClick={() => setForm(f => ({ ...f, mode: m }))} style={{
+                flex: 1, padding: '7px 0', fontSize: 11, fontWeight: 700, border: 'none', cursor: 'pointer',
+                textTransform: 'uppercase',
+                background: form.mode === m ? (m === 'live' ? 'rgba(239,68,68,0.25)' : 'rgba(99,102,241,0.25)') : 'rgba(255,255,255,0.03)',
+                color: form.mode === m ? (m === 'live' ? '#ef4444' : '#a5b4fc') : '#4b5563',
+              }}>{m === 'paper' ? 'Paper Trading' : 'Live Trading'}</button>
+            ))}
+          </div>
+          <input placeholder="Alpaca API Key ID" value={form.key} onChange={e => setForm(f => ({ ...f, key: e.target.value }))} style={inp} />
+          <input placeholder="Alpaca Secret Key" type="password" value={form.secret} onChange={e => setForm(f => ({ ...f, secret: e.target.value }))} style={inp} />
+          {form.mode === 'live' && (
+            <div style={{ fontSize: 10, color: '#f59e0b', padding: '6px 8px', borderRadius: 6, background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)' }}>
+              ⚠ Live mode places real orders with real money
+            </div>
+          )}
+          {err && <div style={{ fontSize: 11, color: '#ef4444' }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={connect} disabled={connecting} style={{
+              flex: 2, background: '#6366f1', border: 'none', borderRadius: 7, padding: '9px 0',
+              color: '#fff', fontWeight: 700, cursor: 'pointer', fontSize: 12, opacity: connecting ? 0.7 : 1,
+            }}>{connecting ? 'Verifying…' : 'Connect'}</button>
+            <button onClick={() => { setShowForm(false); setErr(''); }} style={{
+              flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+              borderRadius: 7, padding: '9px 0', color: '#6b7280', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+            }}>Cancel</button>
+          </div>
+          <div style={{ fontSize: 10, color: '#374151', textAlign: 'center' }}>
+            Get your keys at alpaca.markets → API Keys
+          </div>
+        </div>
+      )}
+
+      {status?.connected && account && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            {[
+              ['Portfolio Value', fmtMoney(account.account?.portfolio_value)],
+              ['Buying Power', fmtMoney(account.account?.buying_power)],
+              ['Day P&L', fmtMoney(account.account?.unrealized_intraday_pl)],
+              ['Positions', account.positions?.length ?? 0],
+            ].map(([label, val]) => (
+              <div key={label} style={{ padding: '8px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                <div style={{ fontSize: 9, color: '#4b5563', marginBottom: 3 }}>{label}</div>
+                <div style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700 }}>{val}</div>
+              </div>
+            ))}
+          </div>
+
+          {account.positions?.length > 0 && (
+            <div style={{ marginTop: 4 }}>
+              <div style={{ fontSize: 9, color: '#4b5563', marginBottom: 6, letterSpacing: '0.08em' }}>OPEN POSITIONS</div>
+              {account.positions.map(p => {
+                const pl = parseFloat(p.unrealized_pl || 0);
+                const c = pl >= 0 ? '#10b981' : '#ef4444';
+                return (
+                  <div key={p.symbol} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    <div>
+                      <span style={{ fontWeight: 700, fontSize: 12 }}>{p.symbol}</span>
+                      <span style={{ fontSize: 10, color: '#4b5563', marginLeft: 6 }}>{p.qty} shares</span>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 11, fontFamily: 'monospace' }}>${parseFloat(p.current_price).toFixed(2)}</div>
+                      <div style={{ fontSize: 10, color: c, fontFamily: 'monospace' }}>{pl >= 0 ? '+' : ''}${pl.toFixed(2)}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {account.orders?.filter(o => ['new','partially_filled','pending_new'].includes(o.status)).length > 0 && (
+            <div style={{ marginTop: 4 }}>
+              <div style={{ fontSize: 9, color: '#4b5563', marginBottom: 6, letterSpacing: '0.08em' }}>PENDING ORDERS</div>
+              {account.orders.filter(o => ['new','partially_filled','pending_new'].includes(o.status)).map(o => (
+                <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <span style={{ fontWeight: 700, fontSize: 12 }}>{o.symbol}</span>
+                  <span style={{ fontSize: 10, color: '#6b7280' }}>{o.side?.toUpperCase()} {o.qty} · {o.type?.toUpperCase()}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+            <button onClick={load} style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 7, padding: '7px 0', color: '#9ca3af', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>↻ Refresh</button>
+            <button onClick={disconnect} style={{ flex: 1, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 7, padding: '7px 0', color: '#ef4444', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>Disconnect</button>
+          </div>
+        </div>
+      )}
+
+      {status?.connected && !account && (
+        <div style={{ fontSize: 12, color: '#4b5563', textAlign: 'center', padding: '12px 0' }}>Loading account…</div>
+      )}
+    </div>
+  );
+}
+
+
 
 function ProGate({ children }) {
   if (!CLERK_KEY) return children;
@@ -1163,6 +1479,8 @@ export default function App() {
   const [lastUpdate, setLastUpdate] = useState("");
   const [tab, setTab] = useState("Watch");
   const [chartSymbol, setChartSymbol] = useState(null);
+  const [tradeTarget, setTradeTarget] = useState(null);
+  const [brokerConnected, setBrokerConnected] = useState(false);
   const syncTimer = useRef(null);
 
   // Persist watchlist to localStorage
@@ -1238,6 +1556,19 @@ export default function App() {
   useEffect(() => {
     if (!isMobile && tab === "Watch") setTab("Signals");
   }, [isMobile]);
+
+  // Check broker connection on sign-in
+  useEffect(() => {
+    if (!isSignedIn) return;
+    (async () => {
+      try {
+        const token = await getToken();
+        const res = await fetch('/api/broker-connect', { headers: { Authorization: `Bearer ${token}` } });
+        const data = await res.json();
+        setBrokerConnected(!!data.connected);
+      } catch {}
+    })();
+  }, [isSignedIn]);
 
   const bullCount = stocks.filter(s => s.regularMarketChangePercent >= 0).length;
   const totalVol = stocks.reduce((s, d) => s + (d.regularMarketVolume || 0) * (d.regularMarketPrice || 0), 0);
@@ -1357,7 +1688,7 @@ export default function App() {
                       {ALL_TICKERS.map(t => <option key={t} value={t} />)}
                     </datalist>
                     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                      {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} />)}
+                      {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
                     </div>
                   </div>
                 )}
@@ -1413,7 +1744,7 @@ export default function App() {
                   {ALL_TICKERS.map(t => <option key={t} value={t} />)}
                 </datalist>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} />)}
+                  {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
                 </div>
               </div>
 
@@ -1460,6 +1791,16 @@ export default function App() {
         </>
       )}
       {chartSymbol && <ChartModal symbol={chartSymbol} onClose={() => setChartSymbol(null)} />}
+      {tradeTarget && (
+        <TradeModal
+          symbol={tradeTarget.symbol}
+          price={tradeTarget.price}
+          initialSide={tradeTarget.side}
+          onClose={() => setTradeTarget(null)}
+          getToken={getToken}
+          onFilled={() => setBrokerConnected(true)}
+        />
+      )}
     </div>
   );
 }
