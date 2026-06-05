@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useUser, useAuth, SignInButton, UserButton } from "@clerk/clerk-react";
 
 function useIsMobile() {
@@ -1378,8 +1378,144 @@ function GammaPanel({ stocks }) {
           {data.heatmap?.cells?.length > 0 && (
             <OIHeatMap heatmap={data.heatmap} spot={spot} buyKingNode={data.buyKingNode} sellKingNode={data.sellKingNode} />
           )}
+
+          {/* King node forecast line chart */}
+          {data.heatmap?.cells?.length > 0 && spot && (
+            <KingNodeForecast symbol={symbol} heatmap={data.heatmap} spot={spot} />
+          )}
         </>
       )}
+    </div>
+  );
+}
+
+function KingNodeForecast({ symbol, heatmap, spot }) {
+  const nodes = useMemo(() => {
+    if (!heatmap?.cells?.length) return [];
+    const MONTHS = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
+    const now = new Date();
+    const cutoff = new Date(now); cutoff.setDate(cutoff.getDate() + 36);
+
+    const byExpiry = {};
+    heatmap.cells.forEach(c => {
+      if (!byExpiry[c.expiry]) byExpiry[c.expiry] = { buy: null, sell: null };
+      const e = byExpiry[c.expiry];
+      if (c.gex > 0 && (!e.buy || c.gex > e.buy.gex)) e.buy = c;
+      if (c.gex < 0 && (!e.sell || c.gex < e.sell.gex)) e.sell = c;
+    });
+
+    return Object.entries(byExpiry).map(([expiry, { buy, sell }]) => {
+      const parts = expiry.trim().split(/\s+/);
+      const month = MONTHS[parts[0]]; const day = parseInt(parts[1]);
+      if (!month || !day) return null;
+      const year = now.getFullYear() + (month < now.getMonth() - 1 ? 1 : 0);
+      const date = new Date(year, month - 1, day);
+      if (date <= now || date > cutoff) return null;
+      return { expiry, date, buyStrike: buy?.strike ?? null, sellStrike: sell?.strike ?? null };
+    }).filter(Boolean).sort((a, b) => a.date - b.date);
+  }, [heatmap]);
+
+  if (nodes.length < 2) return null;
+
+  const VW = 420, VH = 210;
+  const PAD = { top: 28, right: 38, bottom: 44, left: 54 };
+  const cw = VW - PAD.left - PAD.right, ch = VH - PAD.top - PAD.bottom;
+
+  const allV = [spot, ...nodes.flatMap(n => [n.buyStrike, n.sellStrike])].filter(v => v != null);
+  const yMin = Math.min(...allV) * 0.983, yMax = Math.max(...allV) * 1.017;
+  const xOf = i => PAD.left + (nodes.length > 1 ? (i / (nodes.length - 1)) * cw : cw / 2);
+  const yOf = v => PAD.top + (1 - (v - yMin) / (yMax - yMin)) * ch;
+
+  const buyPts  = nodes.map((n, i) => n.buyStrike  != null ? { x: xOf(i), y: yOf(n.buyStrike),  v: n.buyStrike  } : null);
+  const sellPts = nodes.map((n, i) => n.sellStrike != null ? { x: xOf(i), y: yOf(n.sellStrike), v: n.sellStrike } : null);
+  const pts2str = pts => pts.filter(Boolean).map(p => `${p.x},${p.y}`).join(' ');
+
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(t => ({ y: yOf(yMin + t*(yMax-yMin)), v: yMin + t*(yMax-yMin) }));
+  const fmtD = d => { const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return `${M[d.getMonth()]} ${d.getDate()}`; };
+  const fmtS = v => v % 1 === 0 ? `$${v.toFixed(0)}` : `$${v.toFixed(1)}`;
+  const spotY = yOf(spot);
+
+  // Zone polygon between buy and sell
+  const zonePts = [
+    ...buyPts.filter(Boolean).map(p => `${p.x},${p.y}`),
+    ...sellPts.filter(Boolean).reverse().map(p => `${p.x},${p.y}`),
+  ].join(' ');
+
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div style={{ fontSize: 9, color: '#a5b4fc', fontWeight: 800, letterSpacing: '0.1em', marginBottom: 8 }}>
+        ♛ KING NODE FORECAST · {symbol} · NEXT {nodes.length} EXPIRATIONS
+      </div>
+      <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 8, padding: '8px 4px 4px', overflow: 'hidden' }}>
+        <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: '100%', display: 'block' }} preserveAspectRatio="xMidYMid meet">
+
+          {/* Grid */}
+          {yTicks.map(({ y, v }, i) => (
+            <g key={i}>
+              <line x1={PAD.left} y1={y} x2={VW - PAD.right} y2={y} stroke="rgba(255,255,255,0.045)" strokeWidth={1} />
+              <text x={PAD.left - 6} y={y + 3.5} fontSize={9} fill="#374151" textAnchor="end" fontFamily="monospace">{fmtS(v)}</text>
+            </g>
+          ))}
+
+          {/* Zone fill */}
+          {zonePts && <polygon points={zonePts} fill="rgba(99,102,241,0.07)" />}
+
+          {/* Spot line */}
+          <line x1={PAD.left} y1={spotY} x2={VW - PAD.right} y2={spotY} stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="6,4" strokeOpacity={0.75} />
+          <text x={VW - PAD.right + 4} y={spotY + 3.5} fontSize={8} fill="#f59e0b" fontFamily="monospace">${spot?.toFixed(0)}</text>
+
+          {/* Buy king line + area */}
+          {buyPts.filter(Boolean).length > 1 && (
+            <polyline points={pts2str(buyPts)} fill="none" stroke="#10b981" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" strokeOpacity={0.9} />
+          )}
+
+          {/* Sell king line */}
+          {sellPts.filter(Boolean).length > 1 && (
+            <polyline points={pts2str(sellPts)} fill="none" stroke="#ef4444" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" strokeOpacity={0.9} />
+          )}
+
+          {/* Vertical drop lines */}
+          {nodes.map((n, i) => (
+            <line key={i} x1={xOf(i)} y1={PAD.top + ch} x2={xOf(i)} y2={PAD.top + ch + 6} stroke="rgba(255,255,255,0.08)" strokeWidth={1} />
+          ))}
+
+          {/* Buy king dots + labels */}
+          {buyPts.map((p, i) => p && (
+            <g key={`b${i}`}>
+              <circle cx={p.x} cy={p.y} r={5.5} fill="#0a0f17" stroke="#10b981" strokeWidth={2} />
+              <text x={p.x} y={p.y - 10} fontSize={9} fill="#10b981" textAnchor="middle" fontFamily="monospace" fontWeight="bold">{fmtS(p.v)}</text>
+            </g>
+          ))}
+
+          {/* Sell king dots + labels */}
+          {sellPts.map((p, i) => p && (
+            <g key={`s${i}`}>
+              <circle cx={p.x} cy={p.y} r={5.5} fill="#0a0f17" stroke="#ef4444" strokeWidth={2} />
+              <text x={p.x} y={p.y + 19} fontSize={9} fill="#ef4444" textAnchor="middle" fontFamily="monospace" fontWeight="bold">{fmtS(p.v)}</text>
+            </g>
+          ))}
+
+          {/* X axis date labels */}
+          {nodes.map((n, i) => (
+            <text key={i} x={xOf(i)} y={VH - PAD.bottom + 16}
+              fontSize={9} fill="#4b5563" textAnchor={nodes.length > 7 ? 'end' : 'middle'} fontFamily="monospace"
+              transform={nodes.length > 7 ? `rotate(-38,${xOf(i)},${VH-PAD.bottom+16})` : ''}>
+              {fmtD(n.date)}
+            </text>
+          ))}
+
+          {/* Axes */}
+          <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={PAD.top+ch} stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
+          <line x1={PAD.left} y1={PAD.top+ch} x2={VW-PAD.right} y2={PAD.top+ch} stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
+        </svg>
+      </div>
+
+      <div style={{ display: 'flex', gap: 16, marginTop: 6, fontSize: 9, fontFamily: 'monospace', flexWrap: 'wrap' }}>
+        <span style={{ color: '#10b981' }}>♛ Buy King — support magnet</span>
+        <span style={{ color: '#ef4444' }}>♛ Sell King — resistance</span>
+        <span style={{ color: '#f59e0b' }}>— Spot</span>
+        <span style={{ color: '#6366f1' }}>▪ Forecast zone</span>
+      </div>
     </div>
   );
 }
