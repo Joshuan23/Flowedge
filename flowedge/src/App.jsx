@@ -234,35 +234,46 @@ function StockCard({ data, index, onRemove, onChart, onTrade }) {
   );
 }
 
-function SignalCard({ data, index }) {
+function SignalCard({ symbol, signal, index }) {
   const [vis, setVis] = useState(false);
-  useEffect(() => { setTimeout(() => setVis(true), index * 100); }, []);
-  const up = data.regularMarketChangePercent >= 0;
-  const color = up ? "#10b981" : "#ef4444";
-  const strength = Math.min(Math.abs(data.regularMarketChangePercent || 0) * 12, 99).toFixed(0);
+  useEffect(() => { setTimeout(() => setVis(true), index * 80); }, []);
+  const { showLong, setupProb, activeTP, activeSL, rrCheck, iv, spot } = signal;
+  const color = showLong ? "#10b981" : "#ef4444";
+  const fmtS = n => n == null ? "—" : n % 1 === 0 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
+  const barColor = setupProb >= 65 ? "#10b981" : setupProb >= 58 ? "#f59e0b" : color;
 
   return (
     <div style={{
       padding: "12px 14px", borderRadius: 8,
-      background: "rgba(255,255,255,0.03)",
+      background: showLong ? "rgba(16,185,129,0.05)" : "rgba(239,68,68,0.05)",
       border: `1px solid ${color}22`, borderLeft: `3px solid ${color}`,
       opacity: vis ? 1 : 0, transform: vis ? "translateY(0)" : "translateY(8px)",
       transition: "all 0.4s ease",
     }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-        <span style={{ fontWeight: 800, fontSize: 14, color: "#f9fafb" }}>{data.symbol}</span>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ width: 60, height: 3, background: "rgba(255,255,255,0.1)", borderRadius: 2 }}>
-            <div style={{ width: `${strength}%`, height: "100%", background: color, borderRadius: 2 }} />
+          <span style={{ fontWeight: 800, fontSize: 14, color: "#f9fafb" }}>{symbol}</span>
+          <span style={{
+            fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 4,
+            background: `${color}22`, color, border: `1px solid ${color}44`, letterSpacing: "0.08em",
+          }}>{showLong ? "LONG" : "SHORT"}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ width: 50, height: 3, background: "rgba(255,255,255,0.1)", borderRadius: 2 }}>
+            <div style={{ width: `${setupProb}%`, height: "100%", background: barColor, borderRadius: 2 }} />
           </div>
-          <span style={{ fontSize: 11, color, fontFamily: "monospace", fontWeight: 700 }}>{strength}</span>
+          <span style={{ fontSize: 12, color: "#f9fafb", fontFamily: "monospace", fontWeight: 700 }}>{setupProb}%</span>
         </div>
       </div>
-      <p style={{ fontSize: 11, color: "#6b7280", margin: 0, lineHeight: 1.6 }}>
-        {up
-          ? `${data.symbol} bullish. Up ${pct(data.regularMarketChangePercent)} on ${fmt(data.regularMarketVolume)} vol. Watch for institutional follow-through.`
-          : `${data.symbol} bearish pressure. Down ${pct(data.regularMarketChangePercent)}. Monitor for support or capitulation.`}
-      </p>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
+        {[["Entry", fmtS(spot)], ["Target", fmtS(activeTP)], ["Stop", fmtS(activeSL)], ["R:R", rrCheck ? `${rrCheck.toFixed(1)}:1` : "—"]].map(([label, val]) => (
+          <div key={label}>
+            <div style={{ fontSize: 9, color: "#4b5563", letterSpacing: "0.07em", marginBottom: 1 }}>{label}</div>
+            <div style={{ fontSize: 11, fontFamily: "monospace", color: "#f9fafb", fontWeight: 700 }}>{val}</div>
+          </div>
+        ))}
+      </div>
+      {iv > 45 && <div style={{ marginTop: 6, fontSize: 10, color: "#f59e0b" }}>⚠ IV {iv}% — elevated, avoid buying premium</div>}
     </div>
   );
 }
@@ -1169,6 +1180,60 @@ const TICKER_GROUPS = [
   { label: "Materials", tickers: ["FCX","NEM","GOLD","AA","CLF","STLD","NUE","LIN","APD","ECL","ALB","SQM"] },
 ];
 
+// Pure scoring function — shared by GammaPanel (display) and signal scanner (bulk)
+function scoreGammaData(d) {
+  if (!d || !d.spot) return null;
+  const spot = d.spot;
+  const bias = d.biasScore ?? 0;
+  const pcRaw = parseFloat(d.pcVolumeRatio ?? 1);
+  const pcScore = pcRaw < 0.5 ? -0.9 : pcRaw < 0.7 ? -0.6 : pcRaw < 0.9 ? -0.3
+    : pcRaw < 1.1 ? 0 : pcRaw < 1.3 ? 0.3 : pcRaw < 1.6 ? 0.6 : 0.9;
+  const composite = bias * 0.55 - pcScore * 0.45;
+  const showLong = composite >= 0;
+  const confidence = Math.abs(composite);
+  const gexBullish = bias > 0.10, gexBearish = bias < -0.10;
+  const pcBullish = pcScore < -0.15, pcBearish = pcScore > 0.15;
+  const directionAgrees = (showLong && gexBullish && pcBullish) || (!showLong && gexBearish && pcBearish);
+  const buyDistPct = d.buyKingNode?.distancePct ?? 0;
+  const sellDistPct = d.sellKingNode?.distancePct ?? 0;
+  const activeDistPct = showLong ? buyDistPct : sellDistPct;
+  const distQuality = activeDistPct < 1 ? 0.1 : activeDistPct < 2 ? 0.5 : activeDistPct < 5 ? 1.0 : activeDistPct < 8 ? 0.6 : 0.2;
+  const fl = d.flipLevel;
+  const flipPenalty = !fl ? 0 : (() => { const dist = Math.abs(spot - fl) / spot * 100; return dist < 1 ? 0.9 : dist < 2 ? 0.5 : dist < 3 ? 0.2 : 0; })();
+  const buyTP = d.buyKingNode?.strike ?? null;
+  const sellTP = d.sellKingNode?.strike ?? null;
+  const atr = d.atr14;
+  const buySL = (() => {
+    if (!spot || !buyTP) return null;
+    if (atr) return +(spot - atr * 1.5).toFixed(2);
+    const pw = d.putWall; if (pw && pw < spot && (spot - pw) < (buyTP - spot) * 3) return pw;
+    return +(spot - (buyTP - spot) * 0.5).toFixed(2);
+  })();
+  const sellSL = (() => {
+    if (!spot || !sellTP) return null;
+    if (atr) return +(spot + atr * 1.5).toFixed(2);
+    const cw = d.callWall; if (cw && cw > spot && (cw - spot) < (spot - sellTP) * 3) return cw;
+    return +(spot + (spot - sellTP) * 0.5).toFixed(2);
+  })();
+  const activeTP = showLong ? buyTP : sellTP;
+  const activeSL = showLong ? buySL : sellSL;
+  const rrCheck = (() => {
+    if (!spot || !activeTP || !activeSL) return 0;
+    if (showLong && spot > activeSL) return (activeTP - spot) / (spot - activeSL);
+    if (!showLong && activeSL > spot) return (spot - activeTP) / (activeSL - spot);
+    return 0;
+  })();
+  const hasEdge = directionAgrees && confidence >= 0.25 && distQuality >= 0.4 && flipPenalty < 0.5 && rrCheck >= 1.2;
+  const setupProb = hasEdge
+    ? Math.min(74, Math.round(52 + confidence * 16 + (distQuality - 0.5) * 4 + Math.min(rrCheck - 1.2, 1) * 3))
+    : null;
+  return {
+    hasEdge, setupProb, showLong, composite, confidence, spot,
+    activeTP, activeSL, rrCheck: +rrCheck.toFixed(2), iv: d.impliedVol ?? 0,
+    activeDistPct, pcRaw, biasScore: bias, atr,
+  };
+}
+
 function GammaPanel({ stocks }) {
   const [symbol, setSymbol] = useState("SPY");
   const [expiry, setExpiry] = useState(null);
@@ -1222,101 +1287,27 @@ function GammaPanel({ stocks }) {
   }, [symbol, expiry, fetchGamma]);
 
   const spot = data?.spot;
-
-  // v2.4 — derive entry/TP/SL from king nodes + key levels
-  const buyTP = data?.buyKingNode?.strike ?? null;
-  const sellTP = data?.sellKingNode?.strike ?? null;
-  const buySL = (() => {
-    if (!spot || !buyTP) return null;
-    const pw = data?.putWall;
-    if (pw && pw < spot && (spot - pw) < (buyTP - spot) * 3) return pw;
-    return +(spot - (buyTP - spot) * 0.5).toFixed(2);
-  })();
-  const sellSL = (() => {
-    if (!spot || !sellTP) return null;
-    const cw = data?.callWall;
-    if (cw && cw > spot && (cw - spot) < (spot - sellTP) * 3) return cw;
-    return +(spot + (spot - sellTP) * 0.5).toFixed(2);
-  })();
-  const buyRR = spot && buyTP && buySL && spot > buySL
-    ? +((buyTP - spot) / (spot - buySL)).toFixed(2) : null;
-  const sellRR = spot && sellTP && sellSL && sellSL > spot
-    ? +((spot - sellTP) / (sellSL - spot)).toFixed(2) : null;
   const fmtP = n => n != null ? `$${n % 1 === 0 ? n.toFixed(0) : n.toFixed(2)}` : "—";
   const rrColor = rr => rr >= 2 ? "#10b981" : rr >= 1.5 ? "#f59e0b" : "#ef4444";
 
-  // ── Multi-factor signal scoring ──────────────────────────────────────────
-  // bias > 0 = bullish (buy king GEX > sell king GEX), from biasScore [-1,+1]
-  const bias = data?.biasScore ?? 0;
+  // Use shared scorer — keeps GammaPanel and signal scanner in sync
+  const scored = scoreGammaData(data);
+  const {
+    hasEdge = false, setupProb = null, showLong = true, composite = 0,
+    confidence = 0, activeTP = null, activeSL = null, rrCheck = 0, iv = 25,
+    activeDistPct = 0, pcRaw = 1, biasScore: bias = 0,
+  } = scored ?? {};
+  const activeTPval = activeTP, activeSLval = activeSL;
 
-  // P/C volume ratio: negative pcScore = bullish (call-heavy flow)
-  const pcRaw = parseFloat(data?.pcVolumeRatio ?? 1);
-  const pcScore = pcRaw < 0.5 ? -0.9
-    : pcRaw < 0.7 ? -0.6
-    : pcRaw < 0.9 ? -0.3
-    : pcRaw < 1.1 ?  0
-    : pcRaw < 1.3 ?  0.3
-    : pcRaw < 1.6 ?  0.6
-    :                0.9;
-
-  // Composite: positive = bullish, negative = bearish
-  // bias > 0 → bullish; pcScore < 0 → bullish (-pcScore is positive)
-  const composite = bias * 0.55 - pcScore * 0.45;
-  const showLong = composite >= 0;
-  const confidence = Math.abs(composite);  // 0..1 signal strength
-
-  // Gate: BOTH GEX bias and P/C flow must agree — this is the main accuracy filter
-  const gexBullish = bias > 0.10;
-  const gexBearish = bias < -0.10;
-  const pcBullish  = pcScore < -0.15;   // meaningful call flow
-  const pcBearish  = pcScore >  0.15;   // meaningful put flow
-  const directionAgrees = (showLong  && gexBullish && pcBullish)
-                       || (!showLong && gexBearish && pcBearish);
-
-  // King node distance quality (2-5% = ideal GEX magnet range)
-  const buyDistPct  = data?.buyKingNode?.distancePct  ?? 0;
-  const sellDistPct = data?.sellKingNode?.distancePct ?? 0;
-  const activeDistPct = showLong ? buyDistPct : sellDistPct;
-  const distQuality = activeDistPct < 1 ? 0.1
-    : activeDistPct < 2 ? 0.5
-    : activeDistPct < 5 ? 1.0
-    : activeDistPct < 8 ? 0.6
-    : 0.2;
-
-  // Flip level proximity — near flip = choppy/dangerous, suppress signal
+  // Surface-level values for the UI displays below
+  const gexBullish = bias > 0.10, gexBearish = bias < -0.10;
+  const pcScore = pcRaw < 0.5 ? -0.9 : pcRaw < 0.7 ? -0.6 : pcRaw < 0.9 ? -0.3
+    : pcRaw < 1.1 ? 0 : pcRaw < 1.3 ? 0.3 : pcRaw < 1.6 ? 0.6 : 0.9;
+  const pcBullish = pcScore < -0.15, pcBearish = pcScore > 0.15;
   const flipPenalty = (() => {
-    const fl = data?.flipLevel;
-    if (!fl || !spot) return 0;
-    const d = Math.abs(spot - fl) / spot * 100;
-    return d < 1 ? 0.9 : d < 2 ? 0.5 : d < 3 ? 0.2 : 0;
+    const fl = data?.flipLevel; if (!fl || !spot) return 0;
+    const d = Math.abs(spot - fl) / spot * 100; return d < 1 ? 0.9 : d < 2 ? 0.5 : d < 3 ? 0.2 : 0;
   })();
-
-  const iv = data?.impliedVol ?? 25;
-
-  // R:R gate — only show setup if risk/reward is worth taking
-  const activeTPval = showLong ? buyTP : sellTP;
-  const activeSLval = showLong ? buySL : sellSL;
-  const rrCheck = (() => {
-    if (!spot || !activeTPval || !activeSLval) return 0;
-    if (showLong && spot > activeSLval)
-      return (activeTPval - spot) / (spot - activeSLval);
-    if (!showLong && activeSLval > spot)
-      return (spot - activeTPval) / (activeSLval - spot);
-    return 0;
-  })();
-
-  // Full edge gate: direction agrees, confidence sufficient, target quality ok,
-  // not near flip level, R:R at least 1.2:1
-  const hasEdge = directionAgrees
-    && confidence >= 0.25
-    && distQuality >= 0.4
-    && flipPenalty < 0.5
-    && rrCheck >= 1.2;
-
-  // Honest probability: capped at 74%, requires strong conviction to reach top
-  const setupProb = hasEdge
-    ? Math.min(74, Math.round(52 + confidence * 16 + (distQuality - 0.5) * 4 + Math.min(rrCheck - 1.2, 1) * 3))
-    : null;
 
   // Warning flags — surface what's working against the trade
   const warnings = [];
@@ -1331,9 +1322,9 @@ function GammaPanel({ stocks }) {
     if (iv > 50) warnings.push(`IV ${iv}% elevated — avoid buying options premium`);
   }
 
+  const buyTP = data?.buyKingNode?.strike ?? null;
+  const sellTP = data?.sellKingNode?.strike ?? null;
   const activeNode = showLong ? data?.buyKingNode : data?.sellKingNode;
-  const activeTP = activeTPval;
-  const activeSL = activeSLval;
   const activeRR = rrCheck > 0 ? +rrCheck.toFixed(2) : null;
 
   const selectStyle = {
@@ -1729,6 +1720,57 @@ function DarkPoolPanel({ stocks }) {
   );
 }
 
+function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan }) {
+  const edgeTickers = watchlist
+    .filter(sym => scanResults[sym]?.hasEdge)
+    .sort((a, b) => (scanResults[b].setupProb ?? 0) - (scanResults[a].setupProb ?? 0));
+  const noEdgeTickers = watchlist.filter(sym => scanResults[sym] && !scanResults[sym].hasEdge);
+  const pendingTickers = watchlist.filter(sym => !scanResults[sym]);
+  const allDone = !scanning && pendingTickers.length === 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+          GEX-Scored Signals
+        </span>
+        {scanning ? (
+          <span style={{ fontSize: 10, color: "#6366f1", fontFamily: "monospace" }}>
+            scanning {scanProgress.done}/{scanProgress.total}…
+          </span>
+        ) : (
+          <button onClick={onRescan} style={{
+            background: "none", border: "none", color: "#4b5563", fontSize: 10,
+            cursor: "pointer", padding: 0,
+          }}>↻ rescan</button>
+        )}
+      </div>
+
+      {edgeTickers.map((sym, i) => (
+        <SignalCard key={sym} symbol={sym} signal={scanResults[sym]} index={i} />
+      ))}
+
+      {allDone && edgeTickers.length === 0 && (
+        <div style={{ padding: 20, textAlign: "center", borderRadius: 8, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+          <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 4 }}>No clear edge in watchlist</div>
+          <div style={{ fontSize: 10, color: "#374151" }}>GEX bias and P/C flow must agree on direction for a signal to appear</div>
+        </div>
+      )}
+
+      {(noEdgeTickers.length > 0 || pendingTickers.length > 0) && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 4 }}>
+          {noEdgeTickers.map(sym => (
+            <span key={sym} style={{ fontSize: 10, fontFamily: "monospace", color: "#374151", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 4, padding: "3px 7px" }}>{sym}</span>
+          ))}
+          {pendingTickers.map(sym => (
+            <span key={sym} style={{ fontSize: 10, fontFamily: "monospace", color: "#1f2937", background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.04)", borderRadius: 4, padding: "3px 7px" }}>{sym}…</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const TABS = ["Signals", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Account"];
 
 export default function App() {
@@ -1750,6 +1792,53 @@ export default function App() {
   const [tradeTarget, setTradeTarget] = useState(null);
   const [brokerConnected, setBrokerConnected] = useState(false);
   const syncTimer = useRef(null);
+
+  // ── Signal scanner ──────────────────────────────────────────────────────
+  const [scanResults, setScanResults] = useState({});
+  const [scanning, setScanning] = useState(false);
+  const [scanProgress, setScanProgress] = useState({ done: 0, total: 0 });
+  const scanActiveRef = useRef(false);
+  const watchlistRef = useRef(watchlist);
+  const scanResultsRef = useRef({});
+  useEffect(() => { watchlistRef.current = watchlist; }, [watchlist]);
+
+  const triggerScan = useCallback(async (force = false) => {
+    if (scanActiveRef.current) return;
+    scanActiveRef.current = true;
+    setScanning(true);
+    const CACHE_MS = 5 * 60 * 1000;
+    const now = Date.now();
+    const queue = force
+      ? [...watchlistRef.current]
+      : watchlistRef.current.filter(sym => {
+          const r = scanResultsRef.current[sym];
+          return !r || (now - r.scannedAt) > CACHE_MS;
+        });
+    setScanProgress({ done: 0, total: queue.length });
+    for (let i = 0; i < queue.length; i++) {
+      const sym = queue[i];
+      try {
+        const res = await fetch(`/api/gamma?symbol=${sym}`);
+        const d = await res.json();
+        if (!d.error) {
+          const scored = scoreGammaData(d);
+          if (scored) {
+            const entry = { ...scored, scannedAt: now };
+            scanResultsRef.current = { ...scanResultsRef.current, [sym]: entry };
+            setScanResults(prev => ({ ...prev, [sym]: entry }));
+          }
+        }
+      } catch {}
+      setScanProgress({ done: i + 1, total: queue.length });
+      if (i < queue.length - 1) await new Promise(r => setTimeout(r, 350));
+    }
+    scanActiveRef.current = false;
+    setScanning(false);
+  }, []);
+
+  useEffect(() => {
+    if (tab === 'Signals') triggerScan();
+  }, [tab]);
 
   // Persist watchlist to localStorage
   useEffect(() => { localStorage.setItem("fe_watchlist", JSON.stringify(watchlist)); }, [watchlist]);
@@ -1977,22 +2066,12 @@ export default function App() {
                     </div>
                   </div>
                 )}
-                {tab === "Signals" && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {stocks.slice(0, 5).map((s, i) => <SignalCard key={s.symbol} data={s} index={i} />)}
-                    <div style={{ padding: 14, borderRadius: 8, background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)" }}>
-                      <div style={{ fontSize: 10, color: "#a5b4fc", fontWeight: 700, letterSpacing: "0.08em", marginBottom: 6 }}>🔒 PRO FEATURES</div>
-                      <p style={{ fontSize: 11, color: "#6b7280", margin: 0, lineHeight: 1.7 }}>
-                        Real-time sweep detection · Dark pool prints · Gamma exposure · Institutional flow alerts
-                      </p>
-                    </div>
-                  </div>
-                )}
+                {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                 {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
                 {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
                 {tab === "Dark Pool" && <DarkPoolPanel stocks={stocks} />}
-                {tab === "Account" && (CLERK_KEY ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
+                {tab === "Account" && (clerkAvailable ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
               </div>
             </>
           ) : (
@@ -2048,27 +2127,12 @@ export default function App() {
                 </div>
 
                 <div style={{ flex: 1, overflowY: "auto" }}>
-                  {tab === "Signals" && (
-                    <>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                        {stocks.slice(0, 5).map((s, i) => <SignalCard key={s.symbol} data={s} index={i} />)}
-                      </div>
-                      <div style={{
-                        marginTop: 16, padding: 14, borderRadius: 8,
-                        background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)"
-                      }}>
-                        <div style={{ fontSize: 10, color: "#a5b4fc", fontWeight: 700, letterSpacing: "0.08em", marginBottom: 6 }}>🔒 PRO FEATURES</div>
-                        <p style={{ fontSize: 11, color: "#6b7280", margin: 0, lineHeight: 1.7 }}>
-                          Real-time sweep detection · Dark pool prints · Gamma exposure · Institutional flow alerts
-                        </p>
-                      </div>
-                    </>
-                  )}
+                  {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                   {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
                   {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
                   {tab === "Dark Pool" && <DarkPoolPanel stocks={stocks} />}
-                  {tab === "Account" && (CLERK_KEY ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
+                  {tab === "Account" && (clerkAvailable ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
                 </div>
               </div>
             </div>

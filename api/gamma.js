@@ -47,6 +47,22 @@ function calcIV(closes) {
   return Math.max(0.05, hv * 1.3);
 }
 
+// True Range ATR-14 from OHLC data — more accurate stop placement than % of move
+function calcATR(closes, highs, lows, period = 14) {
+  if (!closes || closes.length < period + 1) return null;
+  const trs = [];
+  for (let i = 1; i < closes.length; i++) {
+    const h = highs[i] != null ? highs[i] : closes[i];
+    const l = lows[i] != null ? lows[i] : closes[i];
+    const pc = closes[i - 1];
+    if (h == null || l == null || pc == null) continue;
+    trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  if (trs.length < period) return null;
+  const recent = trs.slice(-period);
+  return +(recent.reduce((s, x) => s + x, 0) / period).toFixed(4);
+}
+
 export default async function handler(req) {
   const { searchParams } = new URL(req.url);
   const symbol = (searchParams.get('symbol') || 'SPY').toUpperCase();
@@ -72,7 +88,10 @@ export default async function handler(req) {
 
     // Dynamic IV from 30-day historical vol
     const closes = chartResult?.indicators?.quote?.[0]?.close || [];
+    const highs  = chartResult?.indicators?.quote?.[0]?.high  || [];
+    const lows   = chartResult?.indicators?.quote?.[0]?.low   || [];
     const sigma = calcIV(closes);
+    const atr14 = calcATR(closes, highs, lows);
 
     const rows = optData?.data?.table?.rows || [];
     const availableExpiries = [...new Set(
@@ -181,7 +200,7 @@ export default async function handler(req) {
       symbol, spot, netGex, gammaWall, putWall, callWall, flipLevel,
       totalCallVol, totalPutVol, pcVolumeRatio,
       availableExpiries, impliedVol: parseFloat((sigma * 100).toFixed(1)),
-      gexByStrike, buyKingNode, sellKingNode, biasScore, heatmap,
+      gexByStrike, buyKingNode, sellKingNode, biasScore, heatmap, atr14,
     }), {
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
     });
