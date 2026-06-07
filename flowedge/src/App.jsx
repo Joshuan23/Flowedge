@@ -2150,6 +2150,18 @@ export default function App() {
           onFilled={() => setBrokerConnected(true)}
         />
       )}
+      <div style={{
+        padding: "10px 20px", borderTop: "1px solid rgba(255,255,255,0.04)",
+        background: "rgba(0,0,0,0.3)", textAlign: "center",
+      }}>
+        <p style={{ fontSize: 10, color: "#374151", margin: 0, lineHeight: 1.7 }}>
+          <strong style={{ color: "#4b5563" }}>Not Financial Advice.</strong>{" "}
+          FlowEdge provides market data and analysis tools for informational and educational purposes only.
+          Signals, scores, and trade setups do not constitute investment advice or recommendations.
+          Market data is sourced from Yahoo Finance and NASDAQ. Past performance does not guarantee future results.
+          Options trading involves significant risk. Trade at your own risk.
+        </p>
+      </div>
     </div>
   );
 }

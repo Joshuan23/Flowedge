@@ -35,6 +35,28 @@ function fetchChart(symbol) {
     });
 }
 
+const QUOTE_FIELDS = [
+  'symbol','shortName','longName',
+  'regularMarketPrice','regularMarketChange','regularMarketChangePercent',
+  'regularMarketVolume','regularMarketDayHigh','regularMarketDayLow',
+  'regularMarketPreviousClose',
+  'fiftyTwoWeekHigh','fiftyTwoWeekLow',
+  'marketCap','earningsTimestamp','earningsTimestampStart','earningsTimestampEnd',
+  'averageDailyVolume3Month','averageDailyVolume10Day',
+  'trailingPE','forwardPE',
+].join(',');
+
+async function fetchQuotesBatch(symbols) {
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(',')}&fields=${QUOTE_FIELDS}&formatted=false&lang=en-US&region=US`;
+  try {
+    const data = await httpsGet(url);
+    const results = data?.quoteResponse?.result || [];
+    if (results.length) return results;
+  } catch {}
+  // Fallback to chart endpoint if v7 fails
+  return Promise.all(symbols.map(s => fetchChart(s).catch(() => null))).then(r => r.filter(Boolean));
+}
+
 // --- Gamma calculation (mirrors api/gamma.js) ---
 function normalPDF(x) { return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI); }
 function bsGamma(S, K, T, sigma, r = 0.05) {
@@ -173,8 +195,9 @@ export default defineConfig({
       configureServer(server) {
         server.middlewares.use('/api/quotes', async (req, res) => {
           try {
-            const symbols = new URL(req.url, 'http://localhost').searchParams.get('symbols') || '';
-            const results = await Promise.all(symbols.split(',').map(s => s.trim()).filter(Boolean).map(fetchChart));
+            const symbols = (new URL(req.url, 'http://localhost').searchParams.get('symbols') || '')
+              .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+            const results = await fetchQuotesBatch(symbols);
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ quoteResponse: { result: results, error: null } }));
           } catch (e) {

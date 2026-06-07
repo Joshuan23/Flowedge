@@ -179,6 +179,13 @@ export default function LandingPage() {
         </div>
         <div style={{ fontSize: 12, color: '#1f2937' }}>© 2026 FlowEdge</div>
       </div>
+      <div style={{ padding: '12px 24px 24px', textAlign: 'center' }}>
+        <p style={{ fontSize: 10, color: '#1f2937', margin: 0, lineHeight: 1.7 }}>
+          <strong style={{ color: '#374151' }}>Not Financial Advice.</strong> FlowEdge is an informational and educational platform only.
+          Signals, scores, and trade setups do not constitute investment advice or recommendations to buy or sell any security.
+          Options trading involves significant risk of loss. Past performance does not guarantee future results. Trade at your own risk.
+        </p>
+      </div>
 
     </div>
   );
