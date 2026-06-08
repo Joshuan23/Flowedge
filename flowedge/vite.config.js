@@ -119,12 +119,13 @@ async function calcGamma(symbol, filterExpiry) {
     const cOI = parseOI(row.c_Openinterest), pOI = parseOI(row.p_Openinterest);
     const cVol = parseOI(row.c_Volume), pVol = parseOI(row.p_Volume);
     totalCallVol += cVol; totalPutVol += pVol;
+    const dteWeight = dte < 1 ? 0.25 : dte < 3 ? 0.6 : dte < 7 ? 0.85 : 1.0;
     if (!strikeMap[k]) strikeMap[k] = { strike: k, callOI: 0, putOI: 0, callVol: 0, putVol: 0, gex: 0, callGex: 0, putGex: 0, expiryDate: row.expiryDate, dte };
     strikeMap[k].callOI += cOI; strikeMap[k].putOI += pOI;
     strikeMap[k].callVol += cVol; strikeMap[k].putVol += pVol;
-    strikeMap[k].gex += (cOI - pOI) * gamma * 100 * spot;
-    strikeMap[k].callGex += cOI * gamma * 100 * spot;
-    strikeMap[k].putGex += pOI * gamma * 100 * spot;
+    strikeMap[k].gex += (cOI - pOI) * gamma * 100 * spot * dteWeight;
+    strikeMap[k].callGex += cOI * gamma * 100 * spot * dteWeight;
+    strikeMap[k].putGex += pOI * gamma * 100 * spot * dteWeight;
   }
   const gexByStrike = Object.values(strikeMap).sort((a, b) => a.strike - b.strike);
   if (!gexByStrike.length) throw new Error('No options data');

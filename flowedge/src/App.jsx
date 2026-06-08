@@ -234,46 +234,70 @@ function StockCard({ data, index, onRemove, onChart, onTrade }) {
   );
 }
 
-function SignalCard({ symbol, signal, index }) {
+function useNow(intervalMs = 60000) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(t);
+  }, [intervalMs]);
+  return now;
+}
+
+function SignalCard({ symbol, signal, index, now }) {
   const [vis, setVis] = useState(false);
   useEffect(() => { setTimeout(() => setVis(true), index * 80); }, []);
-  const { showLong, setupProb, activeTP, activeSL, rrCheck, iv, spot } = signal;
+  const { showLong, setupProb, activeTP, activeSL, rrCheck, iv, spot, scannedAt } = signal;
   const color = showLong ? "#10b981" : "#ef4444";
   const fmtS = n => n == null ? "—" : n % 1 === 0 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
   const barColor = setupProb >= 65 ? "#10b981" : setupProb >= 58 ? "#f59e0b" : color;
+
+  const ageMs = (now || Date.now()) - scannedAt;
+  const ageMin = Math.floor(ageMs / 60000);
+  const isStale = ageMs > 20 * 60 * 1000;
+  const ageLabel = ageMin < 1 ? "just now" : `${ageMin}m ago`;
 
   return (
     <div style={{
       padding: "12px 14px", borderRadius: 8,
       background: showLong ? "rgba(16,185,129,0.05)" : "rgba(239,68,68,0.05)",
-      border: `1px solid ${color}22`, borderLeft: `3px solid ${color}`,
-      opacity: vis ? 1 : 0, transform: vis ? "translateY(0)" : "translateY(8px)",
+      border: `1px solid ${isStale ? "rgba(255,255,255,0.08)" : color + "22"}`,
+      borderLeft: `3px solid ${isStale ? "#374151" : color}`,
+      opacity: vis ? (isStale ? 0.45 : 1) : 0,
+      transform: vis ? "translateY(0)" : "translateY(8px)",
       transition: "all 0.4s ease",
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontWeight: 800, fontSize: 14, color: "#f9fafb" }}>{symbol}</span>
+          <span style={{ fontWeight: 800, fontSize: 14, color: isStale ? "#6b7280" : "#f9fafb" }}>{symbol}</span>
           <span style={{
             fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 4,
-            background: `${color}22`, color, border: `1px solid ${color}44`, letterSpacing: "0.08em",
+            background: isStale ? "rgba(255,255,255,0.06)" : `${color}22`,
+            color: isStale ? "#4b5563" : color,
+            border: `1px solid ${isStale ? "rgba(255,255,255,0.08)" : color + "44"}`,
+            letterSpacing: "0.08em",
           }}>{showLong ? "LONG" : "SHORT"}</span>
+          {isStale && (
+            <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 5px", borderRadius: 4, background: "rgba(107,114,128,0.15)", color: "#6b7280", letterSpacing: "0.06em" }}>STALE</span>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 9, color: isStale ? "#374151" : "#4b5563", fontFamily: "monospace" }}>{ageLabel}</span>
           <div style={{ width: 50, height: 3, background: "rgba(255,255,255,0.1)", borderRadius: 2 }}>
-            <div style={{ width: `${setupProb}%`, height: "100%", background: barColor, borderRadius: 2 }} />
+            <div style={{ width: `${setupProb}%`, height: "100%", background: isStale ? "#374151" : barColor, borderRadius: 2 }} />
           </div>
-          <span style={{ fontSize: 12, color: "#f9fafb", fontFamily: "monospace", fontWeight: 700 }}>{setupProb}%</span>
+          <span style={{ fontSize: 12, color: isStale ? "#4b5563" : "#f9fafb", fontFamily: "monospace", fontWeight: 700 }}>{setupProb}%</span>
         </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
         {[["Entry", fmtS(spot)], ["Target", fmtS(activeTP)], ["Stop", fmtS(activeSL)], ["R:R", rrCheck ? `${rrCheck.toFixed(1)}:1` : "—"]].map(([label, val]) => (
           <div key={label}>
             <div style={{ fontSize: 9, color: "#4b5563", letterSpacing: "0.07em", marginBottom: 1 }}>{label}</div>
-            <div style={{ fontSize: 11, fontFamily: "monospace", color: "#f9fafb", fontWeight: 700 }}>{val}</div>
+            <div style={{ fontSize: 11, fontFamily: "monospace", color: isStale ? "#4b5563" : "#f9fafb", fontWeight: 700 }}>{val}</div>
           </div>
         ))}
       </div>
-      {iv > 45 && <div style={{ marginTop: 6, fontSize: 10, color: "#f59e0b" }}>⚠ IV {iv}% — elevated, avoid buying premium</div>}
+      {iv > 45 && !isStale && <div style={{ marginTop: 6, fontSize: 10, color: "#f59e0b" }}>⚠ IV {iv}% — elevated, avoid buying premium</div>}
+      {isStale && <div style={{ marginTop: 6, fontSize: 10, color: "#4b5563" }}>Signal is {ageMin}m old — rescan for fresh levels</div>}
     </div>
   );
 }
@@ -1721,6 +1745,7 @@ function DarkPoolPanel({ stocks }) {
 }
 
 function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan }) {
+  const now = useNow(60000);
   const edgeTickers = watchlist
     .filter(sym => scanResults[sym]?.hasEdge)
     .sort((a, b) => (scanResults[b].setupProb ?? 0) - (scanResults[a].setupProb ?? 0));
@@ -1747,7 +1772,7 @@ function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan
       </div>
 
       {edgeTickers.map((sym, i) => (
-        <SignalCard key={sym} symbol={sym} signal={scanResults[sym]} index={i} />
+        <SignalCard key={sym} symbol={sym} signal={scanResults[sym]} index={i} now={now} />
       ))}
 
       {allDone && edgeTickers.length === 0 && (
@@ -1836,9 +1861,51 @@ export default function App() {
     setScanning(false);
   }, []);
 
+  // Scan when Signals tab opens
   useEffect(() => {
     if (tab === 'Signals') triggerScan();
   }, [tab]);
+
+  // Request notification permission on first Signals tab visit
+  useEffect(() => {
+    if (tab === 'Signals' && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, [tab]);
+
+  // Background scan every 5 min — fires alerts even when user is on a different tab
+  useEffect(() => {
+    const interval = setInterval(() => triggerScan(), 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [triggerScan]);
+
+  // Fire push notification when a new edge signal appears (or direction flips)
+  const prevSignalsRef = useRef({});
+  useEffect(() => {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {
+      prevSignalsRef.current = { ...scanResults };
+      return;
+    }
+    Object.entries(scanResults).forEach(([sym, result]) => {
+      if (!result.hasEdge) return;
+      const prev = prevSignalsRef.current[sym];
+      const isNew = !prev?.hasEdge || prev.showLong !== result.showLong;
+      if (!isNew) return;
+      const dir = result.showLong ? '▲ LONG' : '▼ SHORT';
+      const body = `${dir} · ${result.setupProb}% · ${result.rrCheck.toFixed(1)}:1 R:R · Entry $${result.spot?.toFixed(2)}`;
+      if (navigator.serviceWorker?.controller) {
+        navigator.serviceWorker.ready.then(reg => {
+          reg.showNotification(`FlowEdge: ${sym}`, {
+            body, icon: '/icons/logo.png', badge: '/icons/logo.png',
+            tag: `signal-${sym}`, renotify: true,
+          });
+        }).catch(() => new Notification(`FlowEdge: ${sym}`, { body }));
+      } else {
+        new Notification(`FlowEdge: ${sym}`, { body });
+      }
+    });
+    prevSignalsRef.current = { ...scanResults };
+  }, [scanResults]);
 
   // Persist watchlist to localStorage
   useEffect(() => { localStorage.setItem("fe_watchlist", JSON.stringify(watchlist)); }, [watchlist]);

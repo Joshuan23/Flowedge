@@ -111,7 +111,9 @@ export default async function handler(req) {
       const gamma = bsGamma(spot, k, T, sigma);
       const cOI = parseNum(row.c_Openinterest), pOI = parseNum(row.p_Openinterest);
       const cVol = parseNum(row.c_Volume), pVol = parseNum(row.p_Volume);
-      const gex = (cOI - pOI) * gamma * 100 * spot;
+      // 0DTE gamma is extreme but short-lived — discount contribution to avoid distortion
+      const dteWeight = dte < 1 ? 0.25 : dte < 3 ? 0.6 : dte < 7 ? 0.85 : 1.0;
+      const gex = (cOI - pOI) * gamma * 100 * spot * dteWeight;
 
       totalCallVol += cVol;
       totalPutVol += pVol;
@@ -172,7 +174,8 @@ export default async function handler(req) {
       const cOI = parseNum(row.c_Openinterest), pOI = parseNum(row.p_Openinterest);
       if (cOI + pOI === 0) continue;
       const dte = parseDTE(exp);
-      const cellGex = (cOI - pOI) * bsGamma(spot, k, dte / 365, sigma) * 100 * spot;
+      const heatDteWeight = dte < 1 ? 0.25 : dte < 3 ? 0.6 : dte < 7 ? 0.85 : 1.0;
+      const cellGex = (cOI - pOI) * bsGamma(spot, k, dte / 365, sigma) * 100 * spot * heatDteWeight;
       const key = `${k}|${exp}`;
       if (!heatRaw[key]) heatRaw[key] = { strike: k, expiry: exp, callOI: 0, putOI: 0, gex: 0 };
       heatRaw[key].callOI += cOI;
