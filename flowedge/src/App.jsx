@@ -147,6 +147,61 @@ function ChartModal({ symbol, onClose }) {
   );
 }
 
+function MarketContextBar({ contextData }) {
+  if (!contextData?.length) return null;
+  const vix = contextData.find(d => d.symbol === '^VIX' || d.symbol === 'VIX' || d.symbol?.endsWith('VIX'));
+  const vixVal = vix?.regularMarketPrice;
+  const regime = vixVal == null ? null
+    : vixVal < 15 ? { label: 'RISK ON', color: '#10b981' }
+    : vixVal < 20 ? { label: 'NEUTRAL', color: '#f59e0b' }
+    : vixVal < 30 ? { label: 'CAUTION', color: '#f97316' }
+    : { label: 'RISK OFF', color: '#ef4444' };
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'stretch', overflowX: 'auto', scrollbarWidth: 'none',
+      borderBottom: '1px solid rgba(255,255,255,0.04)', background: 'rgba(0,0,0,0.25)',
+      minHeight: 34,
+    }}>
+      {contextData.filter(d => d && !String(d.symbol).includes('VIX')).map(d => {
+        const up = (d.regularMarketChangePercent ?? 0) >= 0;
+        const c = up ? '#10b981' : '#ef4444';
+        return (
+          <div key={d.symbol} style={{
+            display: 'flex', alignItems: 'center', gap: 7,
+            padding: '0 16px', borderRight: '1px solid rgba(255,255,255,0.04)', flexShrink: 0,
+          }}>
+            <span style={{ fontSize: 10, fontWeight: 800, color: '#6b7280', letterSpacing: '0.04em' }}>{d.symbol}</span>
+            <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>
+              ${d.regularMarketPrice?.toFixed(2)}
+            </span>
+            <span style={{ fontSize: 10, fontFamily: 'monospace', color: c, fontWeight: 600 }}>
+              {(d.regularMarketChangePercent ?? 0) > 0 ? '+' : ''}{(d.regularMarketChangePercent ?? 0).toFixed(2)}%
+            </span>
+          </div>
+        );
+      })}
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', borderLeft: '1px solid rgba(255,255,255,0.04)', flexShrink: 0 }}>
+        {vixVal != null && (
+          <>
+            <span style={{ fontSize: 10, fontWeight: 800, color: '#6b7280' }}>VIX</span>
+            <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: vixVal > 25 ? '#ef4444' : vixVal > 18 ? '#f59e0b' : '#10b981' }}>
+              {vixVal.toFixed(2)}
+            </span>
+            {regime && (
+              <>
+                <div style={{ width: 1, height: 14, background: 'rgba(255,255,255,0.07)' }} />
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: regime.color }} />
+                <span style={{ fontSize: 9, fontWeight: 800, color: regime.color, letterSpacing: '0.1em' }}>{regime.label}</span>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function StockCard({ data, index, onRemove, onChart, onTrade }) {
   const [vis, setVis] = useState(false);
   useEffect(() => { setTimeout(() => setVis(true), index * 80); }, []);
@@ -182,6 +237,17 @@ function StockCard({ data, index, onRemove, onChart, onTrade }) {
                 EARN {earningsDays}D
               </span>
             )}
+            {(() => {
+              const avgVol = data.averageDailyVolume3Month || data.averageDailyVolume10Day;
+              if (!avgVol || !data.regularMarketVolume) return null;
+              const rvol = data.regularMarketVolume / avgVol;
+              if (rvol < 1.5) return null;
+              return (
+                <span style={{ fontSize: 8, fontWeight: 800, background: 'rgba(251,191,36,0.12)', color: '#fbbf24', border: '1px solid rgba(251,191,36,0.25)', borderRadius: 3, padding: '1px 4px' }}>
+                  {rvol.toFixed(1)}×VOL
+                </span>
+              );
+            })()}
             {onRemove && (
               <button onClick={onRemove} title="Remove from watchlist" style={{
                 background: "none", border: "none", color: "#374151", cursor: "pointer",
@@ -297,6 +363,12 @@ function SignalCard({ symbol, signal, index, now }) {
         ))}
       </div>
       {iv > 45 && !isStale && <div style={{ marginTop: 6, fontSize: 10, color: "#f59e0b" }}>⚠ IV {iv}% — elevated, avoid buying premium</div>}
+      {signal.posSizePer10K && !isStale && (
+        <div style={{ marginTop: 5, paddingTop: 5, borderTop: '1px solid rgba(255,255,255,0.04)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 9, color: '#4b5563' }}>Per $10K · 1% risk</span>
+          <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: '#a5b4fc' }}>~{signal.posSizePer10K} shares</span>
+        </div>
+      )}
       {isStale && <div style={{ marginTop: 6, fontSize: 10, color: "#4b5563" }}>Signal is {ageMin}m old — rescan for fresh levels</div>}
     </div>
   );
@@ -1251,10 +1323,12 @@ function scoreGammaData(d) {
   const setupProb = hasEdge
     ? Math.min(74, Math.round(52 + confidence * 16 + (distQuality - 0.5) * 4 + Math.min(rrCheck - 1.0, 1) * 3))
     : null;
+  const slDist = (activeSL != null && spot != null) ? Math.abs(spot - activeSL) : null;
+  const posSizePer10K = (slDist && slDist > 0.01) ? Math.max(1, Math.floor(100 / slDist)) : null;
   return {
     hasEdge, setupProb, showLong, composite, confidence, spot,
     activeTP, activeSL, rrCheck: +rrCheck.toFixed(2), iv: d.impliedVol ?? 0,
-    activeDistPct, pcRaw, biasScore: bias, atr,
+    activeDistPct, pcRaw, biasScore: bias, atr, posSizePer10K,
   };
 }
 
@@ -1522,6 +1596,38 @@ function GammaPanel({ stocks }) {
             </div>
           )}
 
+          {/* Implied move box */}
+          {data.impliedVol && spot && (
+            <div style={{ display: 'flex', gap: 10, padding: '8px 12px', borderRadius: 7, background: 'rgba(99,102,241,0.05)', border: '1px solid rgba(99,102,241,0.15)', flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: 9, color: '#6b7280', fontWeight: 800, letterSpacing: '0.1em' }}>IMPLIED MOVE</span>
+              {[[5, 'Weekly'], [21, 'Monthly'], [252, 'Annual']].map(([days, label]) => {
+                const mv = spot * (data.impliedVol / 100) * Math.sqrt(days / 252);
+                return (
+                  <div key={label} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <span style={{ fontSize: 8, color: '#4b5563' }}>{label}</span>
+                    <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: '#a5b4fc' }}>
+                      ±${mv.toFixed(2)} <span style={{ fontSize: 9, color: '#6b7280' }}>(±{(mv/spot*100).toFixed(1)}%)</span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* GEX Bar Chart */}
+          {data.gexByStrike?.length > 0 && (
+            <div style={{ padding: '10px 0' }}>
+              <GEXBarChart
+                gexByStrike={data.gexByStrike}
+                spot={spot}
+                gammaWall={data.gammaWall}
+                putWall={data.putWall}
+                callWall={data.callWall}
+                flipLevel={data.flipLevel}
+              />
+            </div>
+          )}
+
           {/* Heat map — king nodes highlighted as rows inside */}
           {data.heatmap?.cells?.length > 0 && (
             <OIHeatMap heatmap={data.heatmap} spot={spot} buyKingNode={data.buyKingNode} sellKingNode={data.sellKingNode} />
@@ -1663,6 +1769,74 @@ function KingNodeForecast({ symbol, heatmap, spot }) {
         <span style={{ color: '#ef4444' }}>♛ Sell King — resistance</span>
         <span style={{ color: '#f59e0b' }}>— Spot</span>
         <span style={{ color: '#6366f1' }}>▪ Forecast zone</span>
+      </div>
+    </div>
+  );
+}
+
+function GEXBarChart({ gexByStrike, spot, gammaWall, putWall, callWall, flipLevel }) {
+  if (!gexByStrike?.length || !spot) return null;
+  const filtered = gexByStrike
+    .filter(x => Math.abs(x.strike - spot) / spot <= 0.10)
+    .sort((a, b) => b.strike - a.strike);
+  if (!filtered.length) return null;
+  const maxAbs = Math.max(...filtered.map(x => Math.abs(x.gex)), 1);
+  const BAR_MAX = 108;
+  const fmtG = n => {
+    const a = Math.abs(n);
+    const s = n >= 0 ? '+' : '-';
+    if (a >= 1e9) return `${s}${(a/1e9).toFixed(1)}B`;
+    if (a >= 1e6) return `${s}${(a/1e6).toFixed(0)}M`;
+    if (a >= 1e3) return `${s}${(a/1e3).toFixed(0)}K`;
+    return `${s}${a.toFixed(0)}`;
+  };
+  return (
+    <div>
+      <div style={{ fontSize: 9, color: '#a5b4fc', fontWeight: 800, letterSpacing: '0.1em', marginBottom: 8 }}>
+        ■ NET GEX BY STRIKE — DEALER POSITIONING
+      </div>
+      <div style={{ overflowY: 'auto', maxHeight: 340 }}>
+        {filtered.map(x => {
+          const isSpot = Math.abs(x.strike - spot) / spot < 0.004;
+          const isPos = x.gex >= 0;
+          const w = Math.max(1, Math.round((Math.abs(x.gex) / maxAbs) * BAR_MAX));
+          const alpha = 0.22 + (Math.abs(x.gex) / maxAbs) * 0.7;
+          return (
+            <div key={x.strike} style={{
+              display: 'flex', alignItems: 'center', gap: 4, padding: '1.5px 0',
+              background: isSpot ? 'rgba(245,158,11,0.07)' : 'transparent',
+            }}>
+              <div style={{ width: 40, textAlign: 'right', flexShrink: 0 }}>
+                <span style={{ fontSize: 9, fontFamily: 'monospace', color: isSpot ? '#f59e0b' : '#4b5563', fontWeight: isSpot ? 800 : 400 }}>
+                  {x.strike % 1 === 0 ? x.strike.toFixed(0) : x.strike.toFixed(1)}
+                </span>
+              </div>
+              <div style={{ width: BAR_MAX * 2 + 1, display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+                <div style={{ width: BAR_MAX, display: 'flex', justifyContent: 'flex-end' }}>
+                  {!isPos && <div style={{ width: w, height: 9, borderRadius: '2px 0 0 2px', background: `rgba(239,68,68,${alpha})` }} />}
+                </div>
+                <div style={{ width: 1, height: 13, background: isSpot ? '#f59e0b' : 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
+                <div style={{ width: BAR_MAX, display: 'flex', justifyContent: 'flex-start' }}>
+                  {isPos && <div style={{ width: w, height: 9, borderRadius: '0 2px 2px 0', background: `rgba(16,185,129,${alpha})` }} />}
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 3, minWidth: 52 }}>
+                <span style={{ fontSize: 8, fontFamily: 'monospace', color: isPos ? '#86efac' : '#fca5a5' }}>{fmtG(x.gex)}</span>
+                {isSpot && <span style={{ fontSize: 7, color: '#f59e0b', fontWeight: 800 }}>●</span>}
+                {x.strike === gammaWall && <span style={{ fontSize: 7, color: '#a5b4fc', fontWeight: 800 }}>Γ</span>}
+                {x.strike === flipLevel && <span style={{ fontSize: 7, color: '#f59e0b', fontWeight: 800 }}>↕</span>}
+                {x.strike === putWall && <span style={{ fontSize: 7, color: '#fca5a5', fontWeight: 800 }}>P</span>}
+                {x.strike === callWall && <span style={{ fontSize: 7, color: '#86efac', fontWeight: 800 }}>C</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: 'flex', gap: 14, marginTop: 6, paddingTop: 5, borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 8, fontFamily: 'monospace', flexWrap: 'wrap' }}>
+        <span style={{ color: '#86efac' }}>■ Call GEX (dealer long gamma)</span>
+        <span style={{ color: '#fca5a5' }}>■ Put GEX (dealer short gamma)</span>
+        <span style={{ color: '#a5b4fc' }}>Γ gamma wall</span>
+        <span style={{ color: '#f59e0b' }}>↕ flip level</span>
       </div>
     </div>
   );
