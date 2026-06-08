@@ -1920,12 +1920,27 @@ function DarkPoolPanel({ stocks }) {
 
 function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan }) {
   const now = useNow(60000);
-  const edgeTickers = watchlist
-    .filter(sym => scanResults[sym]?.hasEdge)
+  const [filter, setFilter] = useState('all');
+
+  const allEdgeTickers = watchlist.filter(sym => scanResults[sym]?.hasEdge);
+  const longCount = allEdgeTickers.filter(sym => scanResults[sym].showLong).length;
+  const shortCount = allEdgeTickers.length - longCount;
+
+  const filteredTickers = allEdgeTickers
+    .filter(sym => {
+      const r = scanResults[sym];
+      if (filter === 'long') return r.showLong;
+      if (filter === 'short') return !r.showLong;
+      if (filter === 'strong') return (r.setupProb ?? 0) >= 65;
+      return true;
+    })
     .sort((a, b) => (scanResults[b].setupProb ?? 0) - (scanResults[a].setupProb ?? 0));
+
   const noEdgeTickers = watchlist.filter(sym => scanResults[sym] && !scanResults[sym].hasEdge);
   const pendingTickers = watchlist.filter(sym => !scanResults[sym]);
   const allDone = !scanning && pendingTickers.length === 0;
+
+  const strongCount = allEdgeTickers.filter(sym => (scanResults[sym].setupProb ?? 0) >= 65).length;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1945,14 +1960,38 @@ function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan
         )}
       </div>
 
-      {edgeTickers.map((sym, i) => (
+      {allEdgeTickers.length > 0 && (
+        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+          {[
+            { key: 'all', label: `All (${allEdgeTickers.length})` },
+            { key: 'long', label: `▲ Long (${longCount})`, color: '#10b981' },
+            { key: 'short', label: `▼ Short (${shortCount})`, color: '#ef4444' },
+            { key: 'strong', label: `★ High Conf (${strongCount})`, color: '#a5b4fc' },
+          ].map(f => (
+            <button key={f.key} onClick={() => setFilter(f.key)} style={{
+              padding: '3px 9px', borderRadius: 4, fontSize: 9, fontWeight: 700,
+              border: 'none', cursor: 'pointer',
+              background: filter === f.key ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+              color: filter === f.key ? (f.color || '#a5b4fc') : '#4b5563',
+            }}>{f.label}</button>
+          ))}
+        </div>
+      )}
+
+      {filteredTickers.map((sym, i) => (
         <SignalCard key={sym} symbol={sym} signal={scanResults[sym]} index={i} now={now} />
       ))}
 
-      {allDone && edgeTickers.length === 0 && (
+      {allDone && allEdgeTickers.length === 0 && (
         <div style={{ padding: 20, textAlign: "center", borderRadius: 8, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
           <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 4 }}>No clear edge in watchlist</div>
           <div style={{ fontSize: 10, color: "#374151" }}>GEX bias and P/C flow must agree on direction for a signal to appear</div>
+        </div>
+      )}
+
+      {allDone && allEdgeTickers.length > 0 && filteredTickers.length === 0 && (
+        <div style={{ padding: 12, textAlign: "center", fontSize: 11, color: "#4b5563" }}>
+          No signals match this filter
         </div>
       )}
 
@@ -1990,6 +2029,8 @@ export default function App() {
   const [chartSymbol, setChartSymbol] = useState(null);
   const [tradeTarget, setTradeTarget] = useState(null);
   const [brokerConnected, setBrokerConnected] = useState(false);
+  const [marketContext, setMarketContext] = useState([]);
+  const [watchlistSort, setWatchlistSort] = useState('default');
   const syncTimer = useRef(null);
 
   // ── Signal scanner ──────────────────────────────────────────────────────
@@ -2150,6 +2191,22 @@ export default function App() {
 
   useEffect(() => { fetchStocks(); }, [fetchStocks]);
 
+  // Market context (SPY/QQQ/IWM/VIX) — fetched separately, auto-refresh
+  const fetchMarketContext = useCallback(async () => {
+    try {
+      const res = await fetch('/api/quotes?symbols=SPY,QQQ,IWM,%5EVIX');
+      const d = await res.json();
+      const results = d?.quoteResponse?.result || [];
+      setMarketContext(results);
+    } catch {}
+  }, []);
+
+  useEffect(() => { fetchMarketContext(); }, [fetchMarketContext]);
+  useEffect(() => {
+    const t = setInterval(fetchMarketContext, 60000);
+    return () => clearInterval(t);
+  }, [fetchMarketContext]);
+
   // Auto-refresh quotes every 60 seconds
   const [nextRefresh, setNextRefresh] = useState(60);
   const refreshRef = useRef(null);
@@ -2186,6 +2243,12 @@ export default function App() {
   }, [isSignedIn]);
 
   const bullCount = stocks.filter(s => s.regularMarketChangePercent >= 0).length;
+  const sortedStocks = useMemo(() => {
+    if (watchlistSort === 'change') return [...stocks].sort((a, b) => (b.regularMarketChangePercent ?? 0) - (a.regularMarketChangePercent ?? 0));
+    if (watchlistSort === 'volume') return [...stocks].sort((a, b) => (b.regularMarketVolume ?? 0) - (a.regularMarketVolume ?? 0));
+    if (watchlistSort === 'name') return [...stocks].sort((a, b) => a.symbol.localeCompare(b.symbol));
+    return stocks;
+  }, [stocks, watchlistSort]);
   const totalVol = stocks.reduce((s, d) => s + (d.regularMarketVolume || 0) * (d.regularMarketPrice || 0), 0);
   const avgChange = stocks.length ? stocks.reduce((s, d) => s + (d.regularMarketChangePercent || 0), 0) / stocks.length : 0;
   const isOpen = new Date().getHours() >= 9 && new Date().getHours() < 16;
@@ -2226,6 +2289,7 @@ export default function App() {
         </div>
       </div>
 
+      <MarketContextBar contextData={marketContext} />
       {loading ? (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "60vh", flexDirection: "column", gap: 12 }}>
           <div style={{ fontSize: 32 }}>⬡</div>
@@ -2303,7 +2367,7 @@ export default function App() {
                       {ALL_TICKERS.map(t => <option key={t} value={t} />)}
                     </datalist>
                     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                      {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
+                      {sortedStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
                     </div>
                   </div>
                 )}
@@ -2319,10 +2383,19 @@ export default function App() {
             /* ── Desktop: two-column layout ── */
             <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", minHeight: "calc(100vh - 190px)" }}>
               <div style={{ padding: 16, borderRight: "1px solid rgba(255,255,255,0.06)" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, paddingLeft: 4 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, paddingLeft: 4 }}>
                   <span style={{ fontSize: 11, color: "#4b5563", letterSpacing: "0.1em", textTransform: "uppercase" }}>
                     Live Prices · {watchlist.length} tickers
                   </span>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    {[['default', 'Default'], ['change', 'Chg %'], ['volume', 'Volume'], ['name', 'A–Z']].map(([key, label]) => (
+                      <button key={key} onClick={() => setWatchlistSort(key)} style={{
+                        padding: '2px 7px', borderRadius: 4, fontSize: 8, fontWeight: 700, border: 'none', cursor: 'pointer',
+                        background: watchlistSort === key ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+                        color: watchlistSort === key ? '#a5b4fc' : '#4b5563',
+                      }}>{label}</button>
+                    ))}
+                  </div>
                 </div>
                 <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
                   <input
@@ -2349,7 +2422,7 @@ export default function App() {
                   {ALL_TICKERS.map(t => <option key={t} value={t} />)}
                 </datalist>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  {stocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
+                  {sortedStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
                 </div>
               </div>
 
