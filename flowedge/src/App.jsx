@@ -1223,9 +1223,9 @@ function scoreGammaData(d) {
     if (!showLong && activeSL > spot) return (spot - activeTP) / (activeSL - spot);
     return 0;
   })();
-  const hasEdge = directionAgrees && confidence >= 0.25 && distQuality >= 0.4 && flipPenalty < 0.5 && rrCheck >= 2.0;
+  const hasEdge = directionAgrees && confidence >= 0.25 && distQuality >= 0.4 && flipPenalty < 0.5 && rrCheck >= 1.0;
   const setupProb = hasEdge
-    ? Math.min(74, Math.round(52 + confidence * 16 + (distQuality - 0.5) * 4 + Math.min(rrCheck - 2.0, 1) * 3))
+    ? Math.min(74, Math.round(52 + confidence * 16 + (distQuality - 0.5) * 4 + Math.min(rrCheck - 1.0, 1) * 3))
     : null;
   return {
     hasEdge, setupProb, showLong, composite, confidence, spot,
@@ -1318,7 +1318,7 @@ function GammaPanel({ stocks }) {
     if (flipPenalty >= 0.4) warnings.push(`Spot near GEX flip $${data?.flipLevel?.toFixed(0)} — volatility zone, avoid`);
     if (activeDistPct > 0 && activeDistPct < 1.5) warnings.push(`King node only ${activeDistPct.toFixed(1)}% away — too close, weak magnet`);
     if (activeDistPct > 8) warnings.push(`King node ${activeDistPct.toFixed(1)}% away — stretch target`);
-    if (rrCheck > 0 && rrCheck < 2.0) warnings.push(`R:R ${rrCheck.toFixed(1)}:1 — minimum 2:1 required`);
+    if (rrCheck > 0 && rrCheck < 1.0) warnings.push(`R:R ${rrCheck.toFixed(1)}:1 — minimum 1:1 required`);
     if (iv > 50) warnings.push(`IV ${iv}% elevated — avoid buying options premium`);
   }
 
