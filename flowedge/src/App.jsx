@@ -297,14 +297,25 @@ function StockCard({ data, index, onRemove, onChart, onTrade }) {
         {[
           ["Volume", fmt(data.regularMarketVolume)],
           ["Mkt Cap", fmt(data.marketCap)],
-          ["52W High", `$${data.fiftyTwoWeekHigh?.toFixed(0)}`],
+          (() => {
+            const hi = data.fiftyTwoWeekHigh, price = data.regularMarketPrice;
+            if (!hi || !price) return ["52W High", "—"];
+            const offPct = ((hi - price) / hi * 100).toFixed(0);
+            return ["52W High", `$${hi.toFixed(0)} (${offPct}% off)`];
+          })(),
         ].map(([label, val]) => (
           <div key={label}>
             <div style={{ fontSize: 10, color: "#4b5563", marginBottom: 2 }}>{label}</div>
-            <div style={{ fontSize: 12, color: "#9ca3af", fontFamily: "monospace" }}>{val}</div>
+            <div style={{ fontSize: 11, color: "#9ca3af", fontFamily: "monospace" }}>{val}</div>
           </div>
         ))}
       </div>
+      {(data.trailingPE || data.forwardPE) && (
+        <div style={{ display: 'flex', gap: 10, marginBottom: 8 }}>
+          {data.trailingPE && <span style={{ fontSize: 10, color: '#4b5563' }}>P/E <span style={{ color: '#9ca3af', fontFamily: 'monospace' }}>{data.trailingPE.toFixed(1)}</span></span>}
+          {data.forwardPE && <span style={{ fontSize: 10, color: '#4b5563' }}>Fwd P/E <span style={{ color: '#9ca3af', fontFamily: 'monospace' }}>{data.forwardPE.toFixed(1)}</span></span>}
+        </div>
+      )}
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#374151", marginBottom: 4 }}>
         <span>${data.regularMarketDayLow?.toFixed(2)}</span>
         <span style={{ color: "#4b5563" }}>Day Range</span>
@@ -1637,6 +1648,9 @@ function GammaPanel({ stocks }) {
             </div>
           )}
 
+          {/* Options strategy suggestion */}
+          <OptionsStrategy data={data} scored={scored} />
+
           {/* Implied move box */}
           {data.impliedVol && spot && (
             <div style={{ display: 'flex', gap: 10, padding: '8px 12px', borderRadius: 7, background: 'rgba(99,102,241,0.05)', border: '1px solid rgba(99,102,241,0.15)', flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1680,6 +1694,105 @@ function GammaPanel({ stocks }) {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+function OptionsStrategy({ data, scored }) {
+  if (!data || !scored?.hasEdge === undefined) return null;
+  const { iv = 0, showLong, hasEdge, rrCheck = 0 } = scored;
+  const spot = data.spot;
+  const nearFlip = data.flipLevel && spot && Math.abs(spot - data.flipLevel) / spot < 0.025;
+  const ivLow = iv < 22, ivHigh = iv > 45;
+
+  let primary, secondary, note;
+
+  if (nearFlip) {
+    primary = 'Iron Condor';
+    secondary = 'Butterfly Spread';
+    note = `Spot within 2.5% of GEX flip $${data.flipLevel?.toFixed(0)} — price likely to pin`;
+  } else if (!hasEdge) {
+    primary = ivHigh ? 'Short Strangle' : 'Wait';
+    secondary = ivHigh ? 'Iron Condor' : null;
+    note = ivHigh ? `IV at ${iv}% — sell premium, no directional edge needed` : 'No GEX + flow alignment. Stand aside until signals agree.';
+  } else if (ivLow) {
+    primary = showLong ? 'Long Call' : 'Long Put';
+    secondary = showLong ? 'Bull Call Spread' : 'Bear Put Spread';
+    note = `IV at ${iv}% — premium is cheap, buying options has edge`;
+  } else if (ivHigh) {
+    primary = showLong ? 'Bull Call Spread' : 'Bear Put Spread';
+    secondary = showLong ? 'Cash-Secured Put' : 'Covered Call';
+    note = `IV at ${iv}% — use spreads to cap premium cost`;
+  } else {
+    primary = showLong ? 'Bull Call Spread' : 'Bear Put Spread';
+    secondary = showLong ? 'Long Call' : 'Long Put';
+    note = `Normal IV (${iv}%) — spreads reduce breakeven vs outright options`;
+  }
+
+  const activeTP = showLong ? data.buyKingNode?.strike : data.sellKingNode?.strike;
+
+  return (
+    <div style={{ padding: '10px 12px', borderRadius: 8, background: 'rgba(99,102,241,0.05)', border: '1px solid rgba(99,102,241,0.15)' }}>
+      <div style={{ fontSize: 9, color: '#a5b4fc', fontWeight: 800, letterSpacing: '0.1em', marginBottom: 8 }}>✦ OPTIONS STRATEGY</div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 7 }}>
+        <span style={{ padding: '3px 9px', borderRadius: 4, background: 'rgba(99,102,241,0.25)', color: '#c4b5fd', fontSize: 11, fontWeight: 800 }}>
+          {primary}
+        </span>
+        {secondary && (
+          <span style={{ padding: '3px 9px', borderRadius: 4, background: 'rgba(255,255,255,0.06)', color: '#6b7280', fontSize: 11, fontWeight: 600 }}>
+            or {secondary}
+          </span>
+        )}
+      </div>
+      <div style={{ fontSize: 10, color: '#6b7280', lineHeight: 1.55 }}>{note}</div>
+      {hasEdge && activeTP && data.availableExpiries?.[0] && (
+        <div style={{ marginTop: 7, paddingTop: 7, borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', gap: 16, fontSize: 10, fontFamily: 'monospace' }}>
+          <span style={{ color: '#4b5563' }}>Target strike <span style={{ color: '#a5b4fc', fontWeight: 700 }}>${activeTP}</span></span>
+          <span style={{ color: '#4b5563' }}>Nearest exp <span style={{ color: '#f9fafb' }}>{data.availableExpiries[0]}</span></span>
+          {rrCheck > 0 && <span style={{ color: '#4b5563' }}>R:R <span style={{ color: rrCheck >= 2 ? '#10b981' : '#f59e0b', fontWeight: 700 }}>{rrCheck.toFixed(1)}:1</span></span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WatchlistHeatmap({ stocks, scanResults, onChart }) {
+  if (!stocks.length) return null;
+  const sorted = [...stocks].sort((a, b) => (b.regularMarketChangePercent ?? 0) - (a.regularMarketChangePercent ?? 0));
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(68px, 1fr))', gap: 5 }}>
+      {sorted.map(s => {
+        const chg = s.regularMarketChangePercent ?? 0;
+        const up = chg >= 0;
+        const sig = scanResults?.[s.symbol];
+        const intensity = Math.min(Math.abs(chg) / 4, 1);
+        const bg = up ? `rgba(16,185,129,${0.07 + intensity * 0.48})` : `rgba(239,68,68,${0.07 + intensity * 0.48})`;
+        const bd = sig?.hasEdge
+          ? `1px solid ${sig.showLong ? 'rgba(16,185,129,0.8)' : 'rgba(239,68,68,0.8)'}`
+          : '1px solid rgba(255,255,255,0.06)';
+        return (
+          <div key={s.symbol} onClick={() => onChart?.(s.symbol)} style={{
+            padding: '8px 5px', borderRadius: 7, background: bg, border: bd,
+            textAlign: 'center', cursor: 'pointer', position: 'relative',
+          }}>
+            {sig?.hasEdge && (
+              <div style={{ position: 'absolute', top: 3, right: 4, fontSize: 7, fontWeight: 800,
+                color: sig.showLong ? '#10b981' : '#ef4444' }}>
+                {sig.showLong ? '▲' : '▼'}
+              </div>
+            )}
+            <div style={{ fontSize: 10, fontWeight: 800, color: '#f9fafb', marginBottom: 2 }}>{s.symbol}</div>
+            <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color: up ? '#86efac' : '#fca5a5' }}>
+              {chg > 0 ? '+' : ''}{chg.toFixed(1)}%
+            </div>
+            {sig?.hasEdge && (
+              <div style={{ fontSize: 8, color: sig.showLong ? '#6ee7b7' : '#fca5a5', marginTop: 1 }}>
+                {sig.setupProb}%
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2294,6 +2407,7 @@ export default function App() {
   const [marketContext, setMarketContext] = useState([]);
   const [sectorData, setSectorData] = useState([]);
   const [watchlistSort, setWatchlistSort] = useState('default');
+  const [watchlistView, setWatchlistView] = useState('cards');
   const syncTimer = useRef(null);
 
   // ── Signal scanner ──────────────────────────────────────────────────────
@@ -2655,8 +2769,17 @@ export default function App() {
                   <span style={{ fontSize: 11, color: "#4b5563", letterSpacing: "0.1em", textTransform: "uppercase" }}>
                     Live Prices · {watchlist.length} tickers
                   </span>
-                  <div style={{ display: 'flex', gap: 4 }}>
-                    {[['default', 'Default'], ['change', 'Chg %'], ['volume', 'Volume'], ['name', 'A–Z']].map(([key, label]) => (
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    <div style={{ width: 1, height: 14, background: 'rgba(255,255,255,0.07)', margin: '0 2px' }} />
+                    {[['cards', '▦'], ['heat', '⬛']].map(([key, label]) => (
+                      <button key={key} title={key === 'cards' ? 'Card view' : 'Heat map'} onClick={() => setWatchlistView(key)} style={{
+                        padding: '2px 7px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+                        background: watchlistView === key ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+                        color: watchlistView === key ? '#a5b4fc' : '#4b5563',
+                      }}>{label}</button>
+                    ))}
+                    <div style={{ width: 1, height: 14, background: 'rgba(255,255,255,0.07)', margin: '0 2px' }} />
+                    {watchlistView === 'cards' && [['default', 'Default'], ['change', 'Chg %'], ['volume', 'Vol'], ['name', 'A–Z']].map(([key, label]) => (
                       <button key={key} onClick={() => setWatchlistSort(key)} style={{
                         padding: '2px 7px', borderRadius: 4, fontSize: 8, fontWeight: 700, border: 'none', cursor: 'pointer',
                         background: watchlistSort === key ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
@@ -2689,9 +2812,13 @@ export default function App() {
                 <datalist id="all-tickers-dl">
                   {ALL_TICKERS.map(t => <option key={t} value={t} />)}
                 </datalist>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  {sortedStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
-                </div>
+                {watchlistView === 'heat' ? (
+                  <WatchlistHeatmap stocks={sortedStocks} scanResults={scanResults} onChart={sym => setChartSymbol(sym)} />
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                    {sortedStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
+                  </div>
+                )}
               </div>
 
               <div style={{ padding: 20, display: "flex", flexDirection: "column" }}>
