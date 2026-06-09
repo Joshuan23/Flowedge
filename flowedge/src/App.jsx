@@ -202,6 +202,35 @@ function MarketContextBar({ contextData }) {
   );
 }
 
+const SECTOR_NAMES = { XLK:'Tech', XLF:'Finance', XLV:'Health', XLC:'Comms', XLY:'Discret', XLP:'Staples', XLE:'Energy', XLI:'Industr', XLB:'Matls', XLRE:'REITs', XLU:'Util' };
+
+function SectorGrid({ sectorData }) {
+  if (!sectorData?.length) return null;
+  const sorted = [...sectorData].sort((a, b) => (b.regularMarketChangePercent ?? 0) - (a.regularMarketChangePercent ?? 0));
+  return (
+    <div style={{ marginBottom: 4 }}>
+      <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em', marginBottom: 6 }}>SECTOR ROTATION</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4 }}>
+        {sorted.map(s => {
+          const chg = s.regularMarketChangePercent ?? 0;
+          const up = chg >= 0;
+          const intensity = Math.min(Math.abs(chg) / 3, 1);
+          const bg = up ? `rgba(16,185,129,${0.05 + intensity * 0.2})` : `rgba(239,68,68,${0.05 + intensity * 0.2})`;
+          const bd = up ? `rgba(16,185,129,${0.12 + intensity * 0.28})` : `rgba(239,68,68,${0.12 + intensity * 0.28})`;
+          return (
+            <div key={s.symbol} style={{ padding: '5px 6px', borderRadius: 6, background: bg, border: `1px solid ${bd}`, textAlign: 'center' }}>
+              <div style={{ fontSize: 8, color: '#6b7280', fontWeight: 700, marginBottom: 1 }}>{SECTOR_NAMES[s.symbol] || s.symbol}</div>
+              <div style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 800, color: up ? '#10b981' : '#ef4444' }}>
+                {chg > 0 ? '+' : ''}{chg.toFixed(2)}%
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function StockCard({ data, index, onRemove, onChart, onTrade }) {
   const [vis, setVis] = useState(false);
   useEffect(() => { setTimeout(() => setVis(true), index * 80); }, []);
@@ -1442,6 +1471,18 @@ function GammaPanel({ stocks }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {/* Watchlist quick-access chips */}
+      {stocks.length > 0 && (
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {stocks.slice(0, 16).map(s => (
+            <button key={s.symbol} onClick={() => { setSymbol(s.symbol); setExpiry(null); }} style={{
+              padding: '2px 8px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+              background: symbol === s.symbol ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.05)',
+              color: symbol === s.symbol ? '#a5b4fc' : '#6b7280',
+            }}>{s.symbol}</button>
+          ))}
+        </div>
+      )}
       {/* Grouped ticker dropdown + refresh */}
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <select
@@ -1842,6 +1883,200 @@ function GEXBarChart({ gexByStrike, spot, gammaWall, putWall, callWall, flipLeve
   );
 }
 
+function JournalPanel() {
+  const [trades, setTrades] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('fe_journal') || '[]'); } catch { return []; }
+  });
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ symbol: '', direction: 'long', entry: '', exit: '', shares: '', date: new Date().toISOString().split('T')[0], notes: '' });
+
+  useEffect(() => { localStorage.setItem('fe_journal', JSON.stringify(trades)); }, [trades]);
+
+  const addTrade = () => {
+    const entry = parseFloat(form.entry), exit = parseFloat(form.exit), shares = parseFloat(form.shares);
+    if (!form.symbol || !entry || !exit || !shares || shares <= 0) return;
+    const pnl = form.direction === 'long' ? (exit - entry) * shares : (entry - exit) * shares;
+    setTrades(prev => [{ id: Date.now(), symbol: form.symbol.toUpperCase(), direction: form.direction, entry, exit, shares, pnl, date: form.date, notes: form.notes }, ...prev]);
+    setForm(f => ({ ...f, symbol: '', entry: '', exit: '', shares: '', notes: '' }));
+    setAdding(false);
+  };
+
+  const wins = trades.filter(t => t.pnl > 0);
+  const losses = trades.filter(t => t.pnl <= 0);
+  const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
+  const winRate = trades.length ? Math.round(wins.length / trades.length * 100) : null;
+  const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
+  const avgLoss = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0)) / losses.length : 0;
+  const profitFactor = avgLoss > 0 ? (avgWin / avgLoss).toFixed(2) : null;
+  const totalColor = totalPnl >= 0 ? '#10b981' : '#ef4444';
+
+  const inp = {
+    background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+    borderRadius: 6, padding: '7px 10px', color: '#f9fafb', fontSize: 12,
+    fontFamily: 'monospace', outline: 'none', width: '100%', boxSizing: 'border-box',
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {trades.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+          {[
+            ['TRADES', trades.length, '#f9fafb'],
+            ['WIN RATE', winRate != null ? `${winRate}%` : '—', winRate >= 50 ? '#10b981' : '#ef4444'],
+            ['PROFIT FACTOR', profitFactor ?? '—', parseFloat(profitFactor) >= 1.5 ? '#10b981' : '#f59e0b'],
+            ['TOTAL P&L', `${totalPnl >= 0 ? '+' : ''}$${Math.abs(totalPnl).toFixed(0)}`, totalColor],
+          ].map(([label, val, color]) => (
+            <div key={label} style={{ padding: '8px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', textAlign: 'center' }}>
+              <div style={{ fontSize: 8, color: '#4b5563', letterSpacing: '0.08em', marginBottom: 4 }}>{label}</div>
+              <div style={{ fontSize: 14, fontFamily: 'monospace', fontWeight: 800, color }}>{val}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {trades.length > 1 && (() => {
+        const pts = trades.slice().reverse();
+        let cum = 0;
+        const cumPnls = pts.map(t => { cum += t.pnl; return cum; });
+        const minV = Math.min(...cumPnls, 0), maxV = Math.max(...cumPnls, 0);
+        const range = maxV - minV || 1;
+        const W = 300, H = 40, PAD = 4;
+        const xOf = i => PAD + (i / (pts.length - 1)) * (W - PAD * 2);
+        const yOf = v => PAD + (1 - (v - minV) / range) * (H - PAD * 2);
+        const polyline = cumPnls.map((v, i) => `${xOf(i)},${yOf(v)}`).join(' ');
+        const fillPts = [`${xOf(0)},${yOf(0)}`, ...cumPnls.map((v, i) => `${xOf(i)},${yOf(v)}`), `${xOf(cumPnls.length - 1)},${yOf(0)}`].join(' ');
+        const finalColor = totalPnl >= 0 ? '#10b981' : '#ef4444';
+        return (
+          <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 8, padding: '8px 12px' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', marginBottom: 6, letterSpacing: '0.08em' }}>EQUITY CURVE</div>
+            <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', display: 'block', height: H }}>
+              <line x1={PAD} y1={yOf(0)} x2={W - PAD} y2={yOf(0)} stroke="rgba(255,255,255,0.06)" strokeWidth={1} strokeDasharray="3,3" />
+              <polygon points={fillPts} fill={`${finalColor}18`} />
+              <polyline points={polyline} fill="none" stroke={finalColor} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </div>
+        );
+      })()}
+
+      {adding ? (
+        <div style={{ padding: 12, borderRadius: 8, background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 9, color: '#4b5563', marginBottom: 3 }}>SYMBOL</div>
+                <input list="all-tickers-dl" placeholder="AAPL" value={form.symbol}
+                  onChange={e => setForm(f => ({ ...f, symbol: e.target.value.toUpperCase() }))} style={inp} />
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: '#4b5563', marginBottom: 3 }}>DIRECTION</div>
+                <select value={form.direction} onChange={e => setForm(f => ({ ...f, direction: e.target.value }))}
+                  style={{ ...inp, cursor: 'pointer' }}>
+                  <option value="long">▲ Long</option>
+                  <option value="short">▼ Short</option>
+                </select>
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+              {[['ENTRY $', 'entry'], ['EXIT $', 'exit'], ['SHARES', 'shares']].map(([label, key]) => (
+                <div key={key}>
+                  <div style={{ fontSize: 9, color: '#4b5563', marginBottom: 3 }}>{label}</div>
+                  <input type="number" step="0.01" placeholder="0.00" value={form[key]}
+                    onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))} style={inp} />
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 9, color: '#4b5563', marginBottom: 3 }}>DATE</div>
+                <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} style={inp} />
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: '#4b5563', marginBottom: 3 }}>NOTES (optional)</div>
+                <input placeholder="Setup, catalyst, lesson…" value={form.notes}
+                  onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} style={inp} />
+              </div>
+            </div>
+            {form.entry && form.exit && form.shares && (() => {
+              const e = parseFloat(form.entry), x = parseFloat(form.exit), s = parseFloat(form.shares);
+              if (!e || !x || !s) return null;
+              const p = form.direction === 'long' ? (x - e) * s : (e - x) * s;
+              const pct = ((x - e) / e * (form.direction === 'long' ? 100 : -100)).toFixed(1);
+              return (
+                <div style={{ padding: '7px 10px', borderRadius: 6, background: p >= 0 ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)', border: `1px solid ${p >= 0 ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)'}`, display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: 11, color: '#6b7280' }}>Est. P&L</span>
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', fontWeight: 800, color: p >= 0 ? '#10b981' : '#ef4444' }}>
+                    {p >= 0 ? '+' : ''}${p.toFixed(2)} ({pct}%)
+                  </span>
+                </div>
+              );
+            })()}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={addTrade} style={{
+                flex: 2, background: '#6366f1', border: 'none', borderRadius: 6, padding: '9px 0',
+                color: '#fff', fontWeight: 700, cursor: 'pointer', fontSize: 12,
+              }}>Log Trade</button>
+              <button onClick={() => setAdding(false)} style={{
+                flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: 6, padding: '9px 0', color: '#9ca3af', cursor: 'pointer', fontSize: 12,
+              }}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setAdding(true)} style={{
+          background: 'rgba(99,102,241,0.08)', border: '1px dashed rgba(99,102,241,0.4)',
+          borderRadius: 8, padding: '10px 0', color: '#a5b4fc', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+        }}>+ Log Trade</button>
+      )}
+
+      {trades.length === 0 && !adding && (
+        <div style={{ padding: 28, textAlign: 'center' }}>
+          <div style={{ fontSize: 28, marginBottom: 10, opacity: 0.25 }}>📋</div>
+          <div style={{ fontSize: 13, color: '#6b7280', marginBottom: 4 }}>No trades logged yet</div>
+          <div style={{ fontSize: 11, color: '#374151' }}>Track every trade to see your win rate, profit factor, and equity curve.</div>
+        </div>
+      )}
+
+      {trades.map(t => {
+        const c = t.pnl >= 0 ? '#10b981' : '#ef4444';
+        return (
+          <div key={t.id} style={{
+            padding: '10px 12px', borderRadius: 8,
+            background: t.pnl >= 0 ? 'rgba(16,185,129,0.04)' : 'rgba(239,68,68,0.04)',
+            border: `1px solid ${t.pnl >= 0 ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)'}`,
+            borderLeft: `3px solid ${c}`,
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div>
+                <span style={{ fontWeight: 800, fontSize: 13, color: '#f9fafb' }}>{t.symbol}</span>
+                <span style={{ fontSize: 10, color: t.direction === 'long' ? '#10b981' : '#ef4444', marginLeft: 6, fontWeight: 700 }}>
+                  {t.direction === 'long' ? '▲' : '▼'} {t.direction.toUpperCase()}
+                </span>
+                <span style={{ fontSize: 10, color: '#4b5563', marginLeft: 6 }}>{t.date}</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 800, color: c }}>
+                  {t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}
+                </span>
+                <button onClick={() => setTrades(prev => prev.filter(x => x.id !== t.id))} style={{
+                  background: 'none', border: 'none', color: '#374151', cursor: 'pointer', fontSize: 14, padding: 0,
+                }}>×</button>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10, marginTop: 4, fontSize: 10, fontFamily: 'monospace', color: '#6b7280' }}>
+              <span>${t.entry.toFixed(2)}</span>
+              <span>→</span>
+              <span>${t.exit.toFixed(2)}</span>
+              <span>×{t.shares}</span>
+              {t.notes && <span style={{ color: '#4b5563', fontFamily: 'sans-serif', fontStyle: 'italic', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>· {t.notes}</span>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function DarkPoolPanel({ stocks }) {
   const now = new Date();
   const marketOpen = new Date(); marketOpen.setHours(9, 30, 0, 0);
@@ -1918,7 +2153,7 @@ function DarkPoolPanel({ stocks }) {
   );
 }
 
-function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan }) {
+function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan, vixVal, sectorData }) {
   const now = useNow(60000);
   const [filter, setFilter] = useState('all');
 
@@ -1942,12 +2177,39 @@ function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan
 
   const strongCount = allEdgeTickers.filter(sym => (scanResults[sym].setupProb ?? 0) >= 65).length;
 
+  const scannedCount = watchlist.filter(sym => scanResults[sym]).length;
+  const avgConf = allEdgeTickers.length
+    ? Math.round(allEdgeTickers.reduce((s, sym) => s + (scanResults[sym].setupProb ?? 0), 0) / allEdgeTickers.length)
+    : null;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {/* VIX warning */}
+      {vixVal != null && vixVal > 25 && (
+        <div style={{ padding: '8px 12px', borderRadius: 7, background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11 }}>⚠</span>
+          <span style={{ fontSize: 11, color: '#fca5a5', fontWeight: 600 }}>
+            VIX at {vixVal.toFixed(1)} — elevated volatility. Reduce position size, widen stops.
+          </span>
+        </div>
+      )}
+
+      {/* Sector rotation grid */}
+      {sectorData?.length > 0 && <SectorGrid sectorData={sectorData} />}
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em", textTransform: "uppercase" }}>
-          GEX-Scored Signals
-        </span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span style={{ fontSize: 10, color: "#4b5563", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+            GEX Signals
+          </span>
+          {scannedCount > 0 && (
+            <span style={{ fontSize: 9, color: '#374151', fontFamily: 'monospace' }}>
+              {longCount > 0 && <span style={{ color: '#10b981' }}>{longCount}▲ </span>}
+              {shortCount > 0 && <span style={{ color: '#ef4444' }}>{shortCount}▼ </span>}
+              {avgConf != null && <span style={{ color: '#4b5563' }}>· {avgConf}% avg</span>}
+            </span>
+          )}
+        </div>
         {scanning ? (
           <span style={{ fontSize: 10, color: "#6366f1", fontFamily: "monospace" }}>
             scanning {scanProgress.done}/{scanProgress.total}…
@@ -2009,7 +2271,7 @@ function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan
   );
 }
 
-const TABS = ["Signals", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Account"];
+const TABS = ["Signals", "Journal", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -2030,6 +2292,7 @@ export default function App() {
   const [tradeTarget, setTradeTarget] = useState(null);
   const [brokerConnected, setBrokerConnected] = useState(false);
   const [marketContext, setMarketContext] = useState([]);
+  const [sectorData, setSectorData] = useState([]);
   const [watchlistSort, setWatchlistSort] = useState('default');
   const syncTimer = useRef(null);
 
@@ -2194,10 +2457,13 @@ export default function App() {
   // Market context (SPY/QQQ/IWM/VIX) — fetched separately, auto-refresh
   const fetchMarketContext = useCallback(async () => {
     try {
-      const res = await fetch('/api/quotes?symbols=SPY,QQQ,IWM,%5EVIX');
-      const d = await res.json();
-      const results = d?.quoteResponse?.result || [];
-      setMarketContext(results);
+      const [ctxRes, secRes] = await Promise.all([
+        fetch('/api/quotes?symbols=SPY,QQQ,IWM,%5EVIX'),
+        fetch('/api/quotes?symbols=XLK,XLF,XLV,XLC,XLY,XLP,XLE,XLI,XLB,XLRE,XLU'),
+      ]);
+      const [ctxData, secData] = await Promise.all([ctxRes.json(), secRes.json()]);
+      setMarketContext(ctxData?.quoteResponse?.result || []);
+      setSectorData(secData?.quoteResponse?.result || []);
     } catch {}
   }, []);
 
@@ -2242,6 +2508,7 @@ export default function App() {
     })();
   }, [isSignedIn]);
 
+  const vixVal = marketContext.find(d => String(d.symbol).includes('VIX'))?.regularMarketPrice ?? null;
   const bullCount = stocks.filter(s => s.regularMarketChangePercent >= 0).length;
   const sortedStocks = useMemo(() => {
     if (watchlistSort === 'change') return [...stocks].sort((a, b) => (b.regularMarketChangePercent ?? 0) - (a.regularMarketChangePercent ?? 0));
@@ -2371,7 +2638,8 @@ export default function App() {
                     </div>
                   </div>
                 )}
-                {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} />}
+                {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} />}
+                {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                 {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
                 {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
