@@ -401,7 +401,7 @@ function useNow(intervalMs = 60000) {
   return now;
 }
 
-function SignalCard({ symbol, signal, index, now }) {
+function SignalCard({ symbol, signal, index, now, onTrade }) {
   const [vis, setVis] = useState(false);
   useEffect(() => { setTimeout(() => setVis(true), index * 80); }, []);
   const { showLong, setupProb, activeTP, activeSL, rrCheck, iv, spot, scannedAt } = signal;
@@ -462,6 +462,17 @@ function SignalCard({ symbol, signal, index, now }) {
         </div>
       )}
       {isStale && <div style={{ marginTop: 6, fontSize: 10, color: "#4b5563" }}>Signal is {ageMin}m old — rescan for fresh levels</div>}
+      {onTrade && !isStale && (
+        <div style={{ marginTop: 7, paddingTop: 7, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+          <button onClick={() => onTrade(symbol, signal.spot, showLong ? 'buy' : 'sell')} style={{
+            width: '100%', padding: '6px 0', borderRadius: 6, border: 'none', cursor: 'pointer',
+            background: showLong ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+            color: showLong ? '#10b981' : '#ef4444', fontSize: 11, fontWeight: 800,
+          }}>
+            {showLong ? '▲ Buy' : '▼ Sell'} {symbol} →
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -527,6 +538,24 @@ function PortfolioPanel({ stocks }) {
               </div>
             </div>
           </div>
+          {(() => {
+            const betaSum = enriched.reduce((sum, p) => {
+              const stock = stocks.find(s => s.symbol === p.symbol);
+              const beta = stock?.beta ?? 1;
+              const weight = totalValue > 0 ? (p.currentValue ?? p.invested) / totalValue : 0;
+              return sum + beta * weight;
+            }, 0);
+            const spy1pct = totalValue > 0 ? totalValue * betaSum * 0.01 : 0;
+            return (
+              <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', fontSize: 10 }}>
+                <span style={{ color: '#4b5563' }}>β-weighted exposure</span>
+                <span>
+                  <span style={{ color: '#a5b4fc', fontFamily: 'monospace' }}>β {betaSum.toFixed(2)}</span>
+                  <span style={{ color: '#374151', fontFamily: 'monospace', marginLeft: 8 }}>SPY 1% ≈ ±${Math.abs(spy1pct).toFixed(0)}</span>
+                </span>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -2123,6 +2152,48 @@ function JournalPanel() {
         );
       })()}
 
+      {trades.length > 1 && (() => {
+        const bySymbol = {};
+        trades.forEach(t => {
+          if (!bySymbol[t.symbol]) bySymbol[t.symbol] = { wins: 0, total: 0, pnl: 0 };
+          bySymbol[t.symbol].pnl += t.pnl;
+          bySymbol[t.symbol].total++;
+          if (t.pnl > 0) bySymbol[t.symbol].wins++;
+        });
+        const symList = Object.entries(bySymbol).sort((a, b) => Math.abs(b[1].pnl) - Math.abs(a[1].pnl)).slice(0, 6);
+        let streak = 0, streakType = null;
+        for (const t of trades) {
+          const w = t.pnl > 0;
+          if (streakType === null) { streakType = w; streak = 1; }
+          else if (w === streakType) streak++;
+          else break;
+        }
+        return (
+          <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 8, padding: '8px 12px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <div style={{ fontSize: 8, color: '#4b5563', letterSpacing: '0.08em' }}>BY SYMBOL</div>
+              {streak > 1 && <span style={{ fontSize: 9, fontWeight: 800, color: streakType ? '#10b981' : '#ef4444' }}>{streak}{streakType ? 'W' : 'L'} STREAK</span>}
+            </div>
+            {symList.map(([sym, s]) => {
+              const c = s.pnl >= 0 ? '#10b981' : '#ef4444';
+              const wr = s.wins / s.total;
+              return (
+                <div key={sym} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <span style={{ fontWeight: 800, fontSize: 11, color: '#f9fafb', width: 46 }}>{sym}</span>
+                  <span style={{ fontSize: 9, color: '#374151', width: 28 }}>{s.wins}/{s.total}</span>
+                  <div style={{ flex: 1, height: 3, background: 'rgba(255,255,255,0.06)', borderRadius: 2 }}>
+                    <div style={{ width: `${wr * 100}%`, height: '100%', background: wr >= 0.5 ? '#10b981' : '#ef4444', borderRadius: 2 }} />
+                  </div>
+                  <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: c, minWidth: 54, textAlign: 'right' }}>
+                    {s.pnl >= 0 ? '+' : ''}${s.pnl.toFixed(0)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
+
       {adding ? (
         <div style={{ padding: 12, borderRadius: 8, background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -2332,7 +2403,7 @@ function DarkPoolPanel({ stocks }) {
   );
 }
 
-function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan, vixVal, sectorData }) {
+function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan, vixVal, sectorData, onTrade }) {
   const now = useNow(60000);
   const [filter, setFilter] = useState('all');
 
@@ -2375,6 +2446,9 @@ function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan
 
       {/* Sector rotation grid */}
       {sectorData?.length > 0 && <SectorGrid sectorData={sectorData} />}
+
+      {/* Macro calendar */}
+      <EconomicCalendar />
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -2420,7 +2494,7 @@ function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan
       )}
 
       {filteredTickers.map((sym, i) => (
-        <SignalCard key={sym} symbol={sym} signal={scanResults[sym]} index={i} now={now} />
+        <SignalCard key={sym} symbol={sym} signal={scanResults[sym]} index={i} now={now} onTrade={onTrade} />
       ))}
 
       {allDone && allEdgeTickers.length === 0 && (
@@ -2446,6 +2520,117 @@ function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan
           ))}
         </div>
       )}
+
+      <SignalHistory />
+    </div>
+  );
+}
+
+const FOMC_DATES = [
+  '2025-01-29','2025-03-19','2025-05-07','2025-06-18','2025-07-30',
+  '2025-09-17','2025-10-29','2025-12-10',
+  '2026-01-28','2026-03-18','2026-04-29','2026-06-17','2026-07-29',
+  '2026-09-16','2026-10-28','2026-12-09',
+  '2027-01-27','2027-03-17','2027-04-28','2027-06-16','2027-07-28',
+  '2027-09-15','2027-10-27','2027-12-08',
+];
+
+const CPI_DATES = [
+  '2025-01-15','2025-02-12','2025-03-12','2025-04-10','2025-05-13',
+  '2025-06-11','2025-07-15','2025-08-12','2025-09-10','2025-10-15',
+  '2025-11-12','2025-12-10',
+  '2026-01-14','2026-02-11','2026-03-11','2026-04-08','2026-05-13',
+  '2026-06-10','2026-07-15','2026-08-12','2026-09-10','2026-10-14',
+  '2026-11-11','2026-12-09',
+  '2027-01-13','2027-02-10','2027-03-10','2027-04-14','2027-05-12',
+  '2027-06-09','2027-07-14','2027-08-11',
+];
+
+function getThirdFriday(year, month) {
+  const d = new Date(year, month, 1);
+  while (d.getDay() !== 5) d.setDate(d.getDate() + 1);
+  d.setDate(d.getDate() + 14);
+  return new Date(d);
+}
+
+function getFirstFriday(year, month) {
+  const d = new Date(year, month, 1);
+  while (d.getDay() !== 5) d.setDate(d.getDate() + 1);
+  return new Date(d);
+}
+
+function EconomicCalendar() {
+  const now = new Date();
+  const tod = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  const fomcEvts = FOMC_DATES.map(s => ({ date: new Date(s), label: 'FOMC', type: 'fomc' }));
+  const cpiEvts  = CPI_DATES.map(s =>  ({ date: new Date(s), label: 'CPI',  type: 'cpi'  }));
+
+  const opexEvts = [], nfpEvts = [];
+  for (let m = 0; m <= 5; m++) {
+    const yr = now.getFullYear() + Math.floor((now.getMonth() + m) / 12);
+    const mo = (now.getMonth() + m) % 12;
+    const isQ = [2, 5, 8, 11].includes(mo);
+    opexEvts.push({ date: getThirdFriday(yr, mo), label: isQ ? 'Q-OpEx' : 'OpEx', type: isQ ? 'quarterly' : 'opex' });
+    nfpEvts.push({ date: getFirstFriday(yr, mo), label: 'NFP', type: 'nfp' });
+  }
+
+  const all = [...fomcEvts, ...cpiEvts, ...opexEvts, ...nfpEvts]
+    .filter(e => e.date >= tod)
+    .sort((a, b) => a.date - b.date)
+    .slice(0, 8);
+
+  if (!all.length) return null;
+
+  const fmtDate = d => { const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return `${M[d.getMonth()]} ${d.getDate()}`; };
+  const daysUntil = d => Math.floor((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - tod) / 86400000);
+  const TC = { fomc: '#ef4444', cpi: '#f59e0b', nfp: '#6366f1', opex: '#10b981', quarterly: '#a855f7' };
+
+  return (
+    <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)' }}>
+      <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em', marginBottom: 8 }}>MACRO CALENDAR</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+        {all.map((e, i) => {
+          const days = daysUntil(e.date);
+          const dStr = days === 0 ? 'TODAY' : days === 1 ? 'TMRW' : `${days}d`;
+          return (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ width: 4, height: 4, borderRadius: '50%', background: TC[e.type], flexShrink: 0 }} />
+              <span style={{ fontSize: 10, fontWeight: 800, color: TC[e.type], minWidth: 52 }}>{e.label}</span>
+              <span style={{ fontSize: 10, fontFamily: 'monospace', color: '#6b7280', flex: 1 }}>{fmtDate(e.date)}</span>
+              <span style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 800, color: days <= 1 ? '#ef4444' : days <= 5 ? '#f59e0b' : '#374151', minWidth: 34, textAlign: 'right' }}>
+                {dStr}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function SignalHistory() {
+  const [history] = useState(() => { try { return JSON.parse(localStorage.getItem('fe_signal_history') || '[]'); } catch { return []; } });
+  if (!history.length) return null;
+  const fmtAge = ts => { const m = Math.floor((Date.now() - ts) / 60000); return m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m/60)}h` : `${Math.floor(m/1440)}d`; };
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em', marginBottom: 6 }}>SIGNAL HISTORY · {Math.min(history.length, 12)} RECENT</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        {history.slice(0, 12).map(h => {
+          const c = h.direction === 'long' ? '#10b981' : '#ef4444';
+          return (
+            <div key={h.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', borderRadius: 5, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.04)' }}>
+              <span style={{ fontSize: 9, fontWeight: 800, color: c }}>{h.direction === 'long' ? '▲' : '▼'}</span>
+              <span style={{ fontSize: 10, fontWeight: 800, color: '#f9fafb', width: 44 }}>{h.symbol}</span>
+              <span style={{ fontSize: 9, fontFamily: 'monospace', color: '#4b5563' }}>${h.entry?.toFixed(2)}</span>
+              <span style={{ fontSize: 9, fontFamily: 'monospace', color: '#6b7280', flex: 1 }}>→ ${h.tp?.toFixed(2)}</span>
+              <span style={{ fontSize: 9, fontFamily: 'monospace', color: '#a5b4fc' }}>{h.setupProb}%</span>
+              <span style={{ fontSize: 8, color: '#374151', minWidth: 28, textAlign: 'right' }}>{fmtAge(h.firedAt)}</span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -2508,6 +2693,18 @@ export default function App() {
           const scored = scoreGammaData(d);
           if (scored) {
             const entry = { ...scored, scannedAt: now };
+            // Persist new/flipped edge signals to history before updating ref
+            if (scored.hasEdge) {
+              const prev = scanResultsRef.current[sym];
+              if (!prev?.hasEdge || prev.showLong !== scored.showLong) {
+                try {
+                  const hist = JSON.parse(localStorage.getItem('fe_signal_history') || '[]');
+                  hist.unshift({ id: now + i, symbol: sym, direction: scored.showLong ? 'long' : 'short', setupProb: scored.setupProb, entry: scored.spot, tp: scored.activeTP, sl: scored.activeSL, rr: scored.rrCheck, firedAt: now });
+                  if (hist.length > 50) hist.pop();
+                  localStorage.setItem('fe_signal_history', JSON.stringify(hist));
+                } catch {}
+              }
+            }
             scanResultsRef.current = { ...scanResultsRef.current, [sym]: entry };
             setScanResults(prev => ({ ...prev, [sym]: entry }));
           }
@@ -2855,7 +3052,7 @@ export default function App() {
                     </div>
                   </div>
                 )}
-                {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} />}
+                {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                 {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                 {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
@@ -2964,7 +3161,7 @@ export default function App() {
                 </div>
 
                 <div style={{ flex: 1, overflowY: "auto" }}>
-                  {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} />}
+                  {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                   {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                   {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
