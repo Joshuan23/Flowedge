@@ -231,7 +231,7 @@ function SectorGrid({ sectorData }) {
   );
 }
 
-function StockCard({ data, index, onRemove, onChart, onTrade, signalData }) {
+function StockCard({ data, index, onRemove, onChart, onTrade, signalData, spyChange }) {
   const [vis, setVis] = useState(false);
   useEffect(() => { setTimeout(() => setVis(true), index * 80); }, []);
   const up = data.regularMarketChangePercent >= 0;
@@ -287,6 +287,12 @@ function StockCard({ data, index, onRemove, onChart, onTrade, signalData }) {
                 {signalData.showLong ? '▲' : '▼'} {signalData.setupProb}%
               </span>
             )}
+            {spyChange != null && (() => {
+              const rs = (data.regularMarketChangePercent ?? 0) - spyChange;
+              if (Math.abs(rs) < 0.5) return null;
+              const c = rs > 0 ? '#10b981' : '#ef4444';
+              return <span style={{ fontSize: 8, fontWeight: 700, fontFamily: 'monospace', color: c }}>RS{rs >= 0 ? '+' : ''}{rs.toFixed(1)}</span>;
+            })()}
             {onRemove && (
               <button onClick={onRemove} title="Remove from watchlist" style={{
                 background: "none", border: "none", color: "#374151", cursor: "pointer",
@@ -301,22 +307,36 @@ function StockCard({ data, index, onRemove, onChart, onTrade, signalData }) {
             ${data.regularMarketPrice?.toFixed(2)}
           </div>
           <div style={{ fontSize: 12, color, fontWeight: 700 }}>{pct(data.regularMarketChangePercent)}</div>
+          {(() => {
+            const ms = data.marketState;
+            if (ms === 'PRE' && data.preMarketPrice) {
+              const pc = data.preMarketChangePercent ?? 0;
+              const c2 = pc >= 0 ? '#10b981' : '#ef4444';
+              return <div style={{ fontSize: 9, color: '#4b5563', marginTop: 2 }}>PRE <span style={{ color: c2, fontFamily: 'monospace', fontWeight: 700 }}>${data.preMarketPrice.toFixed(2)} {pc >= 0 ? '+' : ''}{pc.toFixed(2)}%</span></div>;
+            }
+            if ((ms === 'POST' || ms === 'CLOSED') && data.postMarketPrice) {
+              const pc = data.postMarketChangePercent ?? 0;
+              const c2 = pc >= 0 ? '#10b981' : '#ef4444';
+              return <div style={{ fontSize: 9, color: '#4b5563', marginTop: 2 }}>AH <span style={{ color: c2, fontFamily: 'monospace', fontWeight: 700 }}>${data.postMarketPrice.toFixed(2)} {pc >= 0 ? '+' : ''}{pc.toFixed(2)}%</span></div>;
+            }
+            return null;
+          })()}
         </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
         {[
-          ["Volume", fmt(data.regularMarketVolume)],
-          ["Mkt Cap", fmt(data.marketCap)],
+          ["Volume", fmt(data.regularMarketVolume), "#9ca3af"],
+          ["Mkt Cap", fmt(data.marketCap), "#9ca3af"],
           (() => {
-            const hi = data.fiftyTwoWeekHigh, price = data.regularMarketPrice;
-            if (!hi || !price) return ["52W High", "—"];
-            const offPct = ((hi - price) / hi * 100).toFixed(0);
-            return ["52W High", `$${hi.toFixed(0)} (${offPct}% off)`];
+            const open = data.regularMarketOpen, price = data.regularMarketPrice;
+            if (!open || !price) return ["From Open", "—", "#9ca3af"];
+            const chg = ((price - open) / open) * 100;
+            return ["From Open", `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`, chg >= 0 ? '#10b981' : '#ef4444'];
           })(),
-        ].map(([label, val]) => (
+        ].map(([label, val, color]) => (
           <div key={label}>
             <div style={{ fontSize: 10, color: "#4b5563", marginBottom: 2 }}>{label}</div>
-            <div style={{ fontSize: 11, color: "#9ca3af", fontFamily: "monospace" }}>{val}</div>
+            <div style={{ fontSize: 11, color: color, fontFamily: "monospace", fontWeight: label === "From Open" ? 700 : 400 }}>{val}</div>
           </div>
         ))}
       </div>
@@ -2454,6 +2474,7 @@ export default function App() {
   const [sectorData, setSectorData] = useState([]);
   const [watchlistSort, setWatchlistSort] = useState('default');
   const [watchlistView, setWatchlistView] = useState('cards');
+  const [watchlistFilter, setWatchlistFilter] = useState('all');
   const syncTimer = useRef(null);
 
   // ── Signal scanner ──────────────────────────────────────────────────────
@@ -2683,6 +2704,9 @@ export default function App() {
   }, [fetchStocks, isMobile]);
 
   const vixVal = marketContext.find(d => String(d.symbol).includes('VIX'))?.regularMarketPrice ?? null;
+  const spyChange = marketContext.find(d => d.symbol === 'SPY')?.regularMarketChangePercent
+    ?? stocks.find(s => s.symbol === 'SPY')?.regularMarketChangePercent
+    ?? null;
   const bullCount = stocks.filter(s => s.regularMarketChangePercent >= 0).length;
   const sortedStocks = useMemo(() => {
     if (watchlistSort === 'change') return [...stocks].sort((a, b) => (b.regularMarketChangePercent ?? 0) - (a.regularMarketChangePercent ?? 0));
@@ -2690,6 +2714,16 @@ export default function App() {
     if (watchlistSort === 'name') return [...stocks].sort((a, b) => a.symbol.localeCompare(b.symbol));
     return stocks;
   }, [stocks, watchlistSort]);
+  const filteredStocks = useMemo(() => {
+    if (watchlistFilter === 'gainers') return sortedStocks.filter(s => (s.regularMarketChangePercent ?? 0) > 0);
+    if (watchlistFilter === 'losers') return sortedStocks.filter(s => (s.regularMarketChangePercent ?? 0) < 0);
+    if (watchlistFilter === 'rvol') return sortedStocks.filter(s => {
+      const avg = s.averageDailyVolume3Month || s.averageDailyVolume10Day;
+      return avg && s.regularMarketVolume && (s.regularMarketVolume / avg) >= 1.5;
+    });
+    if (watchlistFilter === 'signals') return sortedStocks.filter(s => scanResults[s.symbol]?.hasEdge);
+    return sortedStocks;
+  }, [sortedStocks, watchlistFilter, scanResults]);
   const totalVol = stocks.reduce((s, d) => s + (d.regularMarketVolume || 0) * (d.regularMarketPrice || 0), 0);
   const avgChange = stocks.length ? stocks.reduce((s, d) => s + (d.regularMarketChangePercent || 0), 0) / stocks.length : 0;
   const isOpen = new Date().getHours() >= 9 && new Date().getHours() < 16;
@@ -2807,8 +2841,17 @@ export default function App() {
                     <datalist id="all-tickers-dl">
                       {ALL_TICKERS.map(t => <option key={t} value={t} />)}
                     </datalist>
+                    <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
+                      {[['all','All'],['gainers','▲'],['losers','▼'],['rvol','Vol'],['signals','✦']].map(([key, label]) => (
+                        <button key={key} onClick={() => setWatchlistFilter(key)} style={{
+                          padding: '3px 9px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+                          background: watchlistFilter === key ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+                          color: watchlistFilter === key ? '#a5b4fc' : '#4b5563',
+                        }}>{label}</button>
+                      ))}
+                    </div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                      {sortedStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} signalData={scanResults[s.symbol]} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
+                      {filteredStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} signalData={scanResults[s.symbol]} spyChange={spyChange} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
                     </div>
                   </div>
                 )}
@@ -2872,11 +2915,28 @@ export default function App() {
                 <datalist id="all-tickers-dl">
                   {ALL_TICKERS.map(t => <option key={t} value={t} />)}
                 </datalist>
+                <div style={{ display: 'flex', gap: 4, marginBottom: 10, flexWrap: 'wrap' }}>
+                  {[
+                    ['all', 'All', sortedStocks.length],
+                    ['gainers', '▲ Up', sortedStocks.filter(s => (s.regularMarketChangePercent ?? 0) > 0).length],
+                    ['losers', '▼ Down', sortedStocks.filter(s => (s.regularMarketChangePercent ?? 0) < 0).length],
+                    ['rvol', 'High Vol', sortedStocks.filter(s => { const avg = s.averageDailyVolume3Month || s.averageDailyVolume10Day; return avg && s.regularMarketVolume && (s.regularMarketVolume / avg) >= 1.5; }).length],
+                    ['signals', '✦ Signals', sortedStocks.filter(s => scanResults[s.symbol]?.hasEdge).length],
+                  ].map(([key, label, count]) => (
+                    <button key={key} onClick={() => setWatchlistFilter(key)} style={{
+                      padding: '2px 8px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+                      background: watchlistFilter === key ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+                      color: watchlistFilter === key ? '#a5b4fc' : '#4b5563',
+                    }}>
+                      {label}{key !== 'all' && count > 0 ? ` (${count})` : ''}
+                    </button>
+                  ))}
+                </div>
                 {watchlistView === 'heat' ? (
-                  <WatchlistHeatmap stocks={sortedStocks} scanResults={scanResults} onChart={sym => setChartSymbol(sym)} />
+                  <WatchlistHeatmap stocks={filteredStocks} scanResults={scanResults} onChart={sym => setChartSymbol(sym)} />
                 ) : (
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                    {sortedStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} signalData={scanResults[s.symbol]} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
+                    {filteredStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} signalData={scanResults[s.symbol]} spyChange={spyChange} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
                   </div>
                 )}
               </div>
