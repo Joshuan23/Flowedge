@@ -231,7 +231,7 @@ function SectorGrid({ sectorData }) {
   );
 }
 
-function StockCard({ data, index, onRemove, onChart, onTrade }) {
+function StockCard({ data, index, onRemove, onChart, onTrade, signalData }) {
   const [vis, setVis] = useState(false);
   useEffect(() => { setTimeout(() => setVis(true), index * 80); }, []);
   const up = data.regularMarketChangePercent >= 0;
@@ -277,6 +277,16 @@ function StockCard({ data, index, onRemove, onChart, onTrade }) {
                 </span>
               );
             })()}
+            {signalData?.hasEdge && (
+              <span style={{
+                fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3,
+                background: signalData.showLong ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+                color: signalData.showLong ? '#10b981' : '#ef4444',
+                border: `1px solid ${signalData.showLong ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`,
+              }}>
+                {signalData.showLong ? '▲' : '▼'} {signalData.setupProb}%
+              </span>
+            )}
             {onRemove && (
               <button onClick={onRemove} title="Remove from watchlist" style={{
                 background: "none", border: "none", color: "#374151", cursor: "pointer",
@@ -314,6 +324,28 @@ function StockCard({ data, index, onRemove, onChart, onTrade }) {
         <div style={{ display: 'flex', gap: 10, marginBottom: 8 }}>
           {data.trailingPE && <span style={{ fontSize: 10, color: '#4b5563' }}>P/E <span style={{ color: '#9ca3af', fontFamily: 'monospace' }}>{data.trailingPE.toFixed(1)}</span></span>}
           {data.forwardPE && <span style={{ fontSize: 10, color: '#4b5563' }}>Fwd P/E <span style={{ color: '#9ca3af', fontFamily: 'monospace' }}>{data.forwardPE.toFixed(1)}</span></span>}
+        </div>
+      )}
+      {data.fiftyTwoWeekLow && data.fiftyTwoWeekHigh && data.regularMarketPrice && (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: '#374151', marginBottom: 3 }}>
+            <span>${data.fiftyTwoWeekLow.toFixed(0)}</span>
+            <span style={{ color: '#4b5563' }}>52W Range</span>
+            <span>${data.fiftyTwoWeekHigh.toFixed(0)}</span>
+          </div>
+          <div style={{ height: 3, background: 'rgba(255,255,255,0.07)', borderRadius: 2, position: 'relative' }}>
+            {(() => {
+              const lo = data.fiftyTwoWeekLow, hi = data.fiftyTwoWeekHigh, price = data.regularMarketPrice;
+              const pos = Math.min(Math.max(((price - lo) / (hi - lo)) * 100, 0), 100);
+              const c = pos > 75 ? '#10b981' : pos < 25 ? '#ef4444' : '#f59e0b';
+              return (
+                <>
+                  <div style={{ position: 'absolute', left: 0, top: 0, width: `${pos}%`, height: '100%', background: `${c}33`, borderRadius: 2 }} />
+                  <div style={{ position: 'absolute', left: `${pos}%`, top: -2, width: 7, height: 7, background: c, borderRadius: '50%', transform: 'translateX(-50%)', border: '1px solid rgba(0,0,0,0.4)' }} />
+                </>
+              );
+            })()}
+          </div>
         </div>
       )}
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#374151", marginBottom: 4 }}>
@@ -1699,7 +1731,7 @@ function GammaPanel({ stocks }) {
 }
 
 function OptionsStrategy({ data, scored }) {
-  if (!data || !scored?.hasEdge === undefined) return null;
+  if (!data || !scored) return null;
   const { iv = 0, showLong, hasEdge, rrCheck = 0 } = scored;
   const spot = data.spot;
   const nearFlip = data.flipLevel && spot && Math.abs(spot - data.flipLevel) / spot < 0.025;
@@ -2191,6 +2223,7 @@ function JournalPanel() {
 }
 
 function DarkPoolPanel({ stocks }) {
+  const [dpFilter, setDpFilter] = useState('all');
   const now = new Date();
   const marketOpen = new Date(); marketOpen.setHours(9, 30, 0, 0);
   const marketClose = new Date(); marketClose.setHours(16, 0, 0, 0);
@@ -2216,15 +2249,28 @@ function DarkPoolPanel({ stocks }) {
     return { label: "NORMAL", color: "#374151" };
   };
 
+  const filteredScored = dpFilter === 'strong' ? scored.filter(s => s.score > 80)
+    : dpFilter === 'moderate' ? scored.filter(s => s.score > 40)
+    : scored;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ padding: "8px 10px", borderRadius: 8, background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.15)", fontSize: 10, color: "#6b7280", lineHeight: 1.7 }}>
         <strong style={{ color: "#a5b4fc" }}>Dark Pool Score</strong> — Volume anomaly ÷ price impact. High score = large volume with minimal price movement, the hallmark of institutional dark pool activity.
       </div>
-      {scored.length === 0 && (
-        <div style={{ fontSize: 12, color: "#4b5563", textAlign: "center", padding: 20 }}>No volume data available yet.</div>
+      <div style={{ display: 'flex', gap: 5 }}>
+        {[['all','All'], ['strong','Strong (>80)'], ['moderate','Active (>40)']].map(([key, label]) => (
+          <button key={key} onClick={() => setDpFilter(key)} style={{
+            padding: '3px 9px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+            background: dpFilter === key ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: dpFilter === key ? '#a5b4fc' : '#4b5563',
+          }}>{label}</button>
+        ))}
+      </div>
+      {filteredScored.length === 0 && (
+        <div style={{ fontSize: 12, color: "#4b5563", textAlign: "center", padding: 20 }}>No signals match this filter.</div>
       )}
-      {scored.map(s => {
+      {filteredScored.map(s => {
         const { label, color } = getSignal(s.score);
         const barW = Math.min(s.score / 100, 1) * 100;
         const up = s.regularMarketChangePercent >= 0;
@@ -2622,6 +2668,20 @@ export default function App() {
     })();
   }, [isSignedIn]);
 
+  // Keyboard shortcuts — r=refresh, 1-7=tabs, /=focus search
+  useEffect(() => {
+    const handler = (e) => {
+      if (['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return;
+      if (e.key === 'r' || e.key === 'R') { fetchStocks(); setNextRefresh(60); }
+      if (e.key === '/' ) { e.preventDefault(); document.querySelector('input[placeholder*="ticker"]')?.focus(); }
+      const tabList = isMobile ? ["Watch", ...TABS] : TABS;
+      const n = parseInt(e.key);
+      if (n >= 1 && n <= tabList.length) setTab(tabList[n - 1]);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [fetchStocks, isMobile]);
+
   const vixVal = marketContext.find(d => String(d.symbol).includes('VIX'))?.regularMarketPrice ?? null;
   const bullCount = stocks.filter(s => s.regularMarketChangePercent >= 0).length;
   const sortedStocks = useMemo(() => {
@@ -2748,7 +2808,7 @@ export default function App() {
                       {ALL_TICKERS.map(t => <option key={t} value={t} />)}
                     </datalist>
                     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                      {sortedStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
+                      {sortedStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} signalData={scanResults[s.symbol]} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
                     </div>
                   </div>
                 )}
@@ -2816,27 +2876,36 @@ export default function App() {
                   <WatchlistHeatmap stocks={sortedStocks} scanResults={scanResults} onChart={sym => setChartSymbol(sym)} />
                 ) : (
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                    {sortedStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
+                    {sortedStocks.map((s, i) => <StockCard key={s.symbol} data={s} index={i} signalData={scanResults[s.symbol]} onRemove={() => removeFromWatchlist(s.symbol)} onChart={() => setChartSymbol(s.symbol)} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />)}
                   </div>
                 )}
               </div>
 
               <div style={{ padding: 20, display: "flex", flexDirection: "column" }}>
                 <div style={{ display: "flex", gap: 0, marginBottom: 16, borderRadius: 8, border: "1px solid rgba(255,255,255,0.08)", overflowX: "auto", overflowY: "hidden", scrollbarWidth: "none" }}>
-                  {TABS.map((t, i) => (
-                    <button key={t} onClick={() => setTab(t)} style={{
-                      flexShrink: 0, minWidth: 64, padding: "8px 10px", fontSize: 10, fontWeight: 700,
-                      letterSpacing: "0.05em", textTransform: "uppercase", cursor: "pointer", border: "none",
-                      background: tab === t ? "rgba(99,102,241,0.25)" : "rgba(255,255,255,0.02)",
-                      color: tab === t ? "#a5b4fc" : "#4b5563",
-                      borderRight: i < TABS.length - 1 ? "1px solid rgba(255,255,255,0.08)" : "none",
-                      transition: "all 0.2s", whiteSpace: "nowrap",
-                    }}>{t}</button>
-                  ))}
+                  {TABS.map((t, i) => {
+                    const edgeCount = t === 'Signals' ? Object.values(scanResults).filter(r => r?.hasEdge).length : 0;
+                    return (
+                      <button key={t} onClick={() => setTab(t)} style={{
+                        flexShrink: 0, minWidth: 64, padding: "8px 10px", fontSize: 10, fontWeight: 700,
+                        letterSpacing: "0.05em", textTransform: "uppercase", cursor: "pointer", border: "none",
+                        background: tab === t ? "rgba(99,102,241,0.25)" : "rgba(255,255,255,0.02)",
+                        color: tab === t ? "#a5b4fc" : "#4b5563",
+                        borderRight: i < TABS.length - 1 ? "1px solid rgba(255,255,255,0.08)" : "none",
+                        transition: "all 0.2s", whiteSpace: "nowrap", display: 'flex', alignItems: 'center', gap: 4, justifyContent: 'center',
+                      }}>
+                        {t}
+                        {edgeCount > 0 && (
+                          <span style={{ background: '#6366f1', color: '#fff', borderRadius: 8, fontSize: 8, padding: '1px 5px', fontWeight: 900, lineHeight: 1.3 }}>{edgeCount}</span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
 
                 <div style={{ flex: 1, overflowY: "auto" }}>
-                  {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} />}
+                  {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} />}
+                  {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                   {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
                   {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
