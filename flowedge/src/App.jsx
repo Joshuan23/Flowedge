@@ -2635,6 +2635,37 @@ function SignalHistory() {
   );
 }
 
+function scorePerpSignal(a) {
+  const { fundingAnn, changePct, oiUsd } = a;
+  if (oiUsd < 5e6) return null;
+  const atr = Math.max(Math.abs(changePct), 2);
+  let dir = null, type = '', conf = 0, reason = '';
+
+  if      (fundingAnn > 100) { dir = 'short'; type = 'FADE';   conf = 85; reason = 'Extreme long crowding — funding >100% ann'; }
+  else if (fundingAnn > 50)  { dir = 'short'; type = 'FADE';   conf = 72; reason = 'Crowded longs — high-funding squeeze risk'; }
+  else if (fundingAnn < -50) { dir = 'long';  type = 'FADE';   conf = 80; reason = 'Extreme short crowding — negative funding'; }
+  else if (fundingAnn < -20) { dir = 'long';  type = 'FADE';   conf = 65; reason = 'Shorts paying — negative funding fade'; }
+  else if (changePct > 5  && fundingAnn > 5  && fundingAnn < 40) { dir = 'long';  type = 'MOM';   conf = 60; reason = 'Trending up, funding confirms but not extreme'; }
+  else if (changePct < -5 && fundingAnn > -15 && fundingAnn < 15) { dir = 'short'; type = 'MOM';   conf = 58; reason = 'Sell momentum, funding not crowded short'; }
+  else if (fundingAnn > 20 && fundingAnn <= 50 && Math.abs(changePct) < 3) { dir = 'long'; type = 'CARRY'; conf = 52; reason = 'Stable price — collect high positive funding'; }
+
+  if (!dir) return null;
+
+  if      (oiUsd > 2e9)   conf = Math.min(92, conf + 8);
+  else if (oiUsd > 500e6) conf = Math.min(90, conf + 5);
+  else if (oiUsd < 50e6)  conf = Math.max(30, conf - 10);
+
+  const slPct = (atr * 1.5) / 100;
+  const tpPct = (atr * 3.0) / 100;
+  const entry = a.markPx;
+  return {
+    dir, type, conf, reason, entry,
+    sl: dir === 'long' ? entry * (1 - slPct) : entry * (1 + slPct),
+    tp: dir === 'long' ? entry * (1 + tpPct) : entry * (1 - tpPct),
+    rr: (tpPct / slPct).toFixed(1),
+  };
+}
+
 function HyperliquidPanel() {
   const [assets, setAssets] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -2642,6 +2673,7 @@ function HyperliquidPanel() {
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState('oi');
   const [refreshIn, setRefreshIn] = useState(30);
+  const [view, setView] = useState('signals');
 
   const fetchHL = useCallback(async () => {
     setLoading(true); setError('');
@@ -2675,6 +2707,14 @@ function HyperliquidPanel() {
     return list.slice(0, 60);
   }, [assets, search, sortBy]);
 
+  const signals = useMemo(() => {
+    if (!assets) return [];
+    return assets
+      .map(a => ({ asset: a, sig: scorePerpSignal(a) }))
+      .filter(x => x.sig !== null)
+      .sort((a, b) => b.sig.conf - a.sig.conf);
+  }, [assets]);
+
   const fColor = (ann) => ann > 50 ? '#ef4444' : ann > 20 ? '#f59e0b' : ann > 0 ? '#10b981' : ann > -20 ? '#6366f1' : '#a855f7';
   const fmtPx  = (p) => p >= 10000 ? p.toLocaleString('en-US', { maximumFractionDigits: 0 }) : p >= 1 ? p.toFixed(2) : p.toFixed(5);
   const fmtOI  = (v) => v >= 1e9 ? `$${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `$${(v/1e6).toFixed(0)}M` : v >= 1e3 ? `$${(v/1e3).toFixed(0)}K` : `$${v.toFixed(0)}`;
@@ -2684,102 +2724,192 @@ function HyperliquidPanel() {
     ? [...assets].sort((a, b) => Math.abs(b.fundingAnn) - Math.abs(a.fundingAnn)).slice(0, 4)
     : [];
 
+  const typeColor  = { FADE: '#f59e0b', MOM: '#3b82f6', CARRY: '#10b981' };
+  const typeLabel  = { FADE: 'FADE', MOM: 'MOMENTUM', CARRY: 'CARRY' };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ padding: '7px 10px', borderRadius: 8, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.15)', fontSize: 10, color: '#6b7280', lineHeight: 1.65 }}>
-        <strong style={{ color: '#a5b4fc' }}>Hyperliquid Perpetuals</strong> — Onchain perps funding &amp; open interest. High positive funding = crowded longs (squeeze risk). Negative funding = shorts dominant (squeeze potential).
-      </div>
 
-      {extremes.length > 0 && (
-        <div style={{ padding: '8px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)' }}>
-          <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em', marginBottom: 7 }}>EXTREME FUNDING</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
-            {extremes.map(a => {
-              const c = fColor(a.fundingAnn);
-              const label = a.fundingAnn > 100 ? 'EXTREME LONG' : a.fundingAnn > 50 ? 'CROWDED LONG' : a.fundingAnn > 20 ? 'ELEVATED' : a.fundingAnn < -50 ? 'EXTREME SHORT' : a.fundingAnn < -20 ? 'CROWDED SHORT' : 'NEGATIVE';
-              return (
-                <div key={a.name} style={{ padding: '6px 8px', borderRadius: 6, background: `${c}0d`, border: `1px solid ${c}22` }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-                    <span style={{ fontWeight: 800, fontSize: 12, color: '#f9fafb' }}>{a.name}</span>
-                    <span style={{ fontSize: 8, fontWeight: 800, color: c, letterSpacing: '0.05em' }}>{label}</span>
-                  </div>
-                  <div style={{ display: 'flex', gap: 10 }}>
-                    <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: c }}>
-                      {a.fundingAnn >= 0 ? '+' : ''}{a.fundingAnn.toFixed(0)}% ann
-                    </span>
-                    <span style={{ fontSize: 9, fontFamily: 'monospace', color: '#6b7280' }}>
-                      {a.changePct >= 0 ? '+' : ''}{a.changePct.toFixed(2)}% 24h
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+      {/* Header row */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 3 }}>
+          {[['signals', `Signals${signals.length ? ` (${signals.length})` : ''}`], ['market', 'Market']].map(([key, label]) => (
+            <button key={key} onClick={() => setView(key)} style={{
+              padding: '4px 12px', borderRadius: 6, fontSize: 10, fontWeight: 700, border: 'none', cursor: 'pointer',
+              background: view === key ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.05)',
+              color: view === key ? '#a5b4fc' : '#6b7280',
+            }}>{label}</button>
+          ))}
         </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-        <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value.toUpperCase())}
-          style={{ flex: 1, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '6px 10px', color: '#f9fafb', fontSize: 11, fontFamily: 'monospace', outline: 'none' }} />
-        <button onClick={() => { fetchHL(); setRefreshIn(30); }} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '6px 10px', color: '#9ca3af', fontSize: 10, cursor: 'pointer', fontWeight: 600, whiteSpace: 'nowrap' }}>
+        <button onClick={() => { fetchHL(); setRefreshIn(30); }} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: '4px 10px', color: '#6b7280', fontSize: 10, cursor: 'pointer', fontWeight: 600 }}>
           {loading ? '…' : `↻ ${refreshIn}s`}
         </button>
-      </div>
-
-      <div style={{ display: 'flex', gap: 4 }}>
-        {[['oi','OI'],['funding','Funding'],['volume','Volume'],['change','Change']].map(([key, label]) => (
-          <button key={key} onClick={() => setSortBy(key)} style={{
-            padding: '2px 8px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
-            background: sortBy === key ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
-            color: sortBy === key ? '#a5b4fc' : '#4b5563',
-          }}>{label}</button>
-        ))}
       </div>
 
       {error && <div style={{ color: '#ef4444', fontSize: 11, padding: '8px 12px', borderRadius: 7, background: 'rgba(239,68,68,0.08)' }}>{error}</div>}
       {loading && !assets && <div style={{ textAlign: 'center', color: '#4b5563', fontSize: 12, padding: 20 }}>Loading Hyperliquid…</div>}
 
-      {sorted.length > 0 && (
+      {/* ── SIGNALS VIEW ─────────────────────────────────────────── */}
+      {view === 'signals' && (
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: '52px 1fr 62px 90px 70px', gap: 4, padding: '3px 8px', fontSize: 8, color: '#374151', letterSpacing: '0.06em', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-            <span>ASSET</span><span style={{ textAlign: 'right' }}>MARK</span><span style={{ textAlign: 'right' }}>24H</span><span style={{ textAlign: 'right' }}>FUNDING 8H / ANN</span><span style={{ textAlign: 'right' }}>OI</span>
+          <div style={{ padding: '6px 10px', borderRadius: 7, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.14)', fontSize: 10, color: '#6b7280', lineHeight: 1.6 }}>
+            <strong style={{ color: '#a5b4fc' }}>Perp Signals</strong> — <span style={{ color: '#f59e0b' }}>FADE</span> = fade crowded funding; <span style={{ color: '#3b82f6' }}>MOM</span> = trend w/ healthy funding; <span style={{ color: '#10b981' }}>CARRY</span> = collect high funding yield. Stops sized to 1.5× 24h ATR.
           </div>
-          <div style={{ overflowY: 'auto', maxHeight: 460, display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {sorted.map(a => {
-              const c = fColor(a.fundingAnn);
-              const up = a.changePct >= 0;
-              const annAbs = Math.abs(a.fundingAnn);
+
+          {signals.length === 0 && assets && (
+            <div style={{ textAlign: 'center', color: '#4b5563', fontSize: 11, padding: 24 }}>No signals at current thresholds.</div>
+          )}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+            {signals.map(({ asset: a, sig }) => {
+              const isLong  = sig.dir === 'long';
+              const dirColor = isLong ? '#10b981' : '#ef4444';
+              const tc = typeColor[sig.type] || '#9ca3af';
+              const confPct = sig.conf;
+              const confColor = confPct >= 80 ? '#10b981' : confPct >= 65 ? '#f59e0b' : '#6b7280';
               return (
                 <div key={a.name} style={{
-                  display: 'grid', gridTemplateColumns: '52px 1fr 62px 90px 70px', gap: 4,
-                  padding: '4px 8px', borderRadius: 5, alignItems: 'center',
-                  background: annAbs > 50 ? `${c}08` : 'rgba(255,255,255,0.015)',
-                  border: annAbs > 50 ? `1px solid ${c}22` : '1px solid rgba(255,255,255,0.04)',
+                  padding: '10px 12px', borderRadius: 9,
+                  background: `${dirColor}07`,
+                  border: `1px solid ${dirColor}25`,
+                  display: 'flex', flexDirection: 'column', gap: 6,
                 }}>
-                  <span style={{ fontWeight: 800, fontSize: 10, color: '#f9fafb' }}>{a.name}</span>
-                  <span style={{ fontSize: 10, fontFamily: 'monospace', color: '#e5e7eb', textAlign: 'right' }}>${fmtPx(a.markPx)}</span>
-                  <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: up ? '#10b981' : '#ef4444', textAlign: 'right' }}>
-                    {up ? '+' : ''}{a.changePct.toFixed(2)}%
-                  </span>
-                  <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color: c }}>
-                      {a.funding >= 0 ? '+' : ''}{(a.funding * 100).toFixed(4)}%
+                  {/* Top row */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                      <span style={{ fontWeight: 900, fontSize: 13, color: '#f9fafb', letterSpacing: '-0.01em' }}>{a.name}</span>
+                      <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 9, fontWeight: 800, background: `${dirColor}20`, color: dirColor, letterSpacing: '0.06em' }}>
+                        {isLong ? '▲ LONG' : '▼ SHORT'}
+                      </span>
+                      <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 8, fontWeight: 800, background: `${tc}18`, color: tc, letterSpacing: '0.06em' }}>
+                        {typeLabel[sig.type]}
+                      </span>
                     </div>
-                    <div style={{ fontSize: 8, color: c, opacity: 0.75 }}>
-                      {a.fundingAnn >= 0 ? '+' : ''}{a.fundingAnn.toFixed(0)}% ann
-                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: confColor, fontFamily: 'monospace' }}>{confPct}%</span>
                   </div>
-                  <span style={{ fontSize: 9, fontFamily: 'monospace', color: '#6b7280', textAlign: 'right' }}>{fmtOI(a.oiUsd)}</span>
+
+                  {/* Reason */}
+                  <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>{sig.reason}</div>
+
+                  {/* Entry / TP / SL / RR */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4 }}>
+                    {[
+                      ['Entry', `$${fmtPx(sig.entry)}`, '#e5e7eb'],
+                      ['TP', `$${fmtPx(sig.tp)}`, '#10b981'],
+                      ['SL', `$${fmtPx(sig.sl)}`, '#ef4444'],
+                      ['RR', `${sig.rr}×`, '#a5b4fc'],
+                    ].map(([label, val, color]) => (
+                      <div key={label} style={{ padding: '4px 6px', borderRadius: 5, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
+                        <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 2 }}>{label}</div>
+                        <div style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Meta chips */}
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {[
+                      [`⚡ ${a.fundingAnn >= 0 ? '+' : ''}${a.fundingAnn.toFixed(0)}% ann`, fColor(a.fundingAnn)],
+                      [`◎ OI ${fmtOI(a.oiUsd)}`, '#6b7280'],
+                      [`${a.changePct >= 0 ? '▲' : '▼'} ${Math.abs(a.changePct).toFixed(2)}% 24h`, a.changePct >= 0 ? '#10b981' : '#ef4444'],
+                    ].map(([text, color]) => (
+                      <span key={text} style={{ fontSize: 9, fontFamily: 'monospace', color, background: `${color}12`, padding: '1px 6px', borderRadius: 4 }}>{text}</span>
+                    ))}
+                  </div>
                 </div>
               );
             })}
           </div>
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 8, fontFamily: 'monospace', paddingTop: 5, borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-            <span style={{ color: '#ef4444' }}>■ &gt;50% ann (crowded long)</span>
-            <span style={{ color: '#f59e0b' }}>■ &gt;20% ann (elevated)</span>
-            <span style={{ color: '#6366f1' }}>■ Negative (shorts pay)</span>
-            <span style={{ color: '#a855f7' }}>■ Extreme short</span>
+        </>
+      )}
+
+      {/* ── MARKET VIEW ──────────────────────────────────────────── */}
+      {view === 'market' && (
+        <>
+          <div style={{ padding: '7px 10px', borderRadius: 8, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.15)', fontSize: 10, color: '#6b7280', lineHeight: 1.65 }}>
+            <strong style={{ color: '#a5b4fc' }}>Hyperliquid Perpetuals</strong> — Funding &amp; open interest. High positive = crowded longs (squeeze risk). Negative = shorts dominant (squeeze potential).
           </div>
+
+          {extremes.length > 0 && (
+            <div style={{ padding: '8px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)' }}>
+              <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em', marginBottom: 7 }}>EXTREME FUNDING</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
+                {extremes.map(a => {
+                  const c = fColor(a.fundingAnn);
+                  const label = a.fundingAnn > 100 ? 'EXTREME LONG' : a.fundingAnn > 50 ? 'CROWDED LONG' : a.fundingAnn > 20 ? 'ELEVATED' : a.fundingAnn < -50 ? 'EXTREME SHORT' : a.fundingAnn < -20 ? 'CROWDED SHORT' : 'NEGATIVE';
+                  return (
+                    <div key={a.name} style={{ padding: '6px 8px', borderRadius: 6, background: `${c}0d`, border: `1px solid ${c}22` }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                        <span style={{ fontWeight: 800, fontSize: 12, color: '#f9fafb' }}>{a.name}</span>
+                        <span style={{ fontSize: 8, fontWeight: 800, color: c, letterSpacing: '0.05em' }}>{label}</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 10 }}>
+                        <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: c }}>{a.fundingAnn >= 0 ? '+' : ''}{a.fundingAnn.toFixed(0)}% ann</span>
+                        <span style={{ fontSize: 9, fontFamily: 'monospace', color: '#6b7280' }}>{a.changePct >= 0 ? '+' : ''}{a.changePct.toFixed(2)}% 24h</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value.toUpperCase())}
+              style={{ flex: 1, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '6px 10px', color: '#f9fafb', fontSize: 11, fontFamily: 'monospace', outline: 'none' }} />
+          </div>
+
+          <div style={{ display: 'flex', gap: 4 }}>
+            {[['oi','OI'],['funding','Funding'],['volume','Volume'],['change','Change']].map(([key, label]) => (
+              <button key={key} onClick={() => setSortBy(key)} style={{
+                padding: '2px 8px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+                background: sortBy === key ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+                color: sortBy === key ? '#a5b4fc' : '#4b5563',
+              }}>{label}</button>
+            ))}
+          </div>
+
+          {sorted.length > 0 && (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: '52px 1fr 62px 90px 70px', gap: 4, padding: '3px 8px', fontSize: 8, color: '#374151', letterSpacing: '0.06em', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <span>ASSET</span><span style={{ textAlign: 'right' }}>MARK</span><span style={{ textAlign: 'right' }}>24H</span><span style={{ textAlign: 'right' }}>FUNDING 8H / ANN</span><span style={{ textAlign: 'right' }}>OI</span>
+              </div>
+              <div style={{ overflowY: 'auto', maxHeight: 460, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {sorted.map(a => {
+                  const c = fColor(a.fundingAnn);
+                  const up = a.changePct >= 0;
+                  const annAbs = Math.abs(a.fundingAnn);
+                  const hasSig = signals.find(x => x.asset.name === a.name);
+                  return (
+                    <div key={a.name} style={{
+                      display: 'grid', gridTemplateColumns: '52px 1fr 62px 90px 70px', gap: 4,
+                      padding: '4px 8px', borderRadius: 5, alignItems: 'center',
+                      background: annAbs > 50 ? `${c}08` : 'rgba(255,255,255,0.015)',
+                      border: annAbs > 50 ? `1px solid ${c}22` : '1px solid rgba(255,255,255,0.04)',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <span style={{ fontWeight: 800, fontSize: 10, color: '#f9fafb' }}>{a.name}</span>
+                        {hasSig && <span style={{ fontSize: 7, fontWeight: 800, color: hasSig.sig.dir === 'long' ? '#10b981' : '#ef4444' }}>{hasSig.sig.dir === 'long' ? '▲' : '▼'}</span>}
+                      </div>
+                      <span style={{ fontSize: 10, fontFamily: 'monospace', color: '#e5e7eb', textAlign: 'right' }}>${fmtPx(a.markPx)}</span>
+                      <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: up ? '#10b981' : '#ef4444', textAlign: 'right' }}>{up ? '+' : ''}{a.changePct.toFixed(2)}%</span>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color: c }}>{a.funding >= 0 ? '+' : ''}{(a.funding * 100).toFixed(4)}%</div>
+                        <div style={{ fontSize: 8, color: c, opacity: 0.75 }}>{a.fundingAnn >= 0 ? '+' : ''}{a.fundingAnn.toFixed(0)}% ann</div>
+                      </div>
+                      <span style={{ fontSize: 9, fontFamily: 'monospace', color: '#6b7280', textAlign: 'right' }}>{fmtOI(a.oiUsd)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 8, fontFamily: 'monospace', paddingTop: 5, borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                <span style={{ color: '#ef4444' }}>■ &gt;50% ann (crowded long)</span>
+                <span style={{ color: '#f59e0b' }}>■ &gt;20% ann (elevated)</span>
+                <span style={{ color: '#6366f1' }}>■ Negative (shorts pay)</span>
+                <span style={{ color: '#a855f7' }}>■ Extreme short</span>
+              </div>
+            </>
+          )}
         </>
       )}
     </div>
