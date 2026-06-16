@@ -2403,7 +2403,43 @@ function DarkPoolPanel({ stocks }) {
   );
 }
 
-function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan, vixVal, sectorData, onTrade }) {
+function scoreCommoditySignal(d) {
+  const price = d?.regularMarketPrice;
+  if (!price) return null;
+  const hi52  = d.fiftyTwoWeekHigh;
+  const lo52  = d.fiftyTwoWeekLow;
+  if (!hi52 || !lo52 || hi52 <= lo52) return null;
+
+  const range    = hi52 - lo52;
+  const pos      = (price - lo52) / range;
+  const chgPct   = d.regularMarketChangePercent ?? 0;
+  const dayHi    = d.regularMarketDayHigh  ?? price;
+  const dayLo    = d.regularMarketDayLow   ?? price;
+  const atrPct   = Math.max(((dayHi - dayLo) / price) * 100, 0.8);
+
+  let dir = null, type = '', conf = 0, reason = '';
+
+  if      (pos > 0.93)                         { dir = 'short'; type = 'RESIST';  conf = 65; reason = `Near 52W high $${hi52.toFixed(2)} — resistance / overbought`; }
+  else if (pos < 0.07)                         { dir = 'long';  type = 'SUPPORT'; conf = 68; reason = `Near 52W low $${lo52.toFixed(2)} — support / oversold`; }
+  else if (chgPct > 2.0  && pos > 0.55)        { dir = 'long';  type = 'MOM';     conf = 60; reason = `+${chgPct.toFixed(1)}% daily move, in upper half of 52W range`; }
+  else if (chgPct < -2.0 && pos < 0.45)        { dir = 'short'; type = 'MOM';     conf = 58; reason = `${chgPct.toFixed(1)}% sell-off, in lower half of 52W range`; }
+  else if (chgPct > 1.5  && pos > 0.4 && pos < 0.6) { dir = 'long'; type = 'BREAK'; conf = 52; reason = `Upside momentum at mid-range — watching for range break`; }
+  else if (chgPct < -1.5 && pos > 0.4 && pos < 0.6) { dir = 'short'; type = 'BREAK'; conf = 50; reason = `Downside pressure at mid-range — potential breakdown`; }
+
+  if (!dir) return null;
+
+  const slPct = (atrPct * 1.5) / 100;
+  const tpPct = (atrPct * 2.5) / 100;
+  return {
+    dir, type, conf, reason, pos,
+    entry: price, chgPct,
+    sl: dir === 'long' ? price * (1 - slPct) : price * (1 + slPct),
+    tp: dir === 'long' ? price * (1 + tpPct) : price * (1 - tpPct),
+    rr: (tpPct / slPct).toFixed(1),
+  };
+}
+
+function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan, vixVal, sectorData, onTrade, commodities }) {
   const now = useNow(60000);
   const [filter, setFilter] = useState('all');
 
@@ -2449,6 +2485,53 @@ function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan
 
       {/* Macro calendar */}
       <EconomicCalendar />
+
+      {/* Commodity signals */}
+      {commodities?.length > 0 && (() => {
+        const scored = commodities.map(d => ({ d, sig: scoreCommoditySignal(d) })).filter(x => x.sig);
+        if (!scored.length) return null;
+        const typeColor = { RESIST: '#ef4444', SUPPORT: '#10b981', MOM: '#3b82f6', BREAK: '#f59e0b' };
+        const fmtPx = v => v >= 1000 ? v.toLocaleString('en-US', { maximumFractionDigits: 2 }) : v.toFixed(2);
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>OIL SIGNALS</div>
+            {scored.map(({ d, sig }) => {
+              const dirColor = sig.dir === 'long' ? '#10b981' : '#ef4444';
+              const tc = typeColor[sig.type] || '#9ca3af';
+              const name = d.shortName || d.symbol;
+              return (
+                <div key={d.symbol} style={{ padding: '9px 11px', borderRadius: 9, background: `${dirColor}07`, border: `1px solid ${dirColor}25`, display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontWeight: 900, fontSize: 12, color: '#f9fafb' }}>{name}</span>
+                      <span style={{ padding: '1px 5px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${dirColor}20`, color: dirColor }}>{sig.dir === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
+                      <span style={{ padding: '1px 5px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${tc}18`, color: tc }}>{sig.type}</span>
+                    </div>
+                    <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 800, color: sig.conf >= 65 ? '#10b981' : '#f59e0b' }}>{sig.conf}%</span>
+                  </div>
+                  <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>{sig.reason}</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 3 }}>
+                    {[['Entry', `$${fmtPx(sig.entry)}`, '#e5e7eb'], ['TP', `$${fmtPx(sig.tp)}`, '#10b981'], ['SL', `$${fmtPx(sig.sl)}`, '#ef4444'], ['RR', `${sig.rr}×`, '#a5b4fc']].map(([label, val, color]) => (
+                      <div key={label} style={{ padding: '3px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
+                        <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{label}</div>
+                        <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                    {[
+                      [`${sig.chgPct >= 0 ? '▲' : '▼'} ${Math.abs(sig.chgPct).toFixed(2)}% 24h`, sig.chgPct >= 0 ? '#10b981' : '#ef4444'],
+                      [`52W pos: ${(sig.pos * 100).toFixed(0)}%`, '#6b7280'],
+                    ].map(([text, color]) => (
+                      <span key={text} style={{ fontSize: 9, fontFamily: 'monospace', color, background: `${color}12`, padding: '1px 5px', borderRadius: 3 }}>{text}</span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -3117,7 +3200,7 @@ export default function App() {
   const fetchMarketContext = useCallback(async () => {
     try {
       const [ctxRes, secRes] = await Promise.all([
-        fetch('/api/quotes?symbols=SPY,QQQ,IWM,%5EVIX'),
+        fetch('/api/quotes?symbols=SPY,QQQ,IWM,%5EVIX,BZ%3DF,CL%3DF'),
         fetch('/api/quotes?symbols=XLK,XLF,XLV,XLC,XLY,XLP,XLE,XLI,XLB,XLRE,XLU'),
       ]);
       const [ctxData, secData] = await Promise.all([ctxRes.json(), secRes.json()]);
@@ -3185,6 +3268,7 @@ export default function App() {
   const spyChange = marketContext.find(d => d.symbol === 'SPY')?.regularMarketChangePercent
     ?? stocks.find(s => s.symbol === 'SPY')?.regularMarketChangePercent
     ?? null;
+  const commodities = marketContext.filter(d => ['BZ=F', 'CL=F'].includes(d.symbol));
   const bullCount = stocks.filter(s => s.regularMarketChangePercent >= 0).length;
   const sortedStocks = useMemo(() => {
     if (watchlistSort === 'change') return [...stocks].sort((a, b) => (b.regularMarketChangePercent ?? 0) - (a.regularMarketChangePercent ?? 0));
@@ -3333,7 +3417,7 @@ export default function App() {
                     </div>
                   </div>
                 )}
-                {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
+                {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                 {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                 {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
@@ -3443,7 +3527,7 @@ export default function App() {
                 </div>
 
                 <div style={{ flex: 1, overflowY: "auto" }}>
-                  {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
+                  {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                   {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                   {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
