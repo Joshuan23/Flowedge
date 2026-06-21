@@ -166,12 +166,13 @@ function MarketContextBar({ contextData }) {
       {contextData.filter(d => d && !String(d.symbol).includes('VIX')).map(d => {
         const up = (d.regularMarketChangePercent ?? 0) >= 0;
         const c = up ? '#10b981' : '#ef4444';
+        const label = { 'BZ=F': 'BRENT', 'CL=F': 'WTI', 'GC=F': 'GOLD', 'SI=F': 'SILVER' }[d.symbol] || d.symbol;
         return (
           <div key={d.symbol} style={{
             display: 'flex', alignItems: 'center', gap: 7,
             padding: '0 16px', borderRight: '1px solid rgba(255,255,255,0.04)', flexShrink: 0,
           }}>
-            <span style={{ fontSize: 10, fontWeight: 800, color: '#6b7280', letterSpacing: '0.04em' }}>{d.symbol}</span>
+            <span style={{ fontSize: 10, fontWeight: 800, color: '#6b7280', letterSpacing: '0.04em' }}>{label}</span>
             <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>
               ${d.regularMarketPrice?.toFixed(2)}
             </span>
@@ -302,7 +303,9 @@ function StockCard({ data, index, onRemove, onChart, onTrade, signalData, spyCha
           </div>
           <div style={{ fontSize: 11, color: "#4b5563", marginTop: 1 }}>{data.shortName || ""}</div>
         </div>
-        <div style={{ textAlign: "right" }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+          {data.priceHistory?.length > 2 && <div style={{ paddingTop: 4 }}><Sparkline prices={data.priceHistory} /></div>}
+          <div style={{ textAlign: "right" }}>
           <div style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 17, color: "#f9fafb" }}>
             ${data.regularMarketPrice?.toFixed(2)}
           </div>
@@ -321,6 +324,7 @@ function StockCard({ data, index, onRemove, onChart, onTrade, signalData, spyCha
             }
             return null;
           })()}
+          </div>
         </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
@@ -399,6 +403,24 @@ function useNow(intervalMs = 60000) {
     return () => clearInterval(t);
   }, [intervalMs]);
   return now;
+}
+
+function Sparkline({ prices, width = 58, height = 22 }) {
+  if (!prices || prices.length < 2) return null;
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const range = max - min || min * 0.001 || 1;
+  const pts = prices.map((p, i) => {
+    const x = (i / (prices.length - 1)) * width;
+    const y = height - 1 - ((p - min) / range) * (height - 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const up = prices[prices.length - 1] >= prices[0];
+  return (
+    <svg width={width} height={height} style={{ display: 'block', flexShrink: 0, opacity: 0.75 }}>
+      <polyline points={pts} fill="none" stroke={up ? '#10b981' : '#ef4444'} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
 }
 
 function SignalCard({ symbol, signal, index, now, onTrade }) {
@@ -2755,8 +2777,13 @@ function HyperliquidPanel() {
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState('oi');
-  const [refreshIn, setRefreshIn] = useState(30);
+  const [refreshIn, setRefreshIn] = useState(120);
   const [view, setView] = useState('signals');
+  const [minConf, setMinConf] = useState(0);
+  const [liveMids, setLiveMids] = useState({});
+  const [wsStatus, setWsStatus] = useState('connecting');
+  const wsRef = useRef(null);
+  const sigFirstSeenRef = useRef({});
 
   const fetchHL = useCallback(async () => {
     setLoading(true); setError('');
@@ -2771,44 +2798,92 @@ function HyperliquidPanel() {
 
   useEffect(() => { fetchHL(); }, [fetchHL]);
 
+  // Slow poll for funding/OI refresh (every 2 min) — prices come from WS
   useEffect(() => {
-    setRefreshIn(30);
+    setRefreshIn(120);
     const t = setInterval(() => setRefreshIn(prev => {
-      if (prev <= 1) { fetchHL(); return 30; }
+      if (prev <= 1) { fetchHL(); return 120; }
       return prev - 1;
     }), 1000);
     return () => clearInterval(t);
   }, [fetchHL]);
 
+  // WebSocket for live mark prices
+  const connectWS = useCallback(() => {
+    try {
+      const ws = new WebSocket('wss://api.hyperliquid.xyz/ws');
+      wsRef.current = ws;
+      ws.onopen = () => {
+        setWsStatus('live');
+        ws.send(JSON.stringify({ method: 'subscribe', subscription: { type: 'allMids' } }));
+      };
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.channel === 'allMids' && msg.data?.mids) setLiveMids(msg.data.mids);
+        } catch {}
+      };
+      ws.onclose = () => { setWsStatus('reconnecting'); setTimeout(connectWS, 3000); };
+      ws.onerror  = () => ws.close();
+    } catch { setWsStatus('polling'); }
+  }, []);
+
+  useEffect(() => {
+    connectWS();
+    return () => { wsRef.current?.close(); wsRef.current = null; };
+  }, [connectWS]);
+
+  // Merge live WS prices into asset list
+  const mergedAssets = useMemo(() => {
+    if (!assets) return null;
+    if (!Object.keys(liveMids).length) return assets;
+    return assets.map(a => {
+      const midStr = liveMids[a.name];
+      if (!midStr) return a;
+      const newMark = parseFloat(midStr);
+      if (!newMark || isNaN(newMark)) return a;
+      const prevPx = a.prevDayPx || newMark;
+      return { ...a, markPx: newMark, changePct: prevPx ? ((newMark - prevPx) / prevPx) * 100 : a.changePct, oiUsd: a.openInterest * newMark };
+    });
+  }, [assets, liveMids]);
+
   const sorted = useMemo(() => {
-    if (!assets) return [];
-    let list = search ? assets.filter(a => a.name.toUpperCase().includes(search)) : [...assets];
+    if (!mergedAssets) return [];
+    let list = search ? mergedAssets.filter(a => a.name.toUpperCase().includes(search)) : [...mergedAssets];
     if (sortBy === 'oi')      list.sort((a, b) => b.oiUsd - a.oiUsd);
     if (sortBy === 'funding') list.sort((a, b) => Math.abs(b.fundingAnn) - Math.abs(a.fundingAnn));
     if (sortBy === 'volume')  list.sort((a, b) => b.dayVolume - a.dayVolume);
     if (sortBy === 'change')  list.sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct));
     return list.slice(0, 60);
-  }, [assets, search, sortBy]);
+  }, [mergedAssets, search, sortBy]);
 
   const signals = useMemo(() => {
-    if (!assets) return [];
-    return assets
-      .map(a => ({ asset: a, sig: scorePerpSignal(a) }))
-      .filter(x => x.sig !== null)
+    if (!mergedAssets) return [];
+    const now = Date.now();
+    return mergedAssets
+      .map(a => {
+        const sig = scorePerpSignal(a);
+        if (!sig || sig.conf < minConf) return null;
+        const key = `${a.name}:${sig.dir}`;
+        if (!sigFirstSeenRef.current[key]) sigFirstSeenRef.current[key] = now;
+        const ageMs = now - sigFirstSeenRef.current[key];
+        return { asset: a, sig, ageMs, isStale: ageMs > 30 * 60 * 1000 };
+      })
+      .filter(Boolean)
       .sort((a, b) => b.sig.conf - a.sig.conf);
-  }, [assets]);
+  }, [mergedAssets, minConf]);
 
   const fColor = (ann) => ann > 50 ? '#ef4444' : ann > 20 ? '#f59e0b' : ann > 0 ? '#10b981' : ann > -20 ? '#6366f1' : '#a855f7';
   const fmtPx  = (p) => p >= 10000 ? p.toLocaleString('en-US', { maximumFractionDigits: 0 }) : p >= 1 ? p.toFixed(2) : p.toFixed(5);
   const fmtOI  = (v) => v >= 1e9 ? `$${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `$${(v/1e6).toFixed(0)}M` : v >= 1e3 ? `$${(v/1e3).toFixed(0)}K` : `$${v.toFixed(0)}`;
 
-  // Extreme funding highlights
-  const extremes = assets
-    ? [...assets].sort((a, b) => Math.abs(b.fundingAnn) - Math.abs(a.fundingAnn)).slice(0, 4)
+  const extremes = mergedAssets
+    ? [...mergedAssets].sort((a, b) => Math.abs(b.fundingAnn) - Math.abs(a.fundingAnn)).slice(0, 4)
     : [];
 
   const typeColor  = { FADE: '#f59e0b', MOM: '#3b82f6', CARRY: '#10b981' };
   const typeLabel  = { FADE: 'FADE', MOM: 'MOMENTUM', CARRY: 'CARRY' };
+  const wsColor = wsStatus === 'live' ? '#10b981' : wsStatus === 'reconnecting' ? '#f59e0b' : '#6b7280';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -2824,9 +2899,12 @@ function HyperliquidPanel() {
             }}>{label}</button>
           ))}
         </div>
-        <button onClick={() => { fetchHL(); setRefreshIn(30); }} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: '4px 10px', color: '#6b7280', fontSize: 10, cursor: 'pointer', fontWeight: 600 }}>
-          {loading ? '…' : `↻ ${refreshIn}s`}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 8, fontWeight: 800, color: wsColor }}>● {wsStatus === 'live' ? 'LIVE' : wsStatus === 'reconnecting' ? 'RECONNECTING' : 'POLLING'}</span>
+          <button onClick={() => { fetchHL(); setRefreshIn(120); }} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: '4px 10px', color: '#6b7280', fontSize: 10, cursor: 'pointer', fontWeight: 600 }}>
+            {loading ? '…' : `↻ ${refreshIn}s`}
+          </button>
+        </div>
       </div>
 
       {error && <div style={{ color: '#ef4444', fontSize: 11, padding: '8px 12px', borderRadius: 7, background: 'rgba(239,68,68,0.08)' }}>{error}</div>}
@@ -2836,26 +2914,41 @@ function HyperliquidPanel() {
       {view === 'signals' && (
         <>
           <div style={{ padding: '6px 10px', borderRadius: 7, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.14)', fontSize: 10, color: '#6b7280', lineHeight: 1.6 }}>
-            <strong style={{ color: '#a5b4fc' }}>Perp Signals</strong> — <span style={{ color: '#f59e0b' }}>FADE</span> = fade crowded funding; <span style={{ color: '#3b82f6' }}>MOM</span> = trend w/ healthy funding; <span style={{ color: '#10b981' }}>CARRY</span> = collect high funding yield. Stops sized to 1.5× 24h ATR.
+            <strong style={{ color: '#a5b4fc' }}>Perp Signals</strong> — <span style={{ color: '#f59e0b' }}>FADE</span> = fade crowded funding; <span style={{ color: '#3b82f6' }}>MOM</span> = trend w/ healthy funding; <span style={{ color: '#10b981' }}>CARRY</span> = collect funding yield. Signals dim after 30 min.
           </div>
 
-          {signals.length === 0 && assets && (
+          {/* Confidence filter */}
+          <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+            <span style={{ fontSize: 9, color: '#374151', fontWeight: 700, marginRight: 2 }}>MIN CONF</span>
+            {[[0,'All'], [60,'60%+'], [70,'70%+'], [80,'80%+']].map(([v, label]) => (
+              <button key={v} onClick={() => setMinConf(v)} style={{
+                padding: '2px 8px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+                background: minConf === v ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+                color: minConf === v ? '#a5b4fc' : '#4b5563',
+              }}>{label}</button>
+            ))}
+          </div>
+
+          {signals.length === 0 && mergedAssets && (
             <div style={{ textAlign: 'center', color: '#4b5563', fontSize: 11, padding: 24 }}>No signals at current thresholds.</div>
           )}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-            {signals.map(({ asset: a, sig }) => {
+            {signals.map(({ asset: a, sig, isStale, ageMs }) => {
               const isLong  = sig.dir === 'long';
               const dirColor = isLong ? '#10b981' : '#ef4444';
               const tc = typeColor[sig.type] || '#9ca3af';
               const confPct = sig.conf;
               const confColor = confPct >= 80 ? '#10b981' : confPct >= 65 ? '#f59e0b' : '#6b7280';
+              const ageMin = Math.floor(ageMs / 60000);
               return (
                 <div key={a.name} style={{
                   padding: '10px 12px', borderRadius: 9,
                   background: `${dirColor}07`,
                   border: `1px solid ${dirColor}25`,
                   display: 'flex', flexDirection: 'column', gap: 6,
+                  opacity: isStale ? 0.45 : 1,
+                  transition: 'opacity 0.3s',
                 }}>
                   {/* Top row */}
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -2868,7 +2961,10 @@ function HyperliquidPanel() {
                         {typeLabel[sig.type]}
                       </span>
                     </div>
-                    <span style={{ fontSize: 11, fontWeight: 800, color: confColor, fontFamily: 'monospace' }}>{confPct}%</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      {isStale && <span style={{ fontSize: 7, fontWeight: 800, color: '#6b7280', background: 'rgba(255,255,255,0.06)', padding: '1px 4px', borderRadius: 3 }}>STALE {ageMin}m</span>}
+                      <span style={{ fontSize: 11, fontWeight: 800, color: confColor, fontFamily: 'monospace' }}>{confPct}%</span>
+                    </div>
                   </div>
 
                   {/* Reason */}
@@ -2999,7 +3095,108 @@ function HyperliquidPanel() {
   );
 }
 
-const TABS = ["Signals", "Journal", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Perps", "Account"];
+function ScreenerPanel() {
+  const [assets, setAssets] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [minOI, setMinOI] = useState(0);
+  const [fundDir, setFundDir] = useState('any');
+  const [minChange, setMinChange] = useState(0);
+  const [sigType, setSigType] = useState('any');
+  const [sortBy, setSortBy] = useState('oi');
+
+  useEffect(() => {
+    setLoading(true);
+    fetch('/api/hyperliquid').then(r => r.json()).then(d => { setAssets(d.assets || []); setLoading(false); }).catch(() => setLoading(false));
+  }, []);
+
+  const fColor = (ann) => ann > 50 ? '#ef4444' : ann > 20 ? '#f59e0b' : ann > 0 ? '#10b981' : ann > -20 ? '#6366f1' : '#a855f7';
+  const fmtPx  = (p) => p >= 10000 ? p.toLocaleString('en-US', { maximumFractionDigits: 0 }) : p >= 1 ? p.toFixed(2) : p.toFixed(5);
+  const fmtOI  = (v) => v >= 1e9 ? `$${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `$${(v/1e6).toFixed(0)}M` : `$${(v/1e3).toFixed(0)}K`;
+
+  const results = useMemo(() => {
+    if (!assets) return [];
+    let list = assets.filter(a => {
+      if (a.oiUsd < minOI) return false;
+      if (fundDir === 'pos'    && a.fundingAnn <= 0)  return false;
+      if (fundDir === 'high'   && a.fundingAnn < 20)  return false;
+      if (fundDir === 'xhigh'  && a.fundingAnn < 50)  return false;
+      if (fundDir === 'neg'    && a.fundingAnn >= 0)  return false;
+      if (fundDir === 'xneg'   && a.fundingAnn > -20) return false;
+      if (Math.abs(a.changePct) < minChange) return false;
+      if (sigType !== 'any') { const s = scorePerpSignal(a); if (!s || s.type !== sigType) return false; }
+      return true;
+    });
+    if (sortBy === 'oi')      list.sort((a, b) => b.oiUsd - a.oiUsd);
+    if (sortBy === 'funding') list.sort((a, b) => Math.abs(b.fundingAnn) - Math.abs(a.fundingAnn));
+    if (sortBy === 'change')  list.sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct));
+    if (sortBy === 'volume')  list.sort((a, b) => b.dayVolume - a.dayVolume);
+    return list;
+  }, [assets, minOI, fundDir, minChange, sigType, sortBy]);
+
+  const BtnRow = ({ label, opts, val, set }) => (
+    <div style={{ marginBottom: 6 }}>
+      <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 700, marginBottom: 4, letterSpacing: '0.06em' }}>{label}</div>
+      <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+        {opts.map(([v, lbl]) => (
+          <button key={v} onClick={() => set(v)} style={{
+            padding: '2px 9px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+            background: val === v ? 'rgba(99,102,241,0.28)' : 'rgba(255,255,255,0.05)',
+            color: val === v ? '#a5b4fc' : '#4b5563',
+          }}>{lbl}</button>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>PERP SCREENER — {assets ? `${results.length} / ${assets.length} assets` : '…'}</div>
+
+      <div style={{ padding: '10px 12px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)', display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <BtnRow label="MIN OPEN INTEREST" opts={[[0,'Any'],[100e6,'$100M+'],[500e6,'$500M+'],[1e9,'$1B+'],[5e9,'$5B+']]} val={minOI} set={setMinOI} />
+        <BtnRow label="FUNDING"  opts={[['any','Any'],['pos','Positive'],['high','>20%'],['xhigh','>50%'],['neg','Negative'],['xneg','<-20%']]} val={fundDir} set={setFundDir} />
+        <BtnRow label="MIN |24H Δ|" opts={[[0,'Any'],[2,'2%+'],[5,'5%+'],[10,'10%+']]} val={minChange} set={setMinChange} />
+        <BtnRow label="SIGNAL TYPE" opts={[['any','Any'],['FADE','Fade'],['MOM','Momentum'],['CARRY','Carry']]} val={sigType} set={setSigType} />
+        <BtnRow label="SORT BY" opts={[['oi','OI'],['funding','Funding'],['change','Change'],['volume','Volume']]} val={sortBy} set={setSortBy} />
+      </div>
+
+      {loading && <div style={{ textAlign: 'center', color: '#4b5563', fontSize: 12, padding: 20 }}>Loading…</div>}
+
+      {results.length > 0 && (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: '50px 1fr 58px 80px 60px 52px', gap: 4, padding: '3px 8px', fontSize: 8, color: '#374151', letterSpacing: '0.06em', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+            <span>ASSET</span><span style={{ textAlign: 'right' }}>MARK</span><span style={{ textAlign: 'right' }}>24H</span><span style={{ textAlign: 'right' }}>FUND ANN</span><span style={{ textAlign: 'right' }}>OI</span><span style={{ textAlign: 'right' }}>SIG</span>
+          </div>
+          <div style={{ overflowY: 'auto', maxHeight: 500, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {results.map(a => {
+              const c = fColor(a.fundingAnn);
+              const up = a.changePct >= 0;
+              const sig = scorePerpSignal(a);
+              return (
+                <div key={a.name} style={{ display: 'grid', gridTemplateColumns: '50px 1fr 58px 80px 60px 52px', gap: 4, padding: '4px 8px', borderRadius: 5, alignItems: 'center', background: 'rgba(255,255,255,0.015)', border: '1px solid rgba(255,255,255,0.04)' }}>
+                  <span style={{ fontWeight: 800, fontSize: 10, color: '#f9fafb' }}>{a.name}</span>
+                  <span style={{ fontSize: 10, fontFamily: 'monospace', color: '#e5e7eb', textAlign: 'right' }}>${fmtPx(a.markPx)}</span>
+                  <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: up ? '#10b981' : '#ef4444', textAlign: 'right' }}>{up ? '+' : ''}{a.changePct.toFixed(2)}%</span>
+                  <span style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color: c, textAlign: 'right' }}>{a.fundingAnn >= 0 ? '+' : ''}{a.fundingAnn.toFixed(0)}%</span>
+                  <span style={{ fontSize: 9, fontFamily: 'monospace', color: '#6b7280', textAlign: 'right' }}>{fmtOI(a.oiUsd)}</span>
+                  <div style={{ textAlign: 'right' }}>
+                    {sig && <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 4px', borderRadius: 3, background: sig.dir === 'long' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)', color: sig.dir === 'long' ? '#10b981' : '#ef4444' }}>{sig.dir === 'long' ? '▲' : '▼'} {sig.type}</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {assets && results.length === 0 && (
+        <div style={{ textAlign: 'center', color: '#4b5563', fontSize: 11, padding: 24 }}>No assets match current filters.</div>
+      )}
+    </div>
+  );
+}
+
+const TABS = ["Signals", "Journal", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Perps", "Screener", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -3011,6 +3208,7 @@ export default function App() {
   });
   const [addInput, setAddInput] = useState("");
   const [stocks, setStocks] = useState([]);
+  const priceHistoryRef = useRef({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [pulse, setPulse] = useState(true);
@@ -3185,7 +3383,14 @@ export default function App() {
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       const results = data?.quoteResponse?.result || [];
       if (!results.length) throw new Error("No data returned");
-      setStocks(results);
+      const withHistory = results.map(q => {
+        const h = priceHistoryRef.current[q.symbol] ? [...priceHistoryRef.current[q.symbol]] : [];
+        if (q.regularMarketPrice) h.push(q.regularMarketPrice);
+        if (h.length > 30) h.shift();
+        priceHistoryRef.current[q.symbol] = h;
+        return { ...q, priceHistory: h };
+      });
+      setStocks(withHistory);
       setLastUpdate(new Date().toLocaleTimeString());
     } catch (e) {
       setError(e.message);
@@ -3424,6 +3629,7 @@ export default function App() {
                 {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
                 {tab === "Dark Pool" && <DarkPoolPanel stocks={stocks} />}
                 {tab === "Perps" && <HyperliquidPanel />}
+                {tab === "Screener" && <ScreenerPanel />}
                 {tab === "Account" && (clerkAvailable ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
               </div>
             </>
@@ -3534,6 +3740,7 @@ export default function App() {
                   {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
                   {tab === "Dark Pool" && <DarkPoolPanel stocks={stocks} />}
                   {tab === "Perps" && <HyperliquidPanel />}
+                  {tab === "Screener" && <ScreenerPanel />}
                   {tab === "Account" && (clerkAvailable ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
                 </div>
               </div>
