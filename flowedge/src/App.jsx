@@ -215,7 +215,12 @@ function MarketContextBar({ contextData }) {
       {contextData.filter(d => d && !String(d.symbol).includes('VIX')).map(d => {
         const up = (d.regularMarketChangePercent ?? 0) >= 0;
         const c = up ? '#10b981' : '#ef4444';
-        const label = { 'BZ=F': 'BRENT', 'CL=F': 'WTI', 'GC=F': 'GOLD', 'SI=F': 'SILVER' }[d.symbol] || d.symbol;
+        const label = { 'BZ=F': 'BRENT', 'CL=F': 'WTI', 'GC=F': 'GOLD', 'SI=F': 'SILVER', 'BTC-USD': 'BTC', '^TNX': '10Y' }[d.symbol] || d.symbol;
+        const priceStr = d.symbol === '^TNX'
+          ? `${d.regularMarketPrice?.toFixed(2)}%`
+          : d.symbol === 'BTC-USD'
+          ? `$${((d.regularMarketPrice || 0) / 1000).toFixed(1)}k`
+          : `$${d.regularMarketPrice?.toFixed(2)}`;
         return (
           <div key={d.symbol} style={{
             display: 'flex', alignItems: 'center', gap: 7,
@@ -223,7 +228,7 @@ function MarketContextBar({ contextData }) {
           }}>
             <span style={{ fontSize: 10, fontWeight: 800, color: '#6b7280', letterSpacing: '0.04em' }}>{label}</span>
             <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>
-              ${d.regularMarketPrice?.toFixed(2)}
+              {priceStr}
             </span>
             <span style={{ fontSize: 10, fontFamily: 'monospace', color: c, fontWeight: 600 }}>
               {(d.regularMarketChangePercent ?? 0) > 0 ? '+' : ''}{(d.regularMarketChangePercent ?? 0).toFixed(2)}%
@@ -526,12 +531,19 @@ function SignalCard({ symbol, signal, index, now, onTrade }) {
         ))}
       </div>
       {iv > 45 && !isStale && <div style={{ marginTop: 6, fontSize: 10, color: "#f59e0b" }}>⚠ IV {iv}% — elevated, avoid buying premium</div>}
-      {signal.posSizePer10K && !isStale && (
-        <div style={{ marginTop: 5, paddingTop: 5, borderTop: '1px solid rgba(255,255,255,0.04)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontSize: 9, color: '#4b5563' }}>Per $10K · 1% risk</span>
-          <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: '#a5b4fc' }}>~{signal.posSizePer10K} shares</span>
-        </div>
-      )}
+      {signal.posSizePer10K && !isStale && (() => {
+        let acctSize = 25000;
+        try { acctSize = parseInt(localStorage.getItem('fe_account_size') || '25000') || 25000; } catch {}
+        const actualShares = Math.max(1, Math.floor(acctSize * signal.posSizePer10K / 10000));
+        const riskDollars = Math.round(acctSize * 0.01);
+        const acctLabel = acctSize >= 1000000 ? `$${(acctSize/1000000).toFixed(1)}M` : acctSize >= 1000 ? `$${(acctSize/1000).toFixed(0)}K` : `$${acctSize}`;
+        return (
+          <div style={{ marginTop: 5, paddingTop: 5, borderTop: '1px solid rgba(255,255,255,0.04)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 9, color: '#4b5563' }}>{acctLabel} acct · ${riskDollars} risk (1%)</span>
+            <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: '#a5b4fc' }}>~{actualShares} shares</span>
+          </div>
+        );
+      })()}
       {isStale && <div style={{ marginTop: 6, fontSize: 10, color: "#4b5563" }}>Signal is {ageMin}m old — rescan for fresh levels</div>}
       {onTrade && !isStale && (
         <div style={{ marginTop: 7, paddingTop: 7, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
@@ -725,10 +737,21 @@ function AlertsPanel({ stocks }) {
   }, [stocks, alerts]);
 
   const addAlert = async () => {
-    const targetPrice = parseFloat(form.price);
-    if (!targetPrice || targetPrice <= 0) return;
+    const num = parseFloat(form.price);
+    if (!num || num <= 0) return;
+    const isPct = form.direction.startsWith('pct');
+    let targetPrice = num;
+    let pct = null;
+    if (isPct) {
+      const priceMap = Object.fromEntries(stocks.map(s => [s.symbol, s.regularMarketPrice]));
+      const base = priceMap[form.symbol];
+      if (!base) { alert(`${form.symbol} must be in your watchlist to use % alerts`); return; }
+      pct = num;
+      targetPrice = +(form.direction === 'pctAbove' ? base * (1 + num / 100) : base * (1 - num / 100)).toFixed(2);
+    }
+    const direction = isPct ? (form.direction === 'pctAbove' ? 'above' : 'below') : form.direction;
     if (Notification.permission === "default") await Notification.requestPermission();
-    setAlerts(prev => [...prev, { id: Date.now(), symbol: form.symbol, targetPrice, direction: form.direction, triggered: false }]);
+    setAlerts(prev => [...prev, { id: Date.now(), symbol: form.symbol, targetPrice, direction, pct, triggered: false }]);
     setForm(f => ({ ...f, price: "" }));
     setAdding(false);
   };
@@ -762,6 +785,7 @@ function AlertsPanel({ stocks }) {
                 <span style={{ fontWeight: 800, fontSize: 13, color: "#f9fafb" }}>{a.symbol}</span>
                 <span style={{ fontSize: 11, color: "#4b5563", marginLeft: 6 }}>
                   {a.direction === "above" ? "▲" : "▼"} ${a.targetPrice.toFixed(2)}
+                  {a.pct != null && <span style={{ color: '#a5b4fc', marginLeft: 4 }}>({a.direction === 'above' ? '+' : '-'}{a.pct}%)</span>}
                 </span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -791,8 +815,16 @@ function AlertsPanel({ stocks }) {
             <select value={form.direction} onChange={e => setForm(f => ({ ...f, direction: e.target.value }))} style={{ ...inputStyle, cursor: "pointer" }}>
               <option value="above">Price goes above</option>
               <option value="below">Price goes below</option>
+              <option value="pctAbove">% gain from current</option>
+              <option value="pctBelow">% drop from current</option>
             </select>
-            <input placeholder="Target price" type="number" value={form.price} onChange={e => setForm(f => ({ ...f, price: e.target.value }))} style={inputStyle} />
+            <input
+              placeholder={form.direction.startsWith('pct') ? 'Target % (e.g. 5)' : 'Target price'}
+              type="number"
+              value={form.price}
+              onChange={e => setForm(f => ({ ...f, price: e.target.value }))}
+              style={inputStyle}
+            />
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={addAlert} style={{
                 flex: 1, background: "#6366f1", border: "none", borderRadius: 6, padding: "8px 0",
@@ -918,6 +950,16 @@ function OIHeatMap({ heatmap, spot, buyKingNode, sellKingNode }) {
 function AccountPanel() {
   const { user, getToken } = useContext(AuthContext);
   const [referral, setReferral] = useState(null);
+  const [acctSize, setAcctSize] = useState(() => {
+    try { return parseInt(localStorage.getItem('fe_account_size') || '25000') || 25000; } catch { return 25000; }
+  });
+  const [acctInput, setAcctInput] = useState('');
+  const [editingAcct, setEditingAcct] = useState(false);
+  const saveAcctSize = () => {
+    const v = parseInt(acctInput.replace(/[^0-9]/g, ''));
+    if (v >= 100) { localStorage.setItem('fe_account_size', String(v)); setAcctSize(v); }
+    setEditingAcct(false);
+  };
   const [loadingRef, setLoadingRef] = useState(false);
   const [copied, setCopied] = useState(false);
   const [notifStatus, setNotifStatus] = useState(() =>
@@ -962,6 +1004,37 @@ function AccountPanel() {
         <div style={{ fontSize: 10, color: '#a5b4fc', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 10 }}>SUBSCRIPTION</div>
         {row('Plan', user?.publicMetadata?.isPro ? '✅ Pro' : 'Free')}
         {row('Email', user?.emailAddresses?.[0]?.emailAddress || '—')}
+      </div>
+
+      {/* Account Size */}
+      <div style={{ padding: 14, borderRadius: 10, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <div style={{ fontSize: 10, color: '#a5b4fc', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 10 }}>TRADING ACCOUNT SIZE</div>
+        <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 10px', lineHeight: 1.5 }}>
+          Used for 1% risk position sizing shown on each signal.
+        </p>
+        {editingAcct ? (
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              autoFocus
+              placeholder={`Current: $${acctSize.toLocaleString()}`}
+              value={acctInput}
+              onChange={e => setAcctInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') saveAcctSize(); if (e.key === 'Escape') setEditingAcct(false); }}
+              style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(99,102,241,0.4)', borderRadius: 6, padding: '7px 10px', color: '#f9fafb', fontSize: 13, fontFamily: 'monospace', outline: 'none' }}
+            />
+            <button onClick={saveAcctSize} style={{ background: '#6366f1', border: 'none', borderRadius: 6, padding: '0 14px', color: '#fff', fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>Save</button>
+            <button onClick={() => setEditingAcct(false)} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '0 10px', color: '#6b7280', cursor: 'pointer', fontSize: 12 }}>✕</button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 16, fontFamily: 'monospace', fontWeight: 800, color: '#f9fafb' }}>
+              ${acctSize.toLocaleString()}
+            </span>
+            <button onClick={() => { setAcctInput(''); setEditingAcct(true); }} style={{ background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: 6, padding: '5px 12px', color: '#a5b4fc', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+              Edit
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Referral */}
@@ -2223,6 +2296,61 @@ function JournalPanel() {
         );
       })()}
 
+      {/* Monthly P&L Calendar */}
+      {trades.length > 0 && (() => {
+        const now = new Date();
+        const yr = now.getFullYear(), mo = now.getMonth();
+        const daysInMonth = new Date(yr, mo + 1, 0).getDate();
+        const firstDay = new Date(yr, mo, 1).getDay();
+        const dayPnl = {};
+        trades.forEach(t => {
+          const d = new Date(t.date + 'T12:00:00');
+          if (d.getFullYear() === yr && d.getMonth() === mo) {
+            const k = d.getDate();
+            dayPnl[k] = (dayPnl[k] || 0) + t.pnl;
+          }
+        });
+        const today = now.getDate();
+        const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const cells = [];
+        for (let i = 0; i < firstDay; i++) cells.push(null);
+        for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+        return (
+          <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 8, padding: '8px 12px' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', marginBottom: 8, letterSpacing: '0.08em' }}>
+              {MONTHS[mo].toUpperCase()} {yr} · P&L CALENDAR
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3 }}>
+              {['Su','Mo','Tu','We','Th','Fr','Sa'].map(d => (
+                <div key={d} style={{ fontSize: 7, color: '#374151', textAlign: 'center', paddingBottom: 2, fontWeight: 700 }}>{d}</div>
+              ))}
+              {cells.map((day, i) => {
+                if (!day) return <div key={`pad${i}`} />;
+                const pnl = dayPnl[day];
+                const isToday = day === today;
+                const intensity = pnl != null ? Math.min(0.55, 0.12 + Math.abs(pnl) / 400 * 0.43) : 0;
+                const bg = pnl > 0 ? `rgba(16,185,129,${intensity})` : pnl < 0 ? `rgba(239,68,68,${intensity})` : 'rgba(255,255,255,0.02)';
+                const color = pnl > 0 ? '#10b981' : pnl < 0 ? '#ef4444' : '#374151';
+                return (
+                  <div key={day} title={pnl != null ? `${pnl >= 0 ? '+' : ''}$${Math.abs(pnl).toFixed(0)}` : ''} style={{
+                    aspectRatio: '1', borderRadius: 3, background: bg,
+                    border: isToday ? '1px solid rgba(99,102,241,0.5)' : '1px solid rgba(255,255,255,0.03)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 8, color, fontWeight: pnl != null ? 700 : 400,
+                  }}>{day}</div>
+                );
+              })}
+            </div>
+            {Object.keys(dayPnl).length > 0 && (
+              <div style={{ marginTop: 6, display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                <span style={{ fontSize: 8, color: '#10b981' }}>■ Profit</span>
+                <span style={{ fontSize: 8, color: '#ef4444' }}>■ Loss</span>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {trades.length > 1 && (() => {
         const bySymbol = {};
         trades.forEach(t => {
@@ -3245,7 +3373,93 @@ function ScreenerPanel() {
   );
 }
 
-const TABS = ["Signals", "Journal", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Perps", "Screener", "Account"];
+function NewsPanel({ watchlist }) {
+  const [news, setNews] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [selectedSym, setSelectedSym] = useState('all');
+
+  const topSyms = watchlist.slice(0, 8);
+
+  useEffect(() => {
+    setLoading(true); setError(false);
+    const syms = topSyms.join(',');
+    fetch(`/api/news?symbols=${syms}`)
+      .then(r => r.json())
+      .then(d => { setNews(d.news || []); setLoading(false); })
+      .catch(() => { setError(true); setLoading(false); });
+  }, [watchlist.slice(0, 8).join(',')]);
+
+  const fmtAge = ts => {
+    const m = Math.floor((Date.now() / 1000 - ts) / 60);
+    if (m < 1) return 'just now';
+    if (m < 60) return `${m}m ago`;
+    if (m < 1440) return `${Math.floor(m / 60)}h ago`;
+    return `${Math.floor(m / 1440)}d ago`;
+  };
+
+  const filtered = selectedSym === 'all' ? news : news.filter(n => n.querySym === selectedSym);
+  const symCounts = {};
+  news.forEach(n => { symCounts[n.querySym] = (symCounts[n.querySym] || 0) + 1; });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ fontSize: 10, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>MARKET NEWS</div>
+        {!loading && !error && news.length > 0 && (
+          <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <button onClick={() => setSelectedSym('all')} style={{ padding: '2px 7px', borderRadius: 4, fontSize: 8, fontWeight: 700, border: 'none', cursor: 'pointer', background: selectedSym === 'all' ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.04)', color: selectedSym === 'all' ? '#a5b4fc' : '#4b5563' }}>All</button>
+            {Object.entries(symCounts).map(([sym, cnt]) => (
+              <button key={sym} onClick={() => setSelectedSym(sym)} style={{ padding: '2px 7px', borderRadius: 4, fontSize: 8, fontWeight: 700, border: 'none', cursor: 'pointer', background: selectedSym === sym ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.04)', color: selectedSym === sym ? '#a5b4fc' : '#4b5563' }}>
+                {sym} {cnt > 1 ? `(${cnt})` : ''}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {loading && (
+        <div style={{ padding: 24, textAlign: 'center', color: '#4b5563', fontSize: 12 }}>Loading news…</div>
+      )}
+      {error && (
+        <div style={{ padding: 16, textAlign: 'center', color: '#4b5563', fontSize: 12, borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+          Unable to load news right now. Try again later.
+        </div>
+      )}
+      {!loading && !error && filtered.length === 0 && (
+        <div style={{ padding: 16, textAlign: 'center', color: '#4b5563', fontSize: 12 }}>No news found.</div>
+      )}
+
+      {filtered.map((n, i) => (
+        <a key={n.uuid || i} href={n.link} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none', display: 'block' }}>
+          <div style={{
+            padding: '10px 12px', borderRadius: 8,
+            background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)',
+            transition: 'border-color 0.15s',
+          }}
+            onMouseEnter={e => e.currentTarget.style.borderColor = 'rgba(99,102,241,0.3)'}
+            onMouseLeave={e => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.06)'}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+              <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, background: 'rgba(99,102,241,0.15)', color: '#a5b4fc', flexShrink: 0 }}>{n.querySym}</span>
+              <span style={{ fontSize: 9, color: '#374151', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{n.publisher}</span>
+              <span style={{ fontSize: 9, color: '#374151', fontFamily: 'monospace', flexShrink: 0 }}>{fmtAge(n.providerPublishTime)}</span>
+            </div>
+            <div style={{ fontSize: 12, color: '#e5e7eb', fontWeight: 500, lineHeight: 1.45 }}>{n.title}</div>
+          </div>
+        </a>
+      ))}
+
+      {!loading && !error && news.length > 0 && (
+        <div style={{ fontSize: 10, color: '#374151', textAlign: 'center', padding: '4px 0' }}>
+          Powered by Yahoo Finance · {topSyms.length} tickers tracked
+        </div>
+      )}
+    </div>
+  );
+}
+
+const TABS = ["Signals", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Perps", "Screener", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -3454,7 +3668,7 @@ export default function App() {
   const fetchMarketContext = useCallback(async () => {
     try {
       const [ctxRes, secRes] = await Promise.all([
-        fetch('/api/quotes?symbols=SPY,QQQ,IWM,%5EVIX,BZ%3DF,CL%3DF'),
+        fetch('/api/quotes?symbols=SPY,QQQ,IWM,%5EVIX,BZ%3DF,CL%3DF,BTC-USD,%5ETNX'),
         fetch('/api/quotes?symbols=XLK,XLF,XLV,XLC,XLY,XLP,XLE,XLI,XLB,XLRE,XLU'),
       ]);
       const [ctxData, secData] = await Promise.all([ctxRes.json(), secRes.json()]);
@@ -3672,6 +3886,7 @@ export default function App() {
                   </div>
                 )}
                 {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
+                {tab === "News" && <NewsPanel watchlist={watchlist} />}
                 {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                 {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
@@ -3783,6 +3998,7 @@ export default function App() {
 
                 <div style={{ flex: 1, overflowY: "auto" }}>
                   {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
+                  {tab === "News" && <NewsPanel watchlist={watchlist} />}
                   {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                   {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
