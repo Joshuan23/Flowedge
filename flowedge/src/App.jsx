@@ -121,27 +121,76 @@ function StatBox({ label, value, color = "#a5b4fc", sub }) {
 }
 
 function ChartModal({ symbol, onClose }) {
+  const containerRef = useRef(null);
+  const [tf, setTf] = useState('D');
+
+  useEffect(() => {
+    const h = e => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.innerHTML = '';
+
+    const widget = document.createElement('div');
+    widget.className = 'tradingview-widget-container__widget';
+    widget.style.cssText = 'width:100%;height:100%;';
+    el.appendChild(widget);
+
+    const script = document.createElement('script');
+    script.type = 'text/javascript';
+    script.async = true;
+    script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+    script.innerHTML = JSON.stringify({
+      autosize: true,
+      symbol,
+      interval: tf,
+      timezone: 'America/New_York',
+      theme: 'dark',
+      style: '1',
+      locale: 'en',
+      backgroundColor: 'rgba(8,11,18,1)',
+      gridColor: 'rgba(255,255,255,0.04)',
+      hide_top_toolbar: false,
+      hide_side_toolbar: false,
+      withdateranges: true,
+      allow_symbol_change: true,
+      save_image: false,
+      studies: ['RSI@tv-basicstudies', 'MACD@tv-basicstudies'],
+      support_host: 'https://www.tradingview.com',
+    });
+    el.appendChild(script);
+
+    return () => { el.innerHTML = ''; };
+  }, [symbol, tf]);
+
   return (
     <div onClick={onClose} style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.9)',
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)',
       zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center',
     }}>
       <div onClick={e => e.stopPropagation()} style={{
         background: '#080b12', border: '1px solid rgba(255,255,255,0.1)',
-        borderRadius: 12, width: '95vw', maxWidth: 860, overflow: 'hidden',
+        borderRadius: 12, width: '96vw', maxWidth: 1060, height: '88vh',
+        overflow: 'hidden', display: 'flex', flexDirection: 'column',
       }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
-          <span style={{ fontWeight: 800, fontSize: 15 }}>{symbol}</span>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#6b7280', cursor: 'pointer', fontSize: 24, lineHeight: 1 }}>×</button>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.07)', flexShrink: 0 }}>
+          <span style={{ fontWeight: 900, fontSize: 15, color: '#f9fafb', letterSpacing: '-0.01em' }}>{symbol}</span>
+          <div style={{ display: 'flex', gap: 2 }}>
+            {[['1','1m'],['5','5m'],['15','15m'],['60','1H'],['240','4H'],['D','D'],['W','W'],['M','M']].map(([v, label]) => (
+              <button key={v} onClick={() => setTf(v)} style={{
+                padding: '3px 8px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+                background: tf === v ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.05)',
+                color: tf === v ? '#a5b4fc' : '#6b7280',
+              }}>{label}</button>
+            ))}
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#6b7280', cursor: 'pointer', fontSize: 22, lineHeight: 1, padding: '0 4px', marginLeft: 8 }}>×</button>
         </div>
-        <iframe
-          key={symbol}
-          src={`https://s.tradingview.com/widgetembed/?frameElementId=tv_${symbol}&symbol=${encodeURIComponent(symbol)}&interval=D&hidesidetoolbar=1&hidetoptoolbar=0&theme=dark&style=1&locale=en&hide_legend=0&save_image=0`}
-          style={{ width: '100%', height: 440, border: 'none', display: 'block' }}
-          allowTransparency="true"
-          scrolling="no"
-          title={`${symbol} chart`}
-        />
+        <div ref={containerRef} className="tradingview-widget-container" style={{ flex: 1, minHeight: 0 }} />
       </div>
     </div>
   );
