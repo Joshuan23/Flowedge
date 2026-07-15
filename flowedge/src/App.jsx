@@ -2702,13 +2702,22 @@ const FX_NAMES = {
   'GBPJPY=X': 'GBP/JPY', 'XAUUSD=X': 'XAU/USD', 'XAGUSD=X': 'XAG/USD',
 };
 
-// Persistent signal-alert feed shared by forex + ICT engines (shown in Alerts tab)
+// Persistent signal-alert feed shared by forex + ICT + scalp engines (shown in
+// Alerts tab). Returns true only when the alert is new — the same signal seen by
+// two watchers (panel + background) within 30 min is logged and notified once.
 function logSignalAlert(entry) {
   try {
     const log = JSON.parse(localStorage.getItem('fe_signal_alerts') || '[]');
+    const dup = log.find(e =>
+      e.source === entry.source && e.name === entry.name &&
+      e.dir === entry.dir && e.type === entry.type &&
+      Date.now() - e.time < 30 * 60 * 1000
+    );
+    if (dup) return false;
     log.unshift({ ...entry, id: Date.now() + Math.random(), time: Date.now() });
     localStorage.setItem('fe_signal_alerts', JSON.stringify(log.slice(0, 50)));
-  } catch {}
+    return true;
+  } catch { return false; }
 }
 
 function scoreForexSignal(d) {
@@ -2925,8 +2934,8 @@ function ICTPanel() {
           const prev = prevSignalsRef.current[sym];
           if (prev !== key) {
             const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
-            logSignalAlert({ source: 'ICT', name, dir: analysis.signal, type: analysis.signalType.replace('_', ' '), conf: analysis.confidence, reason: analysis.reason, price: analysis.entry });
-            if (prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            const isNew = logSignalAlert({ source: 'ICT', name, dir: analysis.signal, type: analysis.signalType.replace('_', ' '), conf: analysis.confidence, reason: analysis.reason, price: analysis.entry });
+            if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
               new Notification(`FlowEdge ICT — ${name}`, {
                 body: `${analysis.signal.toUpperCase()} ${analysis.signalType.replace('_', ' ')} · ${analysis.confidence}%\n${analysis.reason}`,
                 icon: '/icon.png',
@@ -3263,25 +3272,110 @@ function ictIntradayAnalyze(candles, price, mode) {
     let sl, tp;
     if (dir === 'long') {
       const structSL = obLong ? obLong.bottom : fvgLong ? fvgLong.bottom : null;
-      sl = structSL != null ? structSL - atr * 0.3 : price - atr * (isScalp ? 1 : 1.5);
+      sl = structSL != null ? structSL - atr * 0.3 : price - atr * (isScalp ? 1.5 : 1.5);
       const target = bsl.filter(lv => lv > price + atr).sort((a, b) => a - b)[0];
-      tp = target ?? price + atr * (isScalp ? 1.5 : 3);
+      tp = target ?? price + atr * (isScalp ? 2 : 3);
     } else {
       const structSL = obShort ? obShort.top : fvgShort ? fvgShort.top : null;
-      sl = structSL != null ? structSL + atr * 0.3 : price + atr * (isScalp ? 1 : 1.5);
+      sl = structSL != null ? structSL + atr * 0.3 : price + atr * (isScalp ? 1.5 : 1.5);
       const target = ssl.filter(lv => lv < price - atr).sort((a, b) => b - a)[0];
-      tp = target ?? price - atr * (isScalp ? 1.5 : 3);
+      tp = target ?? price - atr * (isScalp ? 2 : 3);
     }
+    // Minimum distances — intraday ATR can be a couple of pips, and a stop/target
+    // that tight gets taken out immediately by spread + noise. Floor at a % of price.
+    const minRisk   = price * (isScalp ? 0.0012 : 0.0018); // 12 / 18 pips on a 1.0000 pair
+    const minTarget = price * (isScalp ? 0.0018 : 0.0030);
+    if (Math.abs(price - sl) < minRisk)   sl = dir === 'long' ? price - minRisk   : price + minRisk;
+    if (Math.abs(tp - price) < minTarget) tp = dir === 'long' ? price + minTarget : price - minTarget;
     const risk = Math.abs(price - sl);
-    sig = { dir, setup, conf, reason, entry: price, sl, tp, rr: risk > 0 ? (Math.abs(tp - price) / risk).toFixed(1) : null };
+    sig = {
+      dir, setup, conf, reason, entry: price, sl, tp,
+      rr: risk > 0 ? (Math.abs(tp - price) / risk).toFixed(1) : null,
+      ob: dir === 'long' ? obLong : obShort,
+      fvg: dir === 'long' ? fvgLong : fvgShort,
+    };
   }
 
   return {
-    structure, zone, eq, hi, lo,
+    structure, zone, eq, hi, lo, bsl, ssl,
     retr: structure === 'bearish' ? retrShort : retrLong,
     inOTE: structure === 'bearish' ? inOTEShort : inOTELong,
     fvgCount: fvgs.length, obCount: obs.length, sweptBSL, sweptSSL, sig,
   };
+}
+
+// Mini candle chart with the ICT levels drawn on it: entry/TP/SL lines, the OB/FVG
+// zone that produced the alert, equilibrium, BSL/SSL liquidity, and a setup marker.
+function ScalpChart({ candles, a, sym, tfLabel }) {
+  if (!candles || candles.length < 12) return null;
+  const data   = candles.slice(-72);
+  const offset = candles.length - data.length;
+  const sig    = a?.sig;
+
+  const W = 320, H = 116, labelW = 46;
+  const plotW = W - labelW;
+  let lo = Math.min(...data.map(c => c.low));
+  let hi = Math.max(...data.map(c => c.high));
+  if (sig) { lo = Math.min(lo, sig.sl, sig.tp); hi = Math.max(hi, sig.sl, sig.tp); }
+  const vpad = (hi - lo) * 0.07 || hi * 0.001;
+  lo -= vpad; hi += vpad;
+  const y  = v => ((hi - v) / (hi - lo)) * (H - 10) + 5;
+  const x  = i => 2 + (i / data.length) * (plotW - 4);
+  const cw = Math.max(1.4, ((plotW - 4) / data.length) * 0.62);
+  const inRange = v => v != null && v >= lo && v <= hi;
+  const fp = p => sym?.startsWith('XAUUSD') ? p.toFixed(2) : sym?.startsWith('XAGUSD') ? p.toFixed(3) : p >= 100 ? p.toFixed(2) : p.toFixed(4);
+  const dc = sig ? (sig.dir === 'long' ? '#10b981' : '#ef4444') : '#6b7280';
+  const zoneRect = (z, fill) => {
+    if (!z || !inRange(z.bottom) && !inRange(z.top)) return null;
+    const xs = x(Math.max(0, (z.idx ?? 0) - offset));
+    const yt = y(Math.min(hi, z.top)), yb = y(Math.max(lo, z.bottom));
+    return <rect x={xs} y={yt} width={Math.max(0, plotW - xs)} height={Math.max(1, yb - yt)} fill={fill} />;
+  };
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block', background: 'rgba(0,0,0,0.3)', borderRadius: 7, border: '1px solid rgba(255,255,255,0.05)' }}>
+      {/* OB / FVG zone that defines the alert */}
+      {sig && zoneRect(sig.ob,  'rgba(59,130,246,0.15)')}
+      {sig && zoneRect(sig.fvg, 'rgba(139,92,246,0.15)')}
+
+      {/* equilibrium + liquidity pools */}
+      {a && inRange(a.eq) && <line x1={0} x2={plotW} y1={y(a.eq)} y2={y(a.eq)} stroke="#6b7280" strokeWidth="0.6" strokeDasharray="2 3" />}
+      {(a?.bsl || []).filter(inRange).map((lv, i) => <line key={`b${i}`} x1={0} x2={plotW} y1={y(lv)} y2={y(lv)} stroke="#f59e0b" strokeWidth="0.5" strokeDasharray="1.5 3" opacity="0.7" />)}
+      {(a?.ssl || []).filter(inRange).map((lv, i) => <line key={`s${i}`} x1={0} x2={plotW} y1={y(lv)} y2={y(lv)} stroke="#f59e0b" strokeWidth="0.5" strokeDasharray="1.5 3" opacity="0.7" />)}
+
+      {/* candles */}
+      {data.map((c, i) => {
+        const up = c.close >= c.open;
+        const col = up ? '#10b981' : '#ef4444';
+        const cx = x(i) + cw / 2;
+        return (
+          <g key={i}>
+            <line x1={cx} x2={cx} y1={y(c.high)} y2={y(c.low)} stroke={col} strokeWidth="0.6" opacity="0.9" />
+            <rect x={x(i)} y={y(Math.max(c.open, c.close))} width={cw} height={Math.max(0.8, Math.abs(y(c.open) - y(c.close)))} fill={col} />
+          </g>
+        );
+      })}
+
+      {/* entry / TP / SL with price labels */}
+      {sig && [['E', sig.entry, '#a5b4fc', null], ['TP', sig.tp, '#10b981', '4 3'], ['SL', sig.sl, '#ef4444', '4 3']].map(([lbl, v, col, dash]) => inRange(v) && (
+        <g key={lbl}>
+          <line x1={0} x2={plotW} y1={y(v)} y2={y(v)} stroke={col} strokeWidth="0.9" strokeDasharray={dash || undefined} />
+          <text x={W - 2} y={y(v) + 2.5} textAnchor="end" fontSize="7" fontFamily="monospace" fontWeight="700" fill={col}>{lbl} {fp(v)}</text>
+        </g>
+      ))}
+
+      {/* alert marker at the live candle */}
+      {sig && inRange(sig.entry) && (
+        <g>
+          <circle cx={x(data.length - 1) + cw / 2} cy={y(sig.entry)} r="2.6" fill={dc} stroke="#080b12" strokeWidth="0.8" />
+          <text x={5} y={22} fontSize="8.5" fontWeight="800" fill={dc}>{sig.dir === 'long' ? '▲' : '▼'} {sig.setup} — alert entry</text>
+        </g>
+      )}
+
+      <text x={5} y={11} fontSize="7" fontWeight="800" fill="#4b5563" letterSpacing="0.08em">{tfLabel}</text>
+      {!sig && <text x={5} y={22} fontSize="7.5" fill="#374151">no active entry — showing EQ + liquidity</text>}
+    </svg>
+  );
 }
 
 function ScalpPanel() {
@@ -3304,7 +3398,7 @@ function ScalpPanel() {
       if (price) {
         const scalp = ictIntradayAnalyze(c5, price, 'scalp');
         const intra = ictIntradayAnalyze(c15, price, 'intra');
-        setPairData(prev => ({ ...prev, [sym]: { price, scalp, intra } }));
+        setPairData(prev => ({ ...prev, [sym]: { price, scalp, intra, c5, c15 } }));
 
         // Alert on new/changed entries for both strategies
         [['SCALP', scalp?.sig], ['INTRADAY', intra?.sig]].forEach(([mode, sig]) => {
@@ -3313,8 +3407,8 @@ function ScalpPanel() {
           const prev = prevAlertRef.current[refKey];
           if (key && prev !== key) {
             const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
-            logSignalAlert({ source: mode, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry });
-            if (prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            const isNew = logSignalAlert({ source: mode, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry });
+            if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
               new Notification(`FlowEdge ${mode} — ${name}`, {
                 body: `${sig.dir.toUpperCase()} ${sig.setup} · ${sig.conf}%\n${sig.reason}`,
                 icon: '/favicon.ico',
@@ -3473,6 +3567,13 @@ function ScalpPanel() {
           </div>
           {d ? (
             <>
+              {(() => {
+                // Chart the timeframe with the live entry — scalp (5m) first, else intraday (15m)
+                const use = d.scalp?.sig || !d.intra?.sig
+                  ? { candles: d.c5, a: d.scalp, tf: '5M · SCALP' }
+                  : { candles: d.c15, a: d.intra, tf: '15M · INTRADAY' };
+                return <ScalpChart candles={use.candles} a={use.a} sym={pair.symbol} tfLabel={use.tf} />;
+              })()}
               <StrategyRow mode="SCALP" a={d.scalp} sym={pair.symbol} />
               <StrategyRow mode="INTRADAY" a={d.intra} sym={pair.symbol} />
             </>
@@ -4601,9 +4702,9 @@ export default function App() {
       const prev = fxAlertRef.current[d.symbol];
       if (prev === key) return;
       fxAlertRef.current[d.symbol] = key;
-      logSignalAlert({ source: 'FOREX', name: sig.name, dir: sig.dir, type: sig.type, conf: sig.conf, reason: sig.reason, price: sig.entry });
+      const isNew = logSignalAlert({ source: 'FOREX', name: sig.name, dir: sig.dir, type: sig.type, conf: sig.conf, reason: sig.reason, price: sig.entry });
       // Skip the browser popup on first observation (page load) — only notify on changes
-      if (prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
         new Notification(`FlowEdge Forex — ${sig.name}`, {
           body: `${sig.dir.toUpperCase()} ${sig.type} · ${sig.conf}%\n${sig.reason}`,
           icon: '/favicon.ico',
@@ -4611,6 +4712,45 @@ export default function App() {
       }
     });
   }, [forexData]);
+
+  // Background ICT scalp/intraday watcher — alerts fire even when the Scalp tab
+  // is closed. 30s cadence matches the intraday edge cache; logSignalAlert dedupes
+  // against the ScalpPanel's own faster loop when the tab IS open.
+  const scalpWatchRef = useRef({});
+  useEffect(() => {
+    const scan = () => {
+      ICT_PAIRS.forEach(async p => {
+        try {
+          const [r5, r15] = await Promise.all([
+            fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=5m&range=1d`),
+            fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=15m&range=5d`),
+          ]);
+          const [d5, d15] = await Promise.all([r5.json(), r15.json()]);
+          const c5 = d5.candles || [], c15 = d15.candles || [];
+          const price = d5.meta?.regularMarketPrice || c5[c5.length - 1]?.close || c15[c15.length - 1]?.close;
+          if (!price) return;
+          [['SCALP', ictIntradayAnalyze(c5, price, 'scalp')?.sig], ['INTRADAY', ictIntradayAnalyze(c15, price, 'intra')?.sig]].forEach(([mode, sig]) => {
+            const refKey = `${p.symbol}|${mode}`;
+            const key = sig ? `${sig.dir}|${sig.setup}` : null;
+            const prev = scalpWatchRef.current[refKey];
+            if (key && prev !== key) {
+              const isNew = logSignalAlert({ source: mode, name: p.name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry });
+              if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                new Notification(`FlowEdge ${mode} — ${p.name}`, {
+                  body: `${sig.dir.toUpperCase()} ${sig.setup} · ${sig.conf}%\n${sig.reason}`,
+                  icon: '/favicon.ico',
+                });
+              }
+            }
+            if (key) scalpWatchRef.current[refKey] = key;
+          });
+        } catch {}
+      });
+    };
+    scan();
+    const t = setInterval(scan, 30000);
+    return () => clearInterval(t);
+  }, []);
 
   // Auto-refresh quotes every 60 seconds
   const [nextRefresh, setNextRefresh] = useState(60);
