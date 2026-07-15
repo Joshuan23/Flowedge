@@ -2875,7 +2875,7 @@ function ICTPanel() {
   useEffect(() => {
     if (Notification.permission === 'default') Notification.requestPermission();
     ICT_PAIRS.forEach(p => fetchPair(p.symbol));
-    const iv = setInterval(() => ICT_PAIRS.forEach(p => fetchPair(p.symbol)), 5 * 60 * 1000);
+    const iv = setInterval(() => ICT_PAIRS.forEach(p => fetchPair(p.symbol)), 1000);
     return () => clearInterval(iv);
   }, [fetchPair]);
 
@@ -3971,7 +3971,7 @@ function NewsPanel({ watchlist }) {
   );
 }
 
-const TABS = ["Signals", "ICT", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Perps", "Screener", "Account"];
+const TABS = ["Signals", "ICT", "News", "Journal", "Portfolio", "Alerts", "Perps", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -4406,10 +4406,7 @@ export default function App() {
                 {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                 {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
-                {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
-                {tab === "Dark Pool" && <DarkPoolPanel stocks={stocks} />}
                 {tab === "Perps" && <HyperliquidPanel />}
-                {tab === "Screener" && <ScreenerPanel />}
                 {tab === "Account" && (clerkAvailable ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
               </div>
             </>
@@ -4519,10 +4516,7 @@ export default function App() {
                   {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                   {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
-                  {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
-                  {tab === "Dark Pool" && <DarkPoolPanel stocks={stocks} />}
                   {tab === "Perps" && <HyperliquidPanel />}
-                  {tab === "Screener" && <ScreenerPanel />}
                   {tab === "Account" && (clerkAvailable ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
                 </div>
               </div>
