@@ -2686,7 +2686,7 @@ function scoreCommoditySignal(d) {
   if (!dir) return null;
 
   const slPct = (atrPct * 1.5) / 100;
-  const tpPct = (atrPct * 2.5) / 100;
+  const tpPct = (atrPct * 3) / 100; // 2:1 reward:risk
   return {
     dir, type, conf, reason, pos,
     entry: price, chgPct,
@@ -2721,11 +2721,11 @@ function logSignalAlert(entry) {
 }
 
 // Alert quality gate — only A-grade setups reach the feed and notifications:
-// confidence >= 70 (liquidity sweeps and OB/OTE confluence), reward:risk >= 1.5,
+// confidence >= 70 (liquidity sweeps and OB/OTE confluence), reward:risk >= 2:1,
 // and scalps only during London/NY sessions where liquidity supports the move.
 function isHighQualitySignal(source, conf, rr) {
   if ((conf ?? 0) < 70) return false;
-  if (rr != null && parseFloat(rr) < 1.5) return false;
+  if (rr != null && parseFloat(rr) < 2) return false;
   if (source === 'SCALP') {
     const s = fxSessions();
     if (!s.includes('LONDON') && !s.includes('NEW YORK')) return false;
@@ -2759,7 +2759,7 @@ function scoreForexSignal(d) {
   if (!dir) return null;
 
   const slPct = (atrPct * 1.5) / 100;
-  const tpPct = (atrPct * 2.5) / 100;
+  const tpPct = (atrPct * 3) / 100; // 2:1 reward:risk
   return {
     dir, type, conf: Math.round(conf), reason, pos, entry: price, chgPct,
     name: FX_NAMES[d.symbol] || d.symbol,
@@ -2905,6 +2905,14 @@ function ictAnalyze(candles, currentPrice) {
       signal = 'short'; signalType = 'STRUCTURE'; confidence = 60;
       reason = 'LH/LL market structure in premium zone — trend continuation';
       sl = currentPrice + atr * 2; tp = currentPrice - atr * 3;
+    }
+  }
+
+  // Enforce minimum 2:1 reward:risk — extend the target when the raw levels fall short
+  if (signal && sl) {
+    const risk = Math.abs(currentPrice - sl);
+    if (risk > 0 && Math.abs(tp - currentPrice) < risk * 2) {
+      tp = signal === 'long' ? currentPrice + risk * 2 : currentPrice - risk * 2;
     }
   }
 
@@ -3367,6 +3375,11 @@ function ictIntradayAnalyze(candles, price, mode) {
     const minTarget = price * (isScalp ? 0.0018 : 0.0030);
     if (Math.abs(price - sl) < minRisk)   sl = dir === 'long' ? price - minRisk   : price + minRisk;
     if (Math.abs(tp - price) < minTarget) tp = dir === 'long' ? price + minTarget : price - minTarget;
+    // Enforce minimum 2:1 reward:risk
+    const riskDist = Math.abs(price - sl);
+    if (riskDist > 0 && Math.abs(tp - price) < riskDist * 2) {
+      tp = dir === 'long' ? price + riskDist * 2 : price - riskDist * 2;
+    }
     const risk = Math.abs(price - sl);
     sig = {
       dir, setup, conf, reason, entry: price, sl, tp,
@@ -3723,7 +3736,7 @@ function ScalpPanel({ onChart }) {
       )}
 
       <div style={{ fontSize: 9, color: '#374151', textAlign: 'center', paddingTop: 4 }}>
-        ICT intraday — stops beyond the OB/FVG, targets at opposite liquidity · Longs only in discount, shorts only in premium · Educational use only
+        ICT intraday — stops beyond the OB/FVG, targets at opposite liquidity · Min 2:1 reward:risk · Longs only in discount, shorts only in premium · Educational use only
       </div>
     </div>
   );
