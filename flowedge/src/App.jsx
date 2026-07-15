@@ -4867,15 +4867,20 @@ export default function App() {
     const scan = () => {
       ICT_PAIRS.forEach(async p => {
         try {
-          const [r5, r15] = await Promise.all([
+          const [r5, r15, r1d] = await Promise.all([
             fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=5m&range=1d`),
             fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=15m&range=5d`),
+            fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=1d&range=90d`),
           ]);
-          const [d5, d15] = await Promise.all([r5.json(), r15.json()]);
-          const c5 = d5.candles || [], c15 = d15.candles || [];
+          const [d5, d15, d1d] = await Promise.all([r5.json(), r15.json(), r1d.json()]);
+          const c5 = d5.candles || [], c15 = d15.candles || [], c1d = d1d.candles || [];
           const price = d5.meta?.regularMarketPrice || c5[c5.length - 1]?.close || c15[c15.length - 1]?.close;
           if (!price) return;
-          [['SCALP', ictIntradayAnalyze(c5, price, 'scalp')?.sig], ['INTRADAY', ictIntradayAnalyze(c15, price, 'intra')?.sig]].forEach(([mode, sig]) => {
+          // Daily ICT buy/sell entries alert here too, not only while the ICT tab is open
+          const dailyPrice = d1d.meta?.regularMarketPrice || c1d[c1d.length - 1]?.close;
+          const an = dailyPrice ? ictAnalyze(c1d, dailyPrice) : null;
+          const ictSig = an?.signal ? { dir: an.signal, setup: an.signalType.replace('_', ' '), conf: an.confidence, reason: an.reason, entry: an.entry, rr: an.rr } : null;
+          [['SCALP', ictIntradayAnalyze(c5, price, 'scalp')?.sig], ['INTRADAY', ictIntradayAnalyze(c15, price, 'intra')?.sig], ['ICT', ictSig]].forEach(([mode, sig]) => {
             const refKey = `${p.symbol}|${mode}`;
             const key = sig ? `${sig.dir}|${sig.setup}` : null;
             const prev = scalpWatchRef.current[refKey];
