@@ -813,6 +813,11 @@ function AlertsPanel({ stocks }) {
                     <span style={{ fontWeight: 800, fontSize: 11, color: '#f9fafb' }}>{s.name}</span>
                     <span style={{ fontSize: 8, fontWeight: 800, color: dc }}>{s.dir === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
                     <span style={{ fontSize: 8, color: '#6b7280', fontWeight: 700 }}>{s.type}</span>
+                    {s.outcome && (() => {
+                      const oc = s.outcome === 'WIN' ? '#10b981' : s.outcome === 'LOSS' ? '#ef4444' : '#6b7280';
+                      const rTxt = s.rMult != null ? ` ${s.rMult > 0 ? '+' : ''}${s.rMult}R` : '';
+                      return <span style={{ fontSize: 8, fontWeight: 900, color: oc, background: `${oc}18`, padding: '1px 5px', borderRadius: 3 }}>{s.outcome === 'WIN' ? '✓' : s.outcome === 'LOSS' ? '✗' : '–'} {s.outcome}{rTxt}</span>;
+                    })()}
                   </div>
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                     {s.price != null && <span style={{ fontSize: 9, fontFamily: 'monospace', color: '#9ca3af' }}>{fmtP(s.price)}</span>}
@@ -2715,7 +2720,7 @@ function logSignalAlert(entry) {
     );
     if (dup) return false;
     log.unshift({ ...entry, id: Date.now() + Math.random(), time: Date.now() });
-    localStorage.setItem('fe_signal_alerts', JSON.stringify(log.slice(0, 50)));
+    localStorage.setItem('fe_signal_alerts', JSON.stringify(log.slice(0, 200)));
     return true;
   } catch { return false; }
 }
@@ -2765,6 +2770,53 @@ function ictHtfBias(a) {
 // closed back out strongly (long wick, close near the far edge of its range)
 // before treating an OB/FVG tap as a valid entry, instead of firing the instant
 // price is merely inside the zone.
+// Points of Interest — unmitigated OB/FVG zones away from current price, in the
+// direction of the prevailing bias. Each is a ready-made limit-entry plan:
+// entry at the zone edge, stop beyond the zone, target at opposite liquidity,
+// minimum 2:1. Returns the best two (OTE-confluent first, then nearest).
+function ictComputePOIs({ candles, obs, fvgs, bsl, ssl, atr, hi, lo, price, wantLong, wantShort }) {
+  const tol = atr * 0.25;
+  const unmit = (z, d) => {
+    for (let i = (z.idx ?? 0) + 1; i < candles.length; i++) {
+      if (d === 'long' ? candles[i].close < z.bottom : candles[i].close > z.top) return false;
+    }
+    return true;
+  };
+  const pois = [];
+  const add = (z, kind, d) => {
+    const entry = d === 'long' ? z.top : z.bottom;
+    let sl = d === 'long' ? z.bottom - atr * 0.3 : z.top + atr * 0.3;
+    // Thin zones produce pip-thin stops — floor the risk at half an ATR and at
+    // 0.12% of price (same floor as live signals, so spread can't eat the stop)
+    const minRisk = Math.max(atr * 0.5, price * 0.0012);
+    if (Math.abs(entry - sl) < minRisk) sl = d === 'long' ? entry - minRisk : entry + minRisk;
+    const risk = Math.abs(entry - sl);
+    if (!(risk > 0)) return;
+    const target = d === 'long'
+      ? bsl.filter(lv => lv > entry + atr).sort((a, b) => a - b)[0]
+      : ssl.filter(lv => lv < entry - atr).sort((a, b) => b - a)[0];
+    let tp = target ?? (d === 'long' ? entry + atr * 2 : entry - atr * 2);
+    if (Math.abs(tp - entry) < risk * 2) tp = d === 'long' ? entry + risk * 2 : entry - risk * 2;
+    const retr = hi > lo ? (d === 'long' ? (hi - entry) / (hi - lo) : (entry - lo) / (hi - lo)) : 0;
+    pois.push({
+      dir: d, kind, top: z.top, bottom: z.bottom, idx: z.idx,
+      entry, sl, tp, rr: +(Math.abs(tp - entry) / risk).toFixed(1),
+      distPct: +(Math.abs(price - entry) / price * 100).toFixed(2),
+      inOTE: retr >= 0.62 && retr <= 0.79,
+    });
+  };
+  if (wantLong) {
+    obs.filter(o => o.type === 'bullish' && o.top < price - tol && unmit(o, 'long')).forEach(o => add(o, 'OB', 'long'));
+    fvgs.filter(f => f.type === 'bullish' && f.top < price - tol && unmit(f, 'long')).forEach(f => add(f, 'FVG', 'long'));
+  }
+  if (wantShort) {
+    obs.filter(o => o.type === 'bearish' && o.bottom > price + tol && unmit(o, 'short')).forEach(o => add(o, 'OB', 'short'));
+    fvgs.filter(f => f.type === 'bearish' && f.bottom > price + tol && unmit(f, 'short')).forEach(f => add(f, 'FVG', 'short'));
+  }
+  pois.sort((a, b) => ((b.inOTE ? 1 : 0) - (a.inOTE ? 1 : 0)) || (a.distPct - b.distPct));
+  return pois.slice(0, 2);
+}
+
 function hasRejectionCandle(candles, zTop, zBottom, dir, lookback = 3) {
   if (!candles?.length) return false;
   for (const c of candles.slice(-lookback)) {
@@ -2994,8 +3046,16 @@ function ictAnalyze(candles, currentPrice) {
     factors,
   };
 
+  // Pending limit-entry plans at unmitigated zones price hasn't reached yet
+  const pois = ictComputePOIs({
+    candles, obs: activeOBs, fvgs: activeFVGs, bsl, ssl, atr,
+    hi: rangeHigh, lo: rangeLow, price: currentPrice,
+    wantLong:  bias.verdict === 'BUY'  || (bias.verdict === 'WAIT' && structure !== 'bearish'),
+    wantShort: bias.verdict === 'SELL' || (bias.verdict === 'WAIT' && structure !== 'bullish'),
+  });
+
   return {
-    structure, priceZone, orderFlow, bsl, ssl, bias,
+    structure, priceZone, orderFlow, bsl, ssl, bias, pois,
     fvgCount: activeFVGs.length, obCount: activeOBs.length,
     sweptBSL, sweptSSL,
     activeFVGs: activeFVGs.slice(-3), activeOBs: activeOBs.slice(-3),
@@ -3038,7 +3098,7 @@ function MetalsTradePlan({ onChart, livePrices }) {
         const s = ictIntradayAnalyze(c5, price, 'scalp', ictHtfBias(i) || dailyHtf);
         if (s?.sig) plan = { action: s.sig.dir === 'long' ? 'BUY' : 'SELL', tf: '5M', conf: s.sig.conf, entry: s.sig.entry, sl: s.sig.sl, tp: s.sig.tp, rr: s.sig.rr, reason: s.sig.reason, setup: s.sig.setup };
       }
-      setPlans(prev => ({ ...prev, [sym]: { name, price, plan, bias: daily?.bias } }));
+      setPlans(prev => ({ ...prev, [sym]: { name, price, plan, bias: daily?.bias, poi: daily?.pois?.[0] || i?.pois?.[0] || null } }));
     } catch {}
     inflight.current[sym] = false;
   }, []);
@@ -3096,11 +3156,18 @@ function MetalsTradePlan({ onChart, livePrices }) {
                 </div>
               </>
             ) : (
-              <div style={{ fontSize: 10, color: '#9ca3af' }}>
-                No trade available right now.{' '}
-                {m.bias && m.bias.verdict !== 'WAIT'
-                  ? `Leaning ${m.bias.verdict === 'BUY' ? 'bullish' : 'bearish'} (${m.bias.factors.join(', ')}) — waiting for an OB/FVG tap or OTE pullback to give a clean entry.`
-                  : 'Confluences are mixed — stand aside until structure, zone, and liquidity agree.'}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <div style={{ fontSize: 10, color: '#9ca3af' }}>
+                  No trade available right now.{' '}
+                  {m.bias && m.bias.verdict !== 'WAIT'
+                    ? `Leaning ${m.bias.verdict === 'BUY' ? 'bullish' : 'bearish'} (${m.bias.factors.join(', ')}) — waiting for an OB/FVG tap or OTE pullback to give a clean entry.`
+                    : 'Confluences are mixed — stand aside until structure, zone, and liquidity agree.'}
+                </div>
+                {m.poi && (
+                  <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color: '#5eead4', background: 'rgba(20,184,166,0.07)', border: '1px solid rgba(20,184,166,0.2)', borderRadius: 5, padding: '5px 8px' }}>
+                    ⌖ POINT OF INTEREST — set a {m.poi.dir === 'long' ? 'BUY' : 'SELL'} LIMIT @ {fp(m.poi.entry)} · SL {fp(m.poi.sl)} · TP {fp(m.poi.tp)} · {m.poi.rr}R · {m.poi.kind}{m.poi.inOTE ? '+OTE' : ''} · {m.poi.distPct}% from price
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -3134,7 +3201,7 @@ function ICTPanel({ onChart, livePrices }) {
           const prev = prevSignalsRef.current[sym];
           if (prev !== key && isHighQualitySignal('ICT', analysis.confidence, analysis.rr)) {
             const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
-            const isNew = logSignalAlert({ source: 'ICT', name, dir: analysis.signal, type: analysis.signalType.replace('_', ' '), conf: analysis.confidence, reason: analysis.reason, price: analysis.entry });
+            const isNew = logSignalAlert({ source: 'ICT', symbol: sym, name, dir: analysis.signal, type: analysis.signalType.replace('_', ' '), conf: analysis.confidence, reason: analysis.reason, price: analysis.entry, sl: analysis.sl, tp: analysis.tp });
             if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
               new Notification(`FlowEdge ICT — ${name}`, {
                 body: `${analysis.signal.toUpperCase()} ${analysis.signalType.replace('_', ' ')} · ${analysis.confidence}%\n${analysis.reason}`,
@@ -3254,8 +3321,14 @@ function ICTPanel({ onChart, livePrices }) {
               zones={[
                 ...(a.activeOBs || []).map(o => ({ ...o, fill: 'rgba(59,130,246,0.13)' })),
                 ...(a.activeFVGs || []).map(f => ({ ...f, fill: 'rgba(139,92,246,0.13)' })),
+                ...(a.pois || []).map(p => ({ top: p.top, bottom: p.bottom, idx: p.idx, fill: 'rgba(20,184,166,0.13)' })),
               ]}
               eq={a.rangeMid} bsl={a.bsl || []} ssl={a.ssl || []} sig={chartSig} />
+            {!a.signal && (a.pois || []).map((p, i) => (
+              <div key={i} style={{ fontSize: 8.5, fontFamily: 'monospace', fontWeight: 700, color: '#5eead4', background: 'rgba(20,184,166,0.07)', border: '1px solid rgba(20,184,166,0.18)', borderRadius: 4, padding: '3px 7px' }}>
+                ⌖ POI {p.dir === 'long' ? 'BUY LIMIT' : 'SELL LIMIT'} @ {fp(p.entry)} · SL {fp(p.sl)} · TP {fp(p.tp)} · {p.rr}R · {p.kind}{p.inOTE ? '+OTE' : ''} · {p.distPct}% away
+              </div>
+            ))}
 
             {/* Stats row */}
             <div style={{ padding: '10px 12px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -3388,12 +3461,18 @@ function ICTPanel({ onChart, livePrices }) {
               zones={[
                 ...(a.activeOBs || []).map(o => ({ ...o, fill: 'rgba(59,130,246,0.13)' })),
                 ...(a.activeFVGs || []).map(f => ({ ...f, fill: 'rgba(139,92,246,0.13)' })),
+                ...(a.pois || []).map(p => ({ top: p.top, bottom: p.bottom, idx: p.idx, fill: 'rgba(20,184,166,0.13)' })),
               ]}
               eq={a.rangeMid} bsl={a.bsl || []} ssl={a.ssl || []}
               sig={a.signal ? { dir: a.signal, entry: a.entry, sl: a.sl, tp: a.tp, setup: a.signalType.replace('_', ' ') } : null} />
             <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>
               {a.signal ? a.reason : `${bias.verdict === 'WAIT' ? 'No edge yet' : `Bias ${bias.verdict.toLowerCase()}`} — ${bias.factors.join(' · ') || 'no confluences'}`}
             </div>
+            {!a.signal && (a.pois || []).map((p, i) => (
+              <div key={i} style={{ fontSize: 8.5, fontFamily: 'monospace', fontWeight: 700, color: '#5eead4', background: 'rgba(20,184,166,0.07)', border: '1px solid rgba(20,184,166,0.18)', borderRadius: 4, padding: '3px 7px' }}>
+                ⌖ POI {p.dir === 'long' ? 'BUY LIMIT' : 'SELL LIMIT'} @ {fp(p.entry)} · SL {fp(p.sl)} · TP {fp(p.tp)} · {p.rr}R · {p.kind}{p.inOTE ? '+OTE' : ''} · {p.distPct}% away
+              </div>
+            ))}
             {a.signal && (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
                 {[['Entry', fp(a.entry), '#e5e7eb'], ['TP', fp(a.tp), '#10b981'], ['SL', fp(a.sl), '#ef4444'], ['RR', a.rr ? `${a.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
@@ -3575,8 +3654,16 @@ function ictIntradayAnalyze(candles, price, mode, htfBias = null) {
     };
   }
 
+  // Pending limit-entry plans at unmitigated zones price hasn't reached yet,
+  // in the direction the higher timeframe allows
+  const pois = ictComputePOIs({
+    candles, obs, fvgs, bsl, ssl, atr, hi, lo, price,
+    wantLong:  htfBias && htfBias.verdict !== 'WAIT' ? htfBias.verdict === 'BUY'  : structure !== 'bearish',
+    wantShort: htfBias && htfBias.verdict !== 'WAIT' ? htfBias.verdict === 'SELL' : structure !== 'bullish',
+  });
+
   return {
-    structure, zone, eq, hi, lo, bsl, ssl,
+    structure, zone, eq, hi, lo, bsl, ssl, pois,
     retr: structure === 'bearish' ? retrShort : retrLong,
     inOTE: structure === 'bearish' ? inOTEShort : inOTELong,
     fvgCount: fvgs.length, obCount: obs.length, sweptBSL, sweptSSL, sig,
@@ -3740,7 +3827,7 @@ function ScalpPanel({ onChart, livePrices }) {
           const prev = prevAlertRef.current[refKey];
           if (key && prev !== key && isHighQualitySignal(mode, sig.conf, sig.rr)) {
             const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
-            const isNew = logSignalAlert({ source: mode, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry });
+            const isNew = logSignalAlert({ source: mode, symbol: sym, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp });
             if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
               new Notification(`FlowEdge ${mode} — ${name}`, {
                 body: `${sig.dir.toUpperCase()} ${sig.setup} · ${sig.conf}%\n${sig.reason}`,
@@ -3827,6 +3914,11 @@ function ScalpPanel({ onChart, livePrices }) {
             </span>
             {a.mtfVetoed && <span style={{ fontSize: 7, fontWeight: 800, color: '#ef4444', background: 'rgba(239,68,68,0.14)', padding: '1px 5px', borderRadius: 3 }}>MTF VETO</span>}
           </div>
+          {(a.pois || []).map((p, i) => (
+            <div key={i} style={{ fontSize: 8.5, fontFamily: 'monospace', fontWeight: 700, color: '#5eead4', background: 'rgba(20,184,166,0.07)', border: '1px solid rgba(20,184,166,0.18)', borderRadius: 4, padding: '3px 7px' }}>
+              ⌖ POI {p.dir === 'long' ? 'BUY LIMIT' : 'SELL LIMIT'} @ {fp(p.entry)} · SL {fp(p.sl)} · TP {fp(p.tp)} · {p.rr}R · {p.kind}{p.inOTE ? '+OTE' : ''} · {p.distPct}% away
+            </div>
+          ))}
           <CtxTags a={a} />
         </div>
       );
@@ -3927,7 +4019,11 @@ function ScalpPanel({ onChart, livePrices }) {
                   : { candles: d.c15, a: d.intra, tf: '15M · INTRADAY' };
                 const a = use.a;
                 return <ICTCandleChart candles={use.candles} sym={pair.symbol} tfLabel={use.tf}
-                  zones={[a?.sig?.ob && { ...a.sig.ob, fill: 'rgba(59,130,246,0.15)' }, a?.sig?.fvg && { ...a.sig.fvg, fill: 'rgba(139,92,246,0.15)' }].filter(Boolean)}
+                  zones={[
+                    a?.sig?.ob && { ...a.sig.ob, fill: 'rgba(59,130,246,0.15)' },
+                    a?.sig?.fvg && { ...a.sig.fvg, fill: 'rgba(139,92,246,0.15)' },
+                    ...(a?.pois || []).map(p => ({ top: p.top, bottom: p.bottom, idx: p.idx, fill: 'rgba(20,184,166,0.13)' })),
+                  ].filter(Boolean)}
                   eq={a?.eq} bsl={a?.bsl || []} ssl={a?.ssl || []} sig={a?.sig || null} />;
               })()}
               <StrategyRow mode="SCALP" a={d.scalp} sym={pair.symbol} />
@@ -4820,7 +4916,276 @@ function NewsPanel({ watchlist }) {
   );
 }
 
-const TABS = ["Signals", "ICT", "Scalp", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
+// ─── Backtest & live performance ────────────────────────────────────────────
+
+function summarizeTrades(trades) {
+  const wins    = trades.filter(t => t.result === 'win').length;
+  const losses  = trades.filter(t => t.result === 'loss').length;
+  const totalR  = +trades.reduce((s, t) => s + t.r, 0).toFixed(1);
+  const grossW  = trades.filter(t => t.r > 0).reduce((s, t) => s + t.r, 0);
+  const grossL  = Math.abs(trades.filter(t => t.r < 0).reduce((s, t) => s + t.r, 0));
+  return {
+    n: trades.length, wins, losses, timeouts: trades.length - wins - losses,
+    wr: wins + losses ? +((wins / (wins + losses)) * 100).toFixed(0) : null,
+    totalR,
+    expectancy: trades.length ? +(totalR / trades.length).toFixed(2) : null,
+    pf: grossL > 0 ? +(grossW / grossL).toFixed(2) : null,
+  };
+}
+
+// Walk-forward backtest: at each bar, run the intraday engine on exactly the
+// window it sees live, enter at the close when a signal fires, exit on SL/TP
+// touch (SL checked first — conservative on both-touched bars), or mark to
+// market after the max holding window. One position at a time per series.
+function backtestSeries(candles, mode, htfAt) {
+  const isScalp = mode === 'scalp';
+  const warm = isScalp ? 60 : 80;
+  const win  = isScalp ? 288 : 480;
+  const maxHold = isScalp ? 48 : 96;
+  const trades = [];
+  let open = null;
+  for (let i = warm; i < candles.length; i++) {
+    const c = candles[i];
+    if (open) {
+      const hitSL = open.dir === 'long' ? c.low <= open.sl : c.high >= open.sl;
+      const hitTP = open.dir === 'long' ? c.high >= open.tp : c.low <= open.tp;
+      if (hitSL)      { trades.push({ ...open, result: 'loss', r: -1 }); open = null; }
+      else if (hitTP) { trades.push({ ...open, result: 'win', r: open.rr }); open = null; }
+      else if (i - open.i >= maxHold) {
+        const r = (open.dir === 'long' ? c.close - open.entry : open.entry - c.close) / open.risk;
+        trades.push({ ...open, result: 'timeout', r: +r.toFixed(2) }); open = null;
+      }
+      continue;
+    }
+    const a = ictIntradayAnalyze(candles.slice(Math.max(0, i - win), i + 1), c.close, mode, htfAt ? htfAt(c.time) : null);
+    const sig = a?.sig;
+    if (sig && sig.rr) {
+      const risk = Math.abs(sig.entry - sig.sl);
+      if (risk > 0) open = { i, time: c.time, dir: sig.dir, setup: sig.setup, conf: sig.conf, entry: sig.entry, sl: sig.sl, tp: sig.tp, rr: +sig.rr, risk };
+    }
+  }
+  return trades;
+}
+
+// Daily bias per point in time, computed walk-forward (no lookahead): the bias
+// applied to an intraday bar only uses daily candles that had already closed.
+function buildDailyBiasAt(daily) {
+  const timeline = [];
+  for (let j = 25; j < daily.length; j++) {
+    const slice = daily.slice(0, j + 1);
+    const a = ictAnalyze(slice, slice[slice.length - 1].close);
+    if (a) timeline.push({ time: daily[j].time, htf: ictHtfBias(a) });
+  }
+  return t => {
+    let h = null;
+    for (const e of timeline) { if (e.time < t) h = e.htf; else break; }
+    return h;
+  };
+}
+
+function StatsPanel() {
+  const [running, setRunning] = useState(false);
+  const [prog, setProg] = useState('');
+  const [bt, setBt] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('fe_backtest') || 'null'); } catch { return null; }
+  });
+  const [feed, setFeed] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('fe_signal_alerts') || '[]'); } catch { return []; }
+  });
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      try { setFeed(JSON.parse(localStorage.getItem('fe_signal_alerts') || '[]')); } catch {}
+    }, 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  const run = async () => {
+    if (running) return;
+    setRunning(true);
+    const rows = [], allTrades = [];
+    try {
+      for (const p of ICT_PAIRS) {
+        setProg(`${p.name} — fetching candles…`);
+        await new Promise(r => setTimeout(r, 20));
+        const [d1, d15, d5] = await Promise.all([
+          fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=1d&range=1y`).then(r => r.json()),
+          fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=15m&range=1mo`).then(r => r.json()),
+          fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=5m&range=1mo`).then(r => r.json()),
+        ]);
+        const daily = d1.candles || [], c15 = d15.candles || [], c5 = d5.candles || [];
+        const htfAt = daily.length > 30 ? buildDailyBiasAt(daily) : null;
+        setProg(`${p.name} — simulating 15m…`);
+        await new Promise(r => setTimeout(r, 20));
+        const t15 = c15.length > 120 ? backtestSeries(c15, 'intra', htfAt) : [];
+        setProg(`${p.name} — simulating 5m…`);
+        await new Promise(r => setTimeout(r, 20));
+        const t5 = c5.length > 120 ? backtestSeries(c5, 'scalp', htfAt) : [];
+        t15.forEach(t => allTrades.push({ ...t, pair: p.name, mode: 'INTRADAY' }));
+        t5.forEach(t => allTrades.push({ ...t, pair: p.name, mode: 'SCALP' }));
+        rows.push({ pair: p.name, intra: summarizeTrades(t15), scalp: summarizeTrades(t5) });
+      }
+      const bySetup = {};
+      allTrades.forEach(t => { (bySetup[t.setup] = bySetup[t.setup] || []).push(t); });
+      const result = {
+        generatedAt: Date.now(),
+        window: '~30 days of 5m + 15m, daily bias walk-forward from 1y',
+        rows,
+        total: summarizeTrades(allTrades),
+        scalpTotal: summarizeTrades(allTrades.filter(t => t.mode === 'SCALP')),
+        intraTotal: summarizeTrades(allTrades.filter(t => t.mode === 'INTRADAY')),
+        aplus: summarizeTrades(allTrades.filter(t => t.conf >= 70 && t.rr >= 2)),
+        setups: Object.entries(bySetup).map(([k, v]) => ({ setup: k, ...summarizeTrades(v) })).sort((a, b) => b.n - a.n),
+      };
+      localStorage.setItem('fe_backtest', JSON.stringify(result));
+      setBt(result);
+      setProg('');
+    } catch (e) { setProg(`Error: ${e.message}`); }
+    setRunning(false);
+  };
+
+  // Live record from tracked signal outcomes
+  const closed  = feed.filter(f => f.outcome === 'WIN' || f.outcome === 'LOSS');
+  const expired = feed.filter(f => f.outcome === 'EXPIRED');
+  const openSig = feed.filter(f => !f.outcome && f.sl != null && f.tp != null);
+  const liveWins = closed.filter(f => f.outcome === 'WIN').length;
+  const liveWr = closed.length ? Math.round(liveWins / closed.length * 100) : null;
+  const liveR  = +[...closed, ...expired].reduce((s, f) => s + (f.rMult ?? 0), 0).toFixed(1);
+
+  const StatCell = ({ s }) => s?.n ? (
+    <span style={{ fontFamily: 'monospace', fontSize: 10 }}>
+      <span style={{ color: '#e5e7eb' }}>{s.n}t</span>{' '}
+      <span style={{ color: (s.wr ?? 0) >= 50 ? '#10b981' : '#f59e0b' }}>{s.wr != null ? `${s.wr}%` : '—'}</span>{' '}
+      <span style={{ color: s.totalR >= 0 ? '#10b981' : '#ef4444' }}>{s.totalR >= 0 ? '+' : ''}{s.totalR}R</span>
+    </span>
+  ) : <span style={{ fontSize: 10, color: '#374151' }}>—</span>;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Performance & Backtest</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>Historical simulation of the ICT engines + live signal track record</div>
+        </div>
+        <button onClick={run} disabled={running} style={{
+          background: running ? 'rgba(255,255,255,0.04)' : 'rgba(99,102,241,0.15)',
+          border: '1px solid rgba(99,102,241,0.3)', borderRadius: 6, padding: '6px 12px',
+          color: running ? '#4b5563' : '#a5b4fc', fontSize: 10, fontWeight: 700, cursor: running ? 'default' : 'pointer',
+        }}>{running ? 'Running…' : bt ? '↻ Re-run backtest' : '▶ Run backtest'}</button>
+      </div>
+
+      {running && (
+        <div style={{ padding: '10px 12px', borderRadius: 8, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.2)', fontSize: 11, color: '#a5b4fc', fontFamily: 'monospace' }}>
+          {prog || 'Starting…'} <span style={{ color: '#4b5563' }}>— simulating ~1 month of 5m/15m bars across 10 pairs</span>
+        </div>
+      )}
+      {!running && prog && <div style={{ fontSize: 10, color: '#ef4444' }}>{prog}</div>}
+
+      {/* Live track record */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>LIVE TRACK RECORD — ALERTED SIGNALS, SCORED AGAINST REAL PRICES</div>
+        <div style={{ padding: '10px 12px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+          {[
+            ['CLOSED', String(closed.length), '#e5e7eb'],
+            ['WIN RATE', liveWr != null ? `${liveWr}%` : '—', liveWr != null ? (liveWr >= 50 ? '#10b981' : '#f59e0b') : '#374151'],
+            ['NET R', `${liveR >= 0 ? '+' : ''}${liveR}R`, liveR >= 0 ? '#10b981' : '#ef4444'],
+            ['OPEN', String(openSig.length), '#a5b4fc'],
+            ['EXPIRED', String(expired.length), '#6b7280'],
+          ].map(([l, v, c]) => (
+            <div key={l}>
+              <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>{l}</div>
+              <div style={{ fontSize: 16, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: c }}>{v}</div>
+            </div>
+          ))}
+        </div>
+        {closed.length === 0 && (
+          <div style={{ fontSize: 10, color: '#4b5563' }}>
+            No closed signals yet — outcomes are recorded automatically as alerted trades hit their TP or SL. Keep the app open and the record builds itself.
+          </div>
+        )}
+        {openSig.slice(0, 6).map(f => (
+          <div key={f.id} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 10, fontFamily: 'monospace', padding: '5px 10px', borderRadius: 6, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <span style={{ color: '#a5b4fc', fontWeight: 800, fontSize: 8 }}>{f.source}</span>
+            <span style={{ color: '#f9fafb', fontWeight: 800 }}>{f.name}</span>
+            <span style={{ color: f.dir === 'long' ? '#10b981' : '#ef4444', fontWeight: 700 }}>{f.dir === 'long' ? '▲' : '▼'} {f.type}</span>
+            <span style={{ color: '#6b7280' }}>entry {f.price?.toFixed(f.price >= 100 ? 2 : 4)} · SL {f.sl?.toFixed(f.sl >= 100 ? 2 : 4)} · TP {f.tp?.toFixed(f.tp >= 100 ? 2 : 4)}</span>
+            <span style={{ marginLeft: 'auto', color: '#4b5563' }}>OPEN</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Backtest results */}
+      {bt && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>
+            BACKTEST — {bt.window} · ran {new Date(bt.generatedAt).toLocaleString()}
+          </div>
+          <div style={{ padding: '10px 12px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+            {[
+              ['TRADES', String(bt.total.n), '#e5e7eb'],
+              ['WIN RATE', bt.total.wr != null ? `${bt.total.wr}%` : '—', (bt.total.wr ?? 0) >= 50 ? '#10b981' : '#f59e0b'],
+              ['NET R', `${bt.total.totalR >= 0 ? '+' : ''}${bt.total.totalR}R`, bt.total.totalR >= 0 ? '#10b981' : '#ef4444'],
+              ['EXPECTANCY', bt.total.expectancy != null ? `${bt.total.expectancy}R/trade` : '—', (bt.total.expectancy ?? 0) >= 0 ? '#10b981' : '#ef4444'],
+              ['PROFIT FACTOR', bt.total.pf != null ? String(bt.total.pf) : '—', (bt.total.pf ?? 0) >= 1 ? '#10b981' : '#ef4444'],
+            ].map(([l, v, c]) => (
+              <div key={l}>
+                <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>{l}</div>
+                <div style={{ fontSize: 16, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: c }}>{v}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
+            {[['SCALP (5m)', bt.scalpTotal], ['INTRADAY (15m)', bt.intraTotal], ['A+ ONLY (alert-grade)', bt.aplus]].map(([l, s]) => (
+              <div key={l} style={{ padding: '8px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 3 }}>{l}</div>
+                <StatCell s={s} />
+                <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>{s.n ? `PF ${s.pf ?? '—'} · ${s.expectancy ?? '—'}R/trade` : 'no trades'}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Per-setup */}
+          <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>BY SETUP</div>
+            {bt.setups.map(s => (
+              <div key={s.setup} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, fontFamily: 'monospace', padding: '2px 0' }}>
+                <span style={{ color: '#9ca3af', fontWeight: 700 }}>{s.setup}</span>
+                <StatCell s={s} />
+              </div>
+            ))}
+          </div>
+
+          {/* Per-pair */}
+          <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 4 }}>
+              <span>PAIR</span><span>SCALP</span><span>INTRADAY</span>
+            </div>
+            {bt.rows.map(r => (
+              <div key={r.pair} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', padding: '2px 0', alignItems: 'center' }}>
+                <span style={{ fontSize: 10, fontWeight: 800, color: '#e5e7eb' }}>{r.pair}</span>
+                <StatCell s={r.scalp} />
+                <StatCell s={r.intra} />
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 9, color: '#374151' }}>
+            Method: walk-forward (no lookahead), entries at bar close, SL checked before TP on bars touching both (conservative), timeouts marked to market. Excludes spread/slippage — treat results as an upper bound. Past performance does not guarantee future results.
+          </div>
+        </div>
+      )}
+
+      {!bt && !running && (
+        <div style={{ padding: 20, textAlign: 'center', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>No backtest yet</div>
+          <div style={{ fontSize: 10, color: '#374151' }}>Run the simulation to see win rate, expectancy, and profit factor per pair, per timeframe, and per setup</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const TABS = ["Signals", "ICT", "Scalp", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -5063,6 +5428,38 @@ export default function App() {
     });
     return map;
   }, [forexData]);
+  const livePricesRef = useRef({});
+  useEffect(() => { livePricesRef.current = livePrices; }, [livePrices]);
+
+  // Signal outcome tracker — every alerted signal is scored against live prices:
+  // WIN when TP is reached, LOSS when SL is hit, EXPIRED (marked-to-market in R)
+  // past its holding window. This builds the verifiable live track record.
+  useEffect(() => {
+    const MAX_AGE = { SCALP: 12 * 3600e3, INTRADAY: 48 * 3600e3, ICT: 14 * 86400e3, FOREX: 14 * 86400e3 };
+    const t = setInterval(() => {
+      try {
+        const log = JSON.parse(localStorage.getItem('fe_signal_alerts') || '[]');
+        let changed = false;
+        log.forEach(e => {
+          if (e.outcome || e.sl == null || e.tp == null || e.price == null) return;
+          const px = livePricesRef.current[e.symbol];
+          if (px == null) return;
+          const long = e.dir === 'long';
+          const risk = Math.abs(e.price - e.sl);
+          if (!(risk > 0)) return;
+          if (long ? px <= e.sl : px >= e.sl) {
+            e.outcome = 'LOSS'; e.rMult = -1; e.closedAt = Date.now(); changed = true;
+          } else if (long ? px >= e.tp : px <= e.tp) {
+            e.outcome = 'WIN'; e.rMult = +(Math.abs(e.tp - e.price) / risk).toFixed(1); e.closedAt = Date.now(); changed = true;
+          } else if (Date.now() - e.time > (MAX_AGE[e.source] || 48 * 3600e3)) {
+            e.outcome = 'EXPIRED'; e.rMult = +(((long ? px - e.price : e.price - px)) / risk).toFixed(1); e.closedAt = Date.now(); changed = true;
+          }
+        });
+        if (changed) localStorage.setItem('fe_signal_alerts', JSON.stringify(log));
+      } catch {}
+    }, 5000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => { fetchMarketContext(); }, [fetchMarketContext]);
   useEffect(() => {
@@ -5082,7 +5479,8 @@ export default function App() {
       if (prev === key) return;
       fxAlertRef.current[d.symbol] = key;
       if (!isHighQualitySignal('FOREX', sig.conf, sig.rr)) return;
-      const isNew = logSignalAlert({ source: 'FOREX', name: sig.name, dir: sig.dir, type: sig.type, conf: sig.conf, reason: sig.reason, price: sig.entry });
+      const trackSym = d.symbol === 'GC=F' ? 'XAUUSD' : d.symbol === 'SI=F' ? 'XAGUSD' : d.symbol;
+      const isNew = logSignalAlert({ source: 'FOREX', symbol: trackSym, name: sig.name, dir: sig.dir, type: sig.type, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp });
       // Skip the browser popup on first observation (page load) — only notify on changes
       if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
         new Notification(`FlowEdge Forex — ${sig.name}`, {
@@ -5113,7 +5511,7 @@ export default function App() {
           // Daily ICT buy/sell entries alert here too, not only while the ICT tab is open
           const dailyPrice = d1d.meta?.regularMarketPrice || c1d[c1d.length - 1]?.close;
           const an = dailyPrice ? ictAnalyze(c1d, dailyPrice) : null;
-          const ictSig = an?.signal ? { dir: an.signal, setup: an.signalType.replace('_', ' '), conf: an.confidence, reason: an.reason, entry: an.entry, rr: an.rr } : null;
+          const ictSig = an?.signal ? { dir: an.signal, setup: an.signalType.replace('_', ' '), conf: an.confidence, reason: an.reason, entry: an.entry, rr: an.rr, sl: an.sl, tp: an.tp } : null;
           // Higher timeframe sets direction: daily → 15m, then 15m → 5m
           const dailyHtf = ictHtfBias(an);
           const intra = ictIntradayAnalyze(c15, price, 'intra', dailyHtf);
@@ -5123,7 +5521,7 @@ export default function App() {
             const key = sig ? `${sig.dir}|${sig.setup}` : null;
             const prev = scalpWatchRef.current[refKey];
             if (key && prev !== key && isHighQualitySignal(mode, sig.conf, sig.rr)) {
-              const isNew = logSignalAlert({ source: mode, name: p.name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry });
+              const isNew = logSignalAlert({ source: mode, symbol: p.symbol, name: p.name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp });
               if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
                 new Notification(`FlowEdge ${mode} — ${p.name}`, {
                   body: `${sig.dir.toUpperCase()} ${sig.setup} · ${sig.conf}%\n${sig.reason}`,
@@ -5336,6 +5734,7 @@ export default function App() {
                 {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                {tab === "Stats" && <StatsPanel />}
                 {tab === "News" && <NewsPanel watchlist={watchlist} />}
                 {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
@@ -5448,6 +5847,7 @@ export default function App() {
                   {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                   {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                  {tab === "Stats" && <StatsPanel />}
                   {tab === "News" && <NewsPanel watchlist={watchlist} />}
                   {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
