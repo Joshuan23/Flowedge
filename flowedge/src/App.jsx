@@ -2720,17 +2720,66 @@ function logSignalAlert(entry) {
   } catch { return false; }
 }
 
+// ICT killzones — the narrow, highest-probability windows (New York time) where
+// institutional order flow concentrates. Tighter than a broad "session is open"
+// check. DST-safe via Intl (no manual UTC offset math).
+function ictKillzones() {
+  const parts  = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' }).formatToParts(new Date());
+  const etHour = parseInt(parts.find(p => p.type === 'hour')?.value ?? '0', 10);
+  const zones = [];
+  if (etHour >= 2  && etHour < 5)  zones.push('LONDON OPEN');
+  if (etHour >= 7  && etHour < 10) zones.push('NY OPEN');
+  if (etHour >= 10 && etHour < 12) zones.push('LONDON CLOSE');
+  if (etHour >= 20)                zones.push('ASIAN');
+  return zones;
+}
+
 // Alert quality gate — only A-grade setups reach the feed and notifications:
 // confidence >= 70 (liquidity sweeps and OB/OTE confluence), reward:risk >= 2:1,
-// and scalps only during London/NY sessions where liquidity supports the move.
+// scalps only inside an active ICT killzone (tighter than a broad session check),
+// and intraday only during the broader London/NY sessions.
 function isHighQualitySignal(source, conf, rr) {
   if ((conf ?? 0) < 70) return false;
   if (rr != null && parseFloat(rr) < 2) return false;
   if (source === 'SCALP') {
+    if (!ictKillzones().length) return false;
+  } else if (source === 'INTRADAY') {
     const s = fxSessions();
     if (!s.includes('LONDON') && !s.includes('NEW YORK')) return false;
   }
   return true;
+}
+
+// Derive a directional bias in a uniform shape from either the daily ictAnalyze()
+// result or an ictIntradayAnalyze() result, so a higher timeframe's read can gate
+// a lower timeframe's entry (ICT: never trade against the HTF bias).
+function ictHtfBias(a) {
+  if (!a) return null;
+  if (a.bias) return { verdict: a.bias.verdict, structure: a.structure };
+  const verdict = a.sig ? (a.sig.dir === 'long' ? 'BUY' : 'SELL')
+    : a.structure === 'bullish' ? 'BUY' : a.structure === 'bearish' ? 'SELL' : 'WAIT';
+  return { verdict, structure: a.structure };
+}
+
+// Rejection-candle confirmation — require a candle that wicked into the zone and
+// closed back out strongly (long wick, close near the far edge of its range)
+// before treating an OB/FVG tap as a valid entry, instead of firing the instant
+// price is merely inside the zone.
+function hasRejectionCandle(candles, zTop, zBottom, dir, lookback = 3) {
+  if (!candles?.length) return false;
+  for (const c of candles.slice(-lookback)) {
+    if (c.high < zBottom || c.low > zTop) continue;
+    const body  = Math.abs(c.close - c.open);
+    const range = (c.high - c.low) || 1e-9;
+    if (dir === 'long') {
+      const lowerWick = Math.min(c.open, c.close) - c.low;
+      if (lowerWick >= body * 0.4 && (c.close - c.low) / range >= 0.6) return true;
+    } else {
+      const upperWick = c.high - Math.max(c.open, c.close);
+      if (upperWick >= body * 0.4 && (c.high - c.close) / range >= 0.6) return true;
+    }
+  }
+  return false;
 }
 
 function scoreForexSignal(d) {
@@ -2877,13 +2926,15 @@ function ictAnalyze(candles, currentPrice) {
   } else if (structure === 'bullish' && priceZone === 'discount') {
     const nearOB  = activeOBs.find(o  => o.type  === 'bullish' && Math.abs(currentPrice - o.top)    / currentPrice < 0.005);
     const nearFVG = activeFVGs.find(f => f.type  === 'bullish' && currentPrice >= f.bottom && currentPrice <= f.top);
-    if (nearOB) {
+    const obConfirmed  = nearOB  && hasRejectionCandle(candles, nearOB.top,  nearOB.bottom,  'long');
+    const fvgConfirmed = nearFVG && hasRejectionCandle(candles, nearFVG.top, nearFVG.bottom, 'long');
+    if (obConfirmed) {
       signal = 'long'; signalType = 'ORDER_BLOCK'; confidence = 72;
-      reason = 'Bullish OB in discount zone — institutional demand confluence';
+      reason = 'Confirmed rejection at bullish OB in discount zone — institutional demand confluence';
       sl = nearOB.bottom - atr * 0.5; tp = currentPrice + atr * 3;
-    } else if (nearFVG) {
+    } else if (fvgConfirmed) {
       signal = 'long'; signalType = 'FAIR_VALUE_GAP'; confidence = 68;
-      reason = 'Price inside bullish FVG — imbalance fill with bullish structure';
+      reason = 'Confirmed rejection filling bullish FVG — imbalance fill with bullish structure';
       sl = nearFVG.bottom - atr;    tp = currentPrice + atr * 2;
     } else {
       signal = 'long'; signalType = 'STRUCTURE'; confidence = 60;
@@ -2893,13 +2944,15 @@ function ictAnalyze(candles, currentPrice) {
   } else if (structure === 'bearish' && priceZone === 'premium') {
     const nearOB  = activeOBs.find(o  => o.type  === 'bearish' && Math.abs(currentPrice - o.bottom) / currentPrice < 0.005);
     const nearFVG = activeFVGs.find(f => f.type  === 'bearish' && currentPrice >= f.bottom && currentPrice <= f.top);
-    if (nearOB) {
+    const obConfirmed  = nearOB  && hasRejectionCandle(candles, nearOB.top,  nearOB.bottom,  'short');
+    const fvgConfirmed = nearFVG && hasRejectionCandle(candles, nearFVG.top, nearFVG.bottom, 'short');
+    if (obConfirmed) {
       signal = 'short'; signalType = 'ORDER_BLOCK'; confidence = 72;
-      reason = 'Bearish OB in premium zone — institutional supply confluence';
+      reason = 'Confirmed rejection at bearish OB in premium zone — institutional supply confluence';
       sl = nearOB.top + atr * 0.5; tp = currentPrice - atr * 3;
-    } else if (nearFVG) {
+    } else if (fvgConfirmed) {
       signal = 'short'; signalType = 'FAIR_VALUE_GAP'; confidence = 68;
-      reason = 'Price inside bearish FVG — imbalance fill with bearish structure';
+      reason = 'Confirmed rejection filling bearish FVG — imbalance fill with bearish structure';
       sl = nearFVG.top + atr;      tp = currentPrice - atr * 2;
     } else {
       signal = 'short'; signalType = 'STRUCTURE'; confidence = 60;
@@ -2971,16 +3024,18 @@ function MetalsTradePlan({ onChart, livePrices }) {
       const price = d1.meta?.regularMarketPrice || c1[c1.length - 1]?.close;
       if (!price) return;
       const daily = ictAnalyze(c1, price);
+      const dailyHtf = ictHtfBias(daily);
       let plan = null;
       if (daily?.signal) {
         plan = { action: daily.signal === 'long' ? 'BUY' : 'SELL', tf: 'DAILY', conf: daily.confidence, entry: daily.entry, sl: daily.sl, tp: daily.tp, rr: daily.rr, reason: daily.reason, setup: daily.signalType.replace('_', ' ') };
       }
-      if (!plan) {
-        const i = ictIntradayAnalyze(c15, price, 'intra');
-        if (i?.sig) plan = { action: i.sig.dir === 'long' ? 'BUY' : 'SELL', tf: '15M', conf: i.sig.conf, entry: i.sig.entry, sl: i.sig.sl, tp: i.sig.tp, rr: i.sig.rr, reason: i.sig.reason, setup: i.sig.setup };
+      // Higher timeframe sets direction: daily → 15m, then 15m → 5m
+      const i = ictIntradayAnalyze(c15, price, 'intra', dailyHtf);
+      if (!plan && i?.sig) {
+        plan = { action: i.sig.dir === 'long' ? 'BUY' : 'SELL', tf: '15M', conf: i.sig.conf, entry: i.sig.entry, sl: i.sig.sl, tp: i.sig.tp, rr: i.sig.rr, reason: i.sig.reason, setup: i.sig.setup };
       }
       if (!plan) {
-        const s = ictIntradayAnalyze(c5, price, 'scalp');
+        const s = ictIntradayAnalyze(c5, price, 'scalp', ictHtfBias(i) || dailyHtf);
         if (s?.sig) plan = { action: s.sig.dir === 'long' ? 'BUY' : 'SELL', tf: '5M', conf: s.sig.conf, entry: s.sig.entry, sl: s.sig.sl, tp: s.sig.tp, rr: s.sig.rr, reason: s.sig.reason, setup: s.sig.setup };
       }
       setPlans(prev => ({ ...prev, [sym]: { name, price, plan, bias: daily?.bias } }));
@@ -3399,8 +3454,10 @@ function fxSessions() {
 }
 
 // ICT intraday engine — order blocks, FVGs, OTE fib (62–79%), premium/discount,
-// liquidity sweeps. mode 'scalp' runs on 5m candles, 'intra' on 15m.
-function ictIntradayAnalyze(candles, price, mode) {
+// liquidity sweeps, rejection-candle confirmation. mode 'scalp' runs on 5m
+// candles, 'intra' on 15m. htfBias (from ictHtfBias) vetoes counter-trend
+// entries and boosts confidence when the higher timeframe agrees.
+function ictIntradayAnalyze(candles, price, mode, htfBias = null) {
   const isScalp = mode === 'scalp';
   if (!candles || candles.length < (isScalp ? 40 : 60) || !price) return null;
   const atr = atrLast(candles);
@@ -3439,6 +3496,13 @@ function ictIntradayAnalyze(candles, price, mode) {
   const fvgLong  = fvgs.filter(f => f.type === 'bullish').find(f => price >= f.bottom && price <= f.top);
   const fvgShort = fvgs.filter(f => f.type === 'bearish').find(f => price >= f.bottom && price <= f.top);
 
+  // Rejection-candle confirmation — an OB/FVG tap only counts once a candle has
+  // wicked in and closed back out strongly, not the instant price touches it
+  const obLongConfirmed   = obLong   && hasRejectionCandle(candles, obLong.top,   obLong.bottom,   'long');
+  const obShortConfirmed  = obShort  && hasRejectionCandle(candles, obShort.top,  obShort.bottom,  'short');
+  const fvgLongConfirmed  = fvgLong  && hasRejectionCandle(candles, fvgLong.top,  fvgLong.bottom,  'long');
+  const fvgShortConfirmed = fvgShort && hasRejectionCandle(candles, fvgShort.top, fvgShort.bottom, 'short');
+
   let dir = null, setup = '', conf = 0, reason = '';
   if (sweptSSL && structure !== 'bearish') {
     dir = 'long';  setup = 'LIQ SWEEP'; conf = isScalp ? 75 : 78;
@@ -3447,17 +3511,33 @@ function ictIntradayAnalyze(candles, price, mode) {
     dir = 'short'; setup = 'LIQ SWEEP'; conf = isScalp ? 75 : 78;
     reason = 'BSL swept and rejected — smart money reversal short';
   } else if (structure === 'bullish' && zone === 'discount') {
-    if      (obLong  && inOTELong) { dir = 'long'; setup = 'OB + OTE';    conf = 74; reason = `Bullish OB tap inside OTE (${(retrLong * 100).toFixed(0)}% retrace) in discount`; }
-    else if (fvgLong && inOTELong) { dir = 'long'; setup = 'FVG + OTE';   conf = 71; reason = `Bullish FVG fill inside OTE (${(retrLong * 100).toFixed(0)}% retrace) in discount`; }
-    else if (obLong)               { dir = 'long'; setup = 'ORDER BLOCK'; conf = 67; reason = 'Price tapping bullish order block in discount zone'; }
-    else if (fvgLong)              { dir = 'long'; setup = 'FVG';         conf = 64; reason = 'Price filling bullish fair value gap in discount zone'; }
-    else if (inOTELong)            { dir = 'long'; setup = 'OTE FIB';     conf = 62; reason = `${(retrLong * 100).toFixed(0)}% fib retracement — optimal trade entry in discount`; }
+    if      (obLongConfirmed  && inOTELong) { dir = 'long'; setup = 'OB + OTE';    conf = 74; reason = `Confirmed rejection at bullish OB inside OTE (${(retrLong * 100).toFixed(0)}% retrace) in discount`; }
+    else if (fvgLongConfirmed && inOTELong) { dir = 'long'; setup = 'FVG + OTE';   conf = 71; reason = `Confirmed rejection filling bullish FVG inside OTE (${(retrLong * 100).toFixed(0)}% retrace) in discount`; }
+    else if (obLongConfirmed)               { dir = 'long'; setup = 'ORDER BLOCK'; conf = 67; reason = 'Confirmed rejection at bullish order block in discount zone'; }
+    else if (fvgLongConfirmed)              { dir = 'long'; setup = 'FVG';         conf = 64; reason = 'Confirmed rejection filling bullish fair value gap in discount zone'; }
+    else if (inOTELong)                     { dir = 'long'; setup = 'OTE FIB';     conf = 62; reason = `${(retrLong * 100).toFixed(0)}% fib retracement — optimal trade entry in discount`; }
   } else if (structure === 'bearish' && zone === 'premium') {
-    if      (obShort  && inOTEShort) { dir = 'short'; setup = 'OB + OTE';    conf = 74; reason = `Bearish OB tap inside OTE (${(retrShort * 100).toFixed(0)}% retrace) in premium`; }
-    else if (fvgShort && inOTEShort) { dir = 'short'; setup = 'FVG + OTE';   conf = 71; reason = `Bearish FVG fill inside OTE (${(retrShort * 100).toFixed(0)}% retrace) in premium`; }
-    else if (obShort)                { dir = 'short'; setup = 'ORDER BLOCK'; conf = 67; reason = 'Price tapping bearish order block in premium zone'; }
-    else if (fvgShort)               { dir = 'short'; setup = 'FVG';         conf = 64; reason = 'Price filling bearish fair value gap in premium zone'; }
-    else if (inOTEShort)             { dir = 'short'; setup = 'OTE FIB';     conf = 62; reason = `${(retrShort * 100).toFixed(0)}% fib retracement — optimal trade entry in premium`; }
+    if      (obShortConfirmed  && inOTEShort) { dir = 'short'; setup = 'OB + OTE';    conf = 74; reason = `Confirmed rejection at bearish OB inside OTE (${(retrShort * 100).toFixed(0)}% retrace) in premium`; }
+    else if (fvgShortConfirmed && inOTEShort) { dir = 'short'; setup = 'FVG + OTE';   conf = 71; reason = `Confirmed rejection filling bearish FVG inside OTE (${(retrShort * 100).toFixed(0)}% retrace) in premium`; }
+    else if (obShortConfirmed)                { dir = 'short'; setup = 'ORDER BLOCK'; conf = 67; reason = 'Confirmed rejection at bearish order block in premium zone'; }
+    else if (fvgShortConfirmed)               { dir = 'short'; setup = 'FVG';         conf = 64; reason = 'Confirmed rejection filling bearish fair value gap in premium zone'; }
+    else if (inOTEShort)                      { dir = 'short'; setup = 'OTE FIB';     conf = 62; reason = `${(retrShort * 100).toFixed(0)}% fib retracement — optimal trade entry in premium`; }
+  }
+
+  // Multi-timeframe gate — never take an entry that fights the higher timeframe's
+  // bias; boost confidence when the HTF agrees (ICT: HTF sets direction, LTF times entry)
+  let mtfVetoed = false, mtfAligned = false;
+  const rawDir = dir, rawSetup = setup, rawReason = reason;
+  if (dir && htfBias && htfBias.verdict !== 'WAIT') {
+    const wants = dir === 'long' ? 'BUY' : 'SELL';
+    if (htfBias.verdict === wants) {
+      mtfAligned = true;
+      conf = Math.min(90, conf + 6);
+      reason += ' · HTF aligned';
+    } else {
+      mtfVetoed = true;
+      dir = null;
+    }
   }
 
   let sig = null;
@@ -3500,6 +3580,8 @@ function ictIntradayAnalyze(candles, price, mode) {
     retr: structure === 'bearish' ? retrShort : retrLong,
     inOTE: structure === 'bearish' ? inOTEShort : inOTELong,
     fvgCount: fvgs.length, obCount: obs.length, sweptBSL, sweptSSL, sig,
+    mtfVetoed, mtfAligned,
+    vetoedSetup: mtfVetoed ? { dir: rawDir, setup: rawSetup, reason: rawReason } : null,
   };
 }
 
@@ -3623,22 +3705,33 @@ function ScalpPanel({ onChart, livePrices }) {
   const [modeFilter, setModeFilter] = useState('all');
   const inflightRef   = useRef({});
   const prevAlertRef  = useRef({});
+  const dailyRef       = useRef({}); // { [sym]: { htf, time } } — daily bias, refetched every 60s not every 1s
 
   const fetchPair = useCallback(async (sym) => {
     if (inflightRef.current[sym]) return;
     inflightRef.current[sym] = true;
     try {
-      const [r5, r15] = await Promise.all([
+      const needDaily = !dailyRef.current[sym] || Date.now() - dailyRef.current[sym].time > 60000;
+      const reqs = [
         fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=5m&range=1d`),
         fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=15m&range=5d`),
-      ]);
-      const [d5, d15] = await Promise.all([r5.json(), r15.json()]);
+      ];
+      if (needDaily) reqs.push(fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=1d&range=90d`));
+      const resolved = await Promise.all(reqs);
+      const [d5, d15, d1d] = await Promise.all(resolved.map(r => r.json()));
       const c5 = d5.candles || [], c15 = d15.candles || [];
       const price = d5.meta?.regularMarketPrice || c5[c5.length - 1]?.close || c15[c15.length - 1]?.close;
+      if (needDaily && d1d) {
+        const c1 = d1d.candles || [];
+        const dPrice = d1d.meta?.regularMarketPrice || c1[c1.length - 1]?.close;
+        dailyRef.current[sym] = { htf: dPrice ? ictHtfBias(ictAnalyze(c1, dPrice)) : null, time: Date.now() };
+      }
+      const dailyHtf = dailyRef.current[sym]?.htf || null;
       if (price) {
-        const scalp = ictIntradayAnalyze(c5, price, 'scalp');
-        const intra = ictIntradayAnalyze(c15, price, 'intra');
-        setPairData(prev => ({ ...prev, [sym]: { price, scalp, intra, c5, c15 } }));
+        // Higher timeframe sets direction: daily → 15m, then 15m → 5m
+        const intra = ictIntradayAnalyze(c15, price, 'intra', dailyHtf);
+        const scalp = ictIntradayAnalyze(c5, price, 'scalp', ictHtfBias(intra) || dailyHtf);
+        setPairData(prev => ({ ...prev, [sym]: { price, scalp, intra, c5, c15, dailyHtf } }));
 
         // Alert on new/changed entries for both strategies
         [['SCALP', scalp?.sig], ['INTRADAY', intra?.sig]].forEach(([mode, sig]) => {
@@ -3676,8 +3769,9 @@ function ScalpPanel({ onChart, livePrices }) {
     return p >= 100 ? p.toFixed(3) : p.toFixed(4);
   };
 
-  const sessions = fxSessions();
-  const overlap  = sessions.includes('LONDON') && sessions.includes('NEW YORK');
+  const sessions  = fxSessions();
+  const overlap   = sessions.includes('LONDON') && sessions.includes('NEW YORK');
+  const killzones = ictKillzones();
 
   const rows = ICT_PAIRS.map(pair => ({ pair, d: pairData[pair.symbol] }))
     .filter(({ d }) => {
@@ -3726,9 +3820,12 @@ function ScalpPanel({ onChart, livePrices }) {
     if (!sig) {
       return (
         <div style={{ padding: '5px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.015)', border: '1px solid rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 8, fontWeight: 800, color: mc, background: `${mc}14`, padding: '1px 5px', borderRadius: 3 }}>{mode}</span>
-            <span style={{ fontSize: 9, color: '#374151', fontWeight: 700 }}>WAITING — no OB/FVG/OTE confluence</span>
+            <span style={{ fontSize: 9, color: '#374151', fontWeight: 700 }}>
+              {a.mtfVetoed ? `WAITING — ${a.vetoedSetup?.setup || 'setup'} found but fights the higher-timeframe bias` : 'WAITING — no OB/FVG/OTE confluence'}
+            </span>
+            {a.mtfVetoed && <span style={{ fontSize: 7, fontWeight: 800, color: '#ef4444', background: 'rgba(239,68,68,0.14)', padding: '1px 5px', borderRadius: 3 }}>MTF VETO</span>}
           </div>
           <CtxTags a={a} />
         </div>
@@ -3738,11 +3835,12 @@ function ScalpPanel({ onChart, livePrices }) {
     return (
       <div style={{ padding: '7px 9px', borderRadius: 7, background: `${dc}07`, border: `1px solid ${dc}22`, display: 'flex', flexDirection: 'column', gap: 4 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 8, fontWeight: 800, color: mc, background: `${mc}18`, padding: '1px 5px', borderRadius: 3 }}>{mode}</span>
             <span style={{ fontSize: 8, fontWeight: 900, color: '#10b981', background: 'rgba(16,185,129,0.14)', padding: '1px 5px', borderRadius: 3 }}>● ACTIVE</span>
             <span style={{ fontSize: 8, fontWeight: 800, color: dc }}>{sig.dir === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
             <span style={{ fontSize: 8, color: '#6b7280', fontWeight: 700 }}>{sig.setup}</span>
+            {a.mtfAligned && <span style={{ fontSize: 7, fontWeight: 800, color: '#a5b4fc', background: 'rgba(99,102,241,0.16)', padding: '1px 5px', borderRadius: 3 }}>✓ MTF ALIGNED</span>}
           </div>
           <span style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 800, color: sig.conf >= 70 ? '#10b981' : '#f59e0b' }}>{sig.conf}%</span>
         </div>
@@ -3780,6 +3878,13 @@ function ScalpPanel({ onChart, livePrices }) {
         })}
         {overlap && <span style={{ fontSize: 9, color: '#10b981', fontWeight: 700 }}>London/NY overlap — peak liquidity for scalps</span>}
         {!sessions.includes('LONDON') && !sessions.includes('NEW YORK') && <span style={{ fontSize: 9, color: '#f59e0b' }}>Thin liquidity — reduce scalp size</span>}
+        <div style={{ width: 1, height: 14, background: 'rgba(255,255,255,0.08)' }} />
+        <span style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>KILLZONE</span>
+        {killzones.length > 0 ? (
+          killzones.map(k => <span key={k} style={{ fontSize: 9, fontWeight: 900, color: '#f59e0b', background: 'rgba(245,158,11,0.14)', padding: '2px 7px', borderRadius: 4 }}>⚡ {k}</span>)
+        ) : (
+          <span style={{ fontSize: 9, fontWeight: 700, color: '#374151' }}>none active — SCALP alerts paused until London Open, NY Open, or London Close</span>
+        )}
       </div>
 
       {/* Mode filter */}
@@ -3842,7 +3947,7 @@ function ScalpPanel({ onChart, livePrices }) {
       )}
 
       <div style={{ fontSize: 9, color: '#374151', textAlign: 'center', paddingTop: 4 }}>
-        ICT intraday — stops beyond the OB/FVG, targets at opposite liquidity · Min 2:1 reward:risk · Longs only in discount, shorts only in premium · Educational use only
+        ICT intraday — rejection-candle confirmation required at every OB/FVG tap · Entries must agree with the daily/15m higher-timeframe bias · Min 2:1 reward:risk · SCALP alerts require an active killzone · Educational use only
       </div>
     </div>
   );
@@ -5009,7 +5114,11 @@ export default function App() {
           const dailyPrice = d1d.meta?.regularMarketPrice || c1d[c1d.length - 1]?.close;
           const an = dailyPrice ? ictAnalyze(c1d, dailyPrice) : null;
           const ictSig = an?.signal ? { dir: an.signal, setup: an.signalType.replace('_', ' '), conf: an.confidence, reason: an.reason, entry: an.entry, rr: an.rr } : null;
-          [['SCALP', ictIntradayAnalyze(c5, price, 'scalp')?.sig], ['INTRADAY', ictIntradayAnalyze(c15, price, 'intra')?.sig], ['ICT', ictSig]].forEach(([mode, sig]) => {
+          // Higher timeframe sets direction: daily → 15m, then 15m → 5m
+          const dailyHtf = ictHtfBias(an);
+          const intra = ictIntradayAnalyze(c15, price, 'intra', dailyHtf);
+          const scalp = ictIntradayAnalyze(c5, price, 'scalp', ictHtfBias(intra) || dailyHtf);
+          [['SCALP', scalp?.sig], ['INTRADAY', intra?.sig], ['ICT', ictSig]].forEach(([mode, sig]) => {
             const refKey = `${p.symbol}|${mode}`;
             const key = sig ? `${sig.dir}|${sig.setup}` : null;
             const prev = scalpWatchRef.current[refKey];
