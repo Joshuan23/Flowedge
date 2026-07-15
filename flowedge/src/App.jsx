@@ -748,7 +748,7 @@ function AlertsPanel({ stocks }) {
       if (hit) {
         firedRef.current.add(a.id);
         setAlerts(prev => prev.map(x => x.id === a.id ? { ...x, triggered: true, triggeredAt: new Date().toLocaleTimeString() } : x));
-        if (Notification.permission === "granted") {
+        if (typeof Notification !== 'undefined' && Notification.permission === "granted") {
           new Notification(`FlowEdge Alert: ${a.symbol}`, {
             body: `${a.symbol} is ${a.direction} $${a.targetPrice} — now at $${price.toFixed(2)}`,
             icon: "/favicon.ico",
@@ -772,7 +772,7 @@ function AlertsPanel({ stocks }) {
       targetPrice = +(form.direction === 'pctAbove' ? base * (1 + num / 100) : base * (1 - num / 100)).toFixed(2);
     }
     const direction = isPct ? (form.direction === 'pctAbove' ? 'above' : 'below') : form.direction;
-    if (Notification.permission === "default") await Notification.requestPermission();
+    if (typeof Notification !== 'undefined' && Notification.permission === "default") await Notification.requestPermission();
     setAlerts(prev => [...prev, { id: Date.now(), symbol: form.symbol, targetPrice, direction, pct, triggered: false }]);
     setForm(f => ({ ...f, price: "" }));
     setAdding(false);
@@ -2907,8 +2907,12 @@ function ICTPanel() {
   const [selected, setSelected]   = useState(null);
   const prevSignalsRef            = useRef({});
 
+  const inflightRef = useRef({});
+
   const fetchPair = useCallback(async (sym) => {
-    setLoadingSet(prev => ({ ...prev, [sym]: true }));
+    if (inflightRef.current[sym]) return; // don't stack requests on the 1s loop
+    inflightRef.current[sym] = true;
+    setLoadingSet(prev => prev[sym] === undefined ? { ...prev, [sym]: true } : prev);
     try {
       const res  = await fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=1d&range=90d`);
       const data = await res.json();
@@ -2922,7 +2926,7 @@ function ICTPanel() {
           if (prev !== key) {
             const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
             logSignalAlert({ source: 'ICT', name, dir: analysis.signal, type: analysis.signalType.replace('_', ' '), conf: analysis.confidence, reason: analysis.reason, price: analysis.entry });
-            if (prev !== undefined && Notification.permission === 'granted') {
+            if (prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
               new Notification(`FlowEdge ICT — ${name}`, {
                 body: `${analysis.signal.toUpperCase()} ${analysis.signalType.replace('_', ' ')} · ${analysis.confidence}%\n${analysis.reason}`,
                 icon: '/icon.png',
@@ -2933,11 +2937,12 @@ function ICTPanel() {
         }
       }
     } catch (_) {}
-    setLoadingSet(prev => ({ ...prev, [sym]: false }));
+    inflightRef.current[sym] = false;
+    setLoadingSet(prev => prev[sym] ? { ...prev, [sym]: false } : prev);
   }, []);
 
   useEffect(() => {
-    if (Notification.permission === 'default') Notification.requestPermission();
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') Notification.requestPermission();
     ICT_PAIRS.forEach(p => fetchPair(p.symbol));
     const iv = setInterval(() => ICT_PAIRS.forEach(p => fetchPair(p.symbol)), 1000);
     return () => clearInterval(iv);
@@ -4275,7 +4280,7 @@ export default function App() {
       fxAlertRef.current[d.symbol] = key;
       logSignalAlert({ source: 'FOREX', name: sig.name, dir: sig.dir, type: sig.type, conf: sig.conf, reason: sig.reason, price: sig.entry });
       // Skip the browser popup on first observation (page load) — only notify on changes
-      if (prev !== undefined && Notification.permission === 'granted') {
+      if (prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
         new Notification(`FlowEdge Forex — ${sig.name}`, {
           body: `${sig.dir.toUpperCase()} ${sig.type} · ${sig.conf}%\n${sig.reason}`,
           icon: '/favicon.ico',
