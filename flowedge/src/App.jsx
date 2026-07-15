@@ -2648,6 +2648,7 @@ function scoreCommoditySignal(d) {
 const FX_NAMES = {
   'EURUSD=X': 'EUR/USD', 'GBPUSD=X': 'GBP/USD', 'USDJPY=X': 'USD/JPY',
   'USDCHF=X': 'USD/CHF', 'AUDUSD=X': 'AUD/USD', 'USDCAD=X': 'USD/CAD', 'NZDUSD=X': 'NZD/USD',
+  'XAUUSD=X': 'XAU/USD', 'XAGUSD=X': 'XAG/USD',
 };
 
 function scoreForexSignal(d) {
@@ -2684,6 +2685,423 @@ function scoreForexSignal(d) {
     tp: dir === 'long' ? price * (1 + tpPct) : price * (1 - tpPct),
     rr: (tpPct / slPct).toFixed(1),
   };
+}
+
+// ─── ICT Smart Money Concepts ───────────────────────────────────────────────
+
+const ICT_PAIRS = [
+  { symbol: 'EURUSD=X',  name: 'EUR/USD' },
+  { symbol: 'GBPUSD=X',  name: 'GBP/USD' },
+  { symbol: 'USDJPY=X',  name: 'USD/JPY' },
+  { symbol: 'USDCHF=X',  name: 'USD/CHF' },
+  { symbol: 'AUDUSD=X',  name: 'AUD/USD' },
+  { symbol: 'USDCAD=X',  name: 'USD/CAD' },
+  { symbol: 'NZDUSD=X',  name: 'NZD/USD' },
+  { symbol: 'GBPJPY=X',  name: 'GBP/JPY' },
+  { symbol: 'XAUUSD=X',  name: 'XAU/USD' },
+  { symbol: 'XAGUSD=X',  name: 'XAG/USD' },
+];
+
+function ictFindSwings(candles, lookback = 3) {
+  const highs = [], lows = [];
+  for (let i = lookback; i < candles.length - lookback; i++) {
+    const c = candles[i];
+    const isHigh = candles.slice(i - lookback, i).every(p => p.high <= c.high)
+      && candles.slice(i + 1, i + lookback + 1).every(p => p.high <= c.high);
+    const isLow  = candles.slice(i - lookback, i).every(p => p.low  >= c.low)
+      && candles.slice(i + 1, i + lookback + 1).every(p => p.low  >= c.low);
+    if (isHigh) highs.push({ idx: i, price: c.high, time: c.time });
+    if (isLow)  lows.push({ idx: i, price: c.low,  time: c.time });
+  }
+  return { highs, lows };
+}
+
+function ictMarketStructure(swings) {
+  const { highs, lows } = swings;
+  if (highs.length < 2 || lows.length < 2) return 'ranging';
+  const rh = highs.slice(-3), rl = lows.slice(-3);
+  const hhC = rh.slice(1).filter((h, i) => h.price > rh[i].price).length;
+  const hlC = rl.slice(1).filter((l, i) => l.price > rl[i].price).length;
+  const lhC = rh.slice(1).filter((h, i) => h.price < rh[i].price).length;
+  const llC = rl.slice(1).filter((l, i) => l.price < rl[i].price).length;
+  if (hhC >= 1 && hlC >= 1) return 'bullish';
+  if (lhC >= 1 && llC >= 1) return 'bearish';
+  return 'ranging';
+}
+
+function ictFairValueGaps(candles) {
+  const fvgs = [];
+  for (let i = 2; i < candles.length; i++) {
+    const c1 = candles[i - 2], c3 = candles[i];
+    if (c3.low  > c1.high) fvgs.push({ type: 'bullish', top: c3.low,  bottom: c1.high, mid: (c3.low  + c1.high) / 2, idx: i });
+    if (c3.high < c1.low)  fvgs.push({ type: 'bearish', top: c1.low,  bottom: c3.high, mid: (c1.low  + c3.high) / 2, idx: i });
+  }
+  return fvgs.slice(-20);
+}
+
+function ictOrderBlocks(candles) {
+  const obs = [], lb = 5;
+  for (let i = lb; i < candles.length - 1; i++) {
+    const c = candles[i];
+    const next = candles.slice(i + 1, i + lb + 1);
+    if (c.close < c.open) {
+      const bull = next.some(n => n.close > c.open && (n.close - c.open) / c.open > 0.001);
+      if (bull) obs.push({ type: 'bullish', top: c.open, bottom: c.close, idx: i, time: c.time });
+    }
+    if (c.close > c.open) {
+      const bear = next.some(n => n.close < c.open && (c.open - n.close) / c.open > 0.001);
+      if (bear) obs.push({ type: 'bearish', top: c.close, bottom: c.open, idx: i, time: c.time });
+    }
+  }
+  return obs.slice(-10);
+}
+
+function ictAnalyze(candles, currentPrice) {
+  if (!candles || candles.length < 20) return null;
+  const swings   = ictFindSwings(candles);
+  const structure = ictMarketStructure(swings);
+  const fvgs     = ictFairValueGaps(candles);
+  const obs      = ictOrderBlocks(candles);
+
+  const bsl = swings.highs.slice(-3).map(h => h.price);
+  const ssl = swings.lows.slice(-3).map(l => l.price);
+
+  const recent    = candles.slice(-20);
+  const rangeHigh = Math.max(...recent.map(c => c.high));
+  const rangeLow  = Math.min(...recent.map(c => c.low));
+  const rangeMid  = (rangeHigh + rangeLow) / 2;
+  const priceZone = currentPrice > rangeMid ? 'premium' : 'discount';
+
+  const last      = candles[candles.length - 1];
+  const sweptBSL  = bsl.some(lv => last.high > lv && last.close < lv);
+  const sweptSSL  = ssl.some(lv => last.low  < lv && last.close > lv);
+
+  const activeFVGs = fvgs.filter(f => f.type === 'bullish' ? currentPrice < f.top : currentPrice > f.bottom);
+  const activeOBs  = obs.filter(o  => o.type  === 'bullish' ? currentPrice > o.bottom : currentPrice < o.top);
+
+  const atr = recent.reduce((s, c) => s + (c.high - c.low), 0) / recent.length;
+
+  let signal = null, signalType = '', confidence = 0, reason = '';
+  let sl = 0, tp = 0;
+
+  if (sweptSSL && structure !== 'bearish') {
+    signal = 'long';  signalType = 'LIQ_SWEEP';   confidence = 78;
+    reason = 'SSL swept — price closed above → institutional reversal long';
+    sl = currentPrice - atr * 1.5; tp = currentPrice + atr * 2.5;
+  } else if (sweptBSL && structure !== 'bullish') {
+    signal = 'short'; signalType = 'LIQ_SWEEP';   confidence = 78;
+    reason = 'BSL swept — price closed below → distribution / short reversal';
+    sl = currentPrice + atr * 1.5; tp = currentPrice - atr * 2.5;
+  } else if (structure === 'bullish' && priceZone === 'discount') {
+    const nearOB  = activeOBs.find(o  => o.type  === 'bullish' && Math.abs(currentPrice - o.top)    / currentPrice < 0.005);
+    const nearFVG = activeFVGs.find(f => f.type  === 'bullish' && currentPrice >= f.bottom && currentPrice <= f.top);
+    if (nearOB) {
+      signal = 'long'; signalType = 'ORDER_BLOCK'; confidence = 72;
+      reason = 'Bullish OB in discount zone — institutional demand confluence';
+      sl = nearOB.bottom - atr * 0.5; tp = currentPrice + atr * 3;
+    } else if (nearFVG) {
+      signal = 'long'; signalType = 'FAIR_VALUE_GAP'; confidence = 68;
+      reason = 'Price inside bullish FVG — imbalance fill with bullish structure';
+      sl = nearFVG.bottom - atr;    tp = currentPrice + atr * 2;
+    } else {
+      signal = 'long'; signalType = 'STRUCTURE'; confidence = 60;
+      reason = 'HH/HL market structure in discount zone — trend continuation';
+      sl = currentPrice - atr * 2;  tp = currentPrice + atr * 3;
+    }
+  } else if (structure === 'bearish' && priceZone === 'premium') {
+    const nearOB  = activeOBs.find(o  => o.type  === 'bearish' && Math.abs(currentPrice - o.bottom) / currentPrice < 0.005);
+    const nearFVG = activeFVGs.find(f => f.type  === 'bearish' && currentPrice >= f.bottom && currentPrice <= f.top);
+    if (nearOB) {
+      signal = 'short'; signalType = 'ORDER_BLOCK'; confidence = 72;
+      reason = 'Bearish OB in premium zone — institutional supply confluence';
+      sl = nearOB.top + atr * 0.5; tp = currentPrice - atr * 3;
+    } else if (nearFVG) {
+      signal = 'short'; signalType = 'FAIR_VALUE_GAP'; confidence = 68;
+      reason = 'Price inside bearish FVG — imbalance fill with bearish structure';
+      sl = nearFVG.top + atr;      tp = currentPrice - atr * 2;
+    } else {
+      signal = 'short'; signalType = 'STRUCTURE'; confidence = 60;
+      reason = 'LH/LL market structure in premium zone — trend continuation';
+      sl = currentPrice + atr * 2; tp = currentPrice - atr * 3;
+    }
+  }
+
+  let orderFlow = 'neutral';
+  if      (sweptSSL || (structure === 'bullish' && priceZone === 'discount')) orderFlow = 'accumulating';
+  else if (sweptBSL || (structure === 'bearish' && priceZone === 'premium'))  orderFlow = 'distributing';
+
+  return {
+    structure, priceZone, orderFlow, bsl, ssl,
+    fvgCount: activeFVGs.length, obCount: activeOBs.length,
+    sweptBSL, sweptSSL,
+    activeFVGs: activeFVGs.slice(-3), activeOBs: activeOBs.slice(-3),
+    signal, signalType, confidence, reason, entry: currentPrice, sl, tp,
+    rr: (sl && tp && sl !== currentPrice) ? Math.abs((tp - currentPrice) / (sl - currentPrice)).toFixed(1) : null,
+    atr, rangeHigh, rangeLow, rangeMid,
+  };
+}
+
+function ICTPanel() {
+  const [pairData, setPairData]   = useState({});
+  const [loadingSet, setLoadingSet] = useState({});
+  const [selected, setSelected]   = useState(null);
+  const prevSignalsRef            = useRef({});
+
+  const fetchPair = useCallback(async (sym) => {
+    setLoadingSet(prev => ({ ...prev, [sym]: true }));
+    try {
+      const res  = await fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=1d&range=90d`);
+      const data = await res.json();
+      if (data.candles?.length) {
+        const price    = data.meta?.regularMarketPrice || data.candles[data.candles.length - 1].close;
+        const analysis = ictAnalyze(data.candles, price);
+        setPairData(prev => ({ ...prev, [sym]: { candles: data.candles, meta: data.meta, analysis } }));
+        if (analysis?.signal) {
+          const key = analysis.signal + analysis.signalType;
+          if (prevSignalsRef.current[sym] && prevSignalsRef.current[sym] !== key && Notification.permission === 'granted') {
+            const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
+            new Notification(`FlowEdge ICT — ${name}`, {
+              body: `${analysis.signal.toUpperCase()} ${analysis.signalType.replace('_', ' ')} · ${analysis.confidence}%\n${analysis.reason}`,
+              icon: '/icon.png',
+            });
+          }
+          prevSignalsRef.current[sym] = key;
+        }
+      }
+    } catch (_) {}
+    setLoadingSet(prev => ({ ...prev, [sym]: false }));
+  }, []);
+
+  useEffect(() => {
+    if (Notification.permission === 'default') Notification.requestPermission();
+    ICT_PAIRS.forEach(p => fetchPair(p.symbol));
+    const iv = setInterval(() => ICT_PAIRS.forEach(p => fetchPair(p.symbol)), 5 * 60 * 1000);
+    return () => clearInterval(iv);
+  }, [fetchPair]);
+
+  const fmtPx = (sym, p) => {
+    if (!p) return '—';
+    if (sym?.startsWith('XAUUSD')) return p.toFixed(2);
+    if (sym?.startsWith('XAGUSD')) return p.toFixed(3);
+    return p >= 100 ? p.toFixed(3) : p.toFixed(4);
+  };
+
+  const structColor = s => s === 'bullish' ? '#10b981' : s === 'bearish' ? '#ef4444' : '#6b7280';
+  const flowColor   = f => f === 'accumulating' ? '#10b981' : f === 'distributing' ? '#ef4444' : '#6b7280';
+  const typeColor   = { LIQ_SWEEP: '#f59e0b', ORDER_BLOCK: '#3b82f6', FAIR_VALUE_GAP: '#8b5cf6', STRUCTURE: '#6b7280' };
+
+  const pairsWithSignal = ICT_PAIRS.filter(p => pairData[p.symbol]?.analysis?.signal);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb', letterSpacing: '-0.01em' }}>ICT Smart Money</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>Fair Value Gaps · Order Blocks · Liquidity Sweeps · Order Flow</div>
+        </div>
+        <button onClick={() => ICT_PAIRS.forEach(p => fetchPair(p.symbol))} style={{ background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: 6, padding: '5px 10px', color: '#a5b4fc', fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>↻ Refresh</button>
+      </div>
+
+      {/* Institutional Order Flow grid */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>INSTITUTIONAL ORDER FLOW</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 4 }}>
+          {ICT_PAIRS.map(pair => {
+            const d   = pairData[pair.symbol];
+            const a   = d?.analysis;
+            const isl = loadingSet[pair.symbol];
+            const dc  = a?.signal === 'long' ? '#10b981' : a?.signal === 'short' ? '#ef4444' : null;
+            return (
+              <button key={pair.symbol} onClick={() => setSelected(selected === pair.symbol ? null : pair.symbol)} style={{
+                background: selected === pair.symbol ? 'rgba(99,102,241,0.12)' : 'rgba(255,255,255,0.02)',
+                border: selected === pair.symbol ? '1px solid rgba(99,102,241,0.3)' : `1px solid ${dc ? dc + '25' : 'rgba(255,255,255,0.05)'}`,
+                borderRadius: 7, padding: '7px 10px', cursor: 'pointer', textAlign: 'left',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 11, fontWeight: 800, color: '#e5e7eb' }}>{pair.name}</span>
+                  {isl && <span style={{ fontSize: 9, color: '#374151' }}>…</span>}
+                  {!isl && dc && <span style={{ fontSize: 8, fontWeight: 800, color: dc, background: dc + '18', padding: '1px 5px', borderRadius: 3 }}>{a.signal === 'long' ? '▲' : '▼'}</span>}
+                </div>
+                {a ? (
+                  <div style={{ display: 'flex', gap: 5, marginTop: 3, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 8, color: structColor(a.structure), fontWeight: 700 }}>{a.structure.toUpperCase()}</span>
+                    <span style={{ fontSize: 8, color: a.priceZone === 'discount' ? '#10b981' : '#ef4444', fontWeight: 600 }}>{a.priceZone.toUpperCase()}</span>
+                    <span style={{ fontSize: 8, color: flowColor(a.orderFlow) }}>{a.orderFlow}</span>
+                    {a.sweptSSL && <span style={{ fontSize: 8, color: '#f59e0b', fontWeight: 700 }}>SSL✓</span>}
+                    {a.sweptBSL && <span style={{ fontSize: 8, color: '#f59e0b', fontWeight: 700 }}>BSL✓</span>}
+                  </div>
+                ) : !isl ? (
+                  <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>no data</div>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Selected pair detail */}
+      {selected && pairData[selected]?.analysis && (() => {
+        const pair  = ICT_PAIRS.find(p => p.symbol === selected);
+        const d     = pairData[selected];
+        const a     = d.analysis;
+        const price = d.meta?.regularMarketPrice || d.candles?.[d.candles.length - 1]?.close;
+        const fp    = p => fmtPx(selected, p);
+        const dc    = a.signal === 'long' ? '#10b981' : '#ef4444';
+        const tc    = typeColor[a.signalType] || '#9ca3af';
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>ICT ANALYSIS — {pair.name}</div>
+
+            {/* Stats row */}
+            <div style={{ padding: '10px 12px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+              {[
+                ['PRICE',     fp(price),                             '#f9fafb',   18, "'Space Mono',monospace"],
+                ['STRUCTURE', a.structure === 'bullish' ? 'HH/HL' : a.structure === 'bearish' ? 'LH/LL' : 'RANGING', structColor(a.structure), 12, 'inherit'],
+                ['ZONE',      a.priceZone.toUpperCase(),             a.priceZone === 'discount' ? '#10b981' : '#ef4444', 12, 'inherit'],
+                ['ORDER FLOW',a.orderFlow.toUpperCase(),             flowColor(a.orderFlow), 12, 'inherit'],
+                ['FVGs',      String(a.fvgCount),                   a.fvgCount > 0 ? '#8b5cf6' : '#374151', 14, 'monospace'],
+                ['OBs',       String(a.obCount),                    a.obCount  > 0 ? '#3b82f6' : '#374151', 14, 'monospace'],
+              ].map(([label, val, color, fs, ff]) => (
+                <div key={label}>
+                  <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 700 }}>{label}</div>
+                  <div style={{ fontSize: fs, fontFamily: ff, fontWeight: 800, color }}>{val}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Liquidity levels */}
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>LIQUIDITY LEVELS</div>
+              {a.bsl.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ fontSize: 9, fontWeight: 700, color: '#ef4444', minWidth: 60 }}>BSL (sells)</span>
+                  {a.bsl.map((l, i) => <span key={i} style={{ fontSize: 10, fontFamily: 'monospace', color: '#fca5a5', background: 'rgba(239,68,68,0.08)', padding: '1px 6px', borderRadius: 3 }}>{fp(l)}</span>)}
+                  {a.sweptBSL && <span style={{ fontSize: 9, color: '#f59e0b', fontWeight: 700 }}>SWEPT ✓</span>}
+                </div>
+              )}
+              {a.ssl.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ fontSize: 9, fontWeight: 700, color: '#10b981', minWidth: 60 }}>SSL (buys)</span>
+                  {a.ssl.map((l, i) => <span key={i} style={{ fontSize: 10, fontFamily: 'monospace', color: '#6ee7b7', background: 'rgba(16,185,129,0.08)', padding: '1px 6px', borderRadius: 3 }}>{fp(l)}</span>)}
+                  {a.sweptSSL && <span style={{ fontSize: 9, color: '#f59e0b', fontWeight: 700 }}>SWEPT ✓</span>}
+                </div>
+              )}
+            </div>
+
+            {/* ICT signal */}
+            {a.signal && (
+              <div style={{ padding: '10px 12px', borderRadius: 9, background: `${dc}07`, border: `1px solid ${dc}25`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontWeight: 900, fontSize: 13, color: '#f9fafb' }}>ICT Signal</span>
+                    <span style={{ padding: '1px 6px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${dc}20`, color: dc }}>{a.signal === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
+                    <span style={{ padding: '1px 6px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${tc}18`, color: tc }}>{a.signalType.replace('_', ' ')}</span>
+                  </div>
+                  <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 800, color: a.confidence >= 70 ? '#10b981' : '#f59e0b' }}>{a.confidence}%</span>
+                </div>
+                <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>{a.reason}</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
+                  {[['Entry', fp(a.entry), '#e5e7eb'], ['TP', fp(a.tp), '#10b981'], ['SL', fp(a.sl), '#ef4444'], ['RR', a.rr ? `${a.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
+                    <div key={lbl} style={{ padding: '4px 6px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
+                      <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{lbl}</div>
+                      <div style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                  {[[`Range: ${fp(a.rangeLow)} – ${fp(a.rangeHigh)}`, '#4b5563'], [`Mid: ${fp(a.rangeMid)}`, a.priceZone === 'discount' ? '#10b981' : '#ef4444']].map(([text, color]) => (
+                    <span key={text} style={{ fontSize: 9, fontFamily: 'monospace', color, background: `${color}12`, padding: '1px 6px', borderRadius: 3 }}>{text}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Active FVGs */}
+            {a.activeFVGs?.length > 0 && (
+              <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(139,92,246,0.05)', border: '1px solid rgba(139,92,246,0.15)' }}>
+                <div style={{ fontSize: 9, color: '#8b5cf6', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>FAIR VALUE GAPS</div>
+                {a.activeFVGs.map((fvg, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 10, fontFamily: 'monospace', marginBottom: 2 }}>
+                    <span style={{ color: fvg.type === 'bullish' ? '#10b981' : '#ef4444', fontWeight: 700, fontSize: 9, minWidth: 50 }}>{fvg.type === 'bullish' ? '▲ BULL' : '▼ BEAR'}</span>
+                    <span style={{ color: '#9ca3af' }}>{fp(fvg.bottom)} – {fp(fvg.top)}</span>
+                    <span style={{ color: '#4b5563' }}>mid {fp(fvg.mid)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Active OBs */}
+            {a.activeOBs?.length > 0 && (
+              <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(59,130,246,0.05)', border: '1px solid rgba(59,130,246,0.15)' }}>
+                <div style={{ fontSize: 9, color: '#3b82f6', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>ORDER BLOCKS</div>
+                {a.activeOBs.map((ob, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 10, fontFamily: 'monospace', marginBottom: 2 }}>
+                    <span style={{ color: ob.type === 'bullish' ? '#10b981' : '#ef4444', fontWeight: 700, fontSize: 9, minWidth: 50 }}>{ob.type === 'bullish' ? '▲ BULL' : '▼ BEAR'}</span>
+                    <span style={{ color: '#9ca3af' }}>{fp(ob.bottom)} – {fp(ob.top)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* All pairs with signals (compact list, excluding selected) */}
+      {pairsWithSignal.filter(p => p.symbol !== selected).map(pair => {
+        const d   = pairData[pair.symbol];
+        const a   = d.analysis;
+        const price = d.meta?.regularMarketPrice || d.candles?.[d.candles.length - 1]?.close;
+        const dc  = a.signal === 'long' ? '#10b981' : '#ef4444';
+        const tc  = typeColor[a.signalType] || '#9ca3af';
+        const fp  = p => fmtPx(pair.symbol, p);
+        return (
+          <div key={pair.symbol} onClick={() => setSelected(pair.symbol)} style={{ padding: '9px 12px', borderRadius: 9, background: `${dc}06`, border: `1px solid ${dc}20`, display: 'flex', flexDirection: 'column', gap: 5, cursor: 'pointer' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontWeight: 900, fontSize: 12, color: '#f9fafb' }}>{pair.name}</span>
+                <span style={{ padding: '1px 5px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${dc}20`, color: dc }}>{a.signal === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
+                <span style={{ padding: '1px 5px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${tc}18`, color: tc }}>{a.signalType.replace('_', ' ')}</span>
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#9ca3af' }}>{fp(price)}</span>
+                <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 800, color: a.confidence >= 70 ? '#10b981' : '#f59e0b' }}>{a.confidence}%</span>
+              </div>
+            </div>
+            <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>{a.reason}</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
+              {[['Entry', fp(a.entry), '#e5e7eb'], ['TP', fp(a.tp), '#10b981'], ['SL', fp(a.sl), '#ef4444'], ['RR', a.rr ? `${a.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
+                <div key={lbl} style={{ padding: '3px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
+                  <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{lbl}</div>
+                  <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+              {[
+                [a.structure === 'bullish' ? 'HH/HL' : a.structure === 'bearish' ? 'LH/LL' : 'RANGING', structColor(a.structure)],
+                [a.priceZone.toUpperCase(), a.priceZone === 'discount' ? '#10b981' : '#ef4444'],
+                [a.orderFlow.toUpperCase(), flowColor(a.orderFlow)],
+              ].map(([text, color]) => (
+                <span key={text} style={{ fontSize: 9, fontFamily: 'monospace', color, background: `${color}12`, padding: '1px 5px', borderRadius: 3 }}>{text}</span>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+
+      {pairsWithSignal.length === 0 && (
+        <div style={{ padding: 20, textAlign: 'center', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>Loading ICT analysis…</div>
+          <div style={{ fontSize: 10, color: '#374151' }}>Fetching 90 days of OHLCV data for 10 pairs</div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 9, color: '#374151', textAlign: 'center', paddingTop: 4 }}>
+        ICT Smart Money — FVGs, Order Blocks, Liquidity · Educational use only
+      </div>
+    </div>
+  );
 }
 
 function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan, vixVal, sectorData, onTrade, commodities, forexData }) {
@@ -3553,7 +3971,7 @@ function NewsPanel({ watchlist }) {
   );
 }
 
-const TABS = ["Signals", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Perps", "Screener", "Account"];
+const TABS = ["Signals", "ICT", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Dark Pool", "Perps", "Screener", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -3983,6 +4401,7 @@ export default function App() {
                   </div>
                 )}
                 {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
+                {tab === "ICT" && <ICTPanel />}
                 {tab === "News" && <NewsPanel watchlist={watchlist} />}
                 {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
@@ -4095,6 +4514,7 @@ export default function App() {
 
                 <div style={{ flex: 1, overflowY: "auto" }}>
                   {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
+                  {tab === "ICT" && <ICTPanel />}
                   {tab === "News" && <NewsPanel watchlist={watchlist} />}
                   {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
