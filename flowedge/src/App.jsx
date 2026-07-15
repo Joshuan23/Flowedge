@@ -2952,6 +2952,109 @@ function ictAnalyze(candles, currentPrice) {
   };
 }
 
+// One clear instruction per metal: BUY or SELL with entry/SL/TP, or WAIT.
+// Checks the daily ICT engine first, then 15m intraday, then 5m scalp.
+function MetalsTradePlan({ onChart }) {
+  const [plans, setPlans] = useState({});
+  const inflight = useRef({});
+
+  const load = useCallback(async (sym, name) => {
+    if (inflight.current[sym]) return;
+    inflight.current[sym] = true;
+    try {
+      const [d1, d15, d5] = await Promise.all([
+        fetch(`/api/ohlcv?symbol=${sym}&interval=1d&range=90d`).then(r => r.json()),
+        fetch(`/api/ohlcv?symbol=${sym}&interval=15m&range=5d`).then(r => r.json()),
+        fetch(`/api/ohlcv?symbol=${sym}&interval=5m&range=1d`).then(r => r.json()),
+      ]);
+      const c1 = d1.candles || [], c15 = d15.candles || [], c5 = d5.candles || [];
+      const price = d1.meta?.regularMarketPrice || c1[c1.length - 1]?.close;
+      if (!price) return;
+      const daily = ictAnalyze(c1, price);
+      let plan = null;
+      if (daily?.signal) {
+        plan = { action: daily.signal === 'long' ? 'BUY' : 'SELL', tf: 'DAILY', conf: daily.confidence, entry: daily.entry, sl: daily.sl, tp: daily.tp, rr: daily.rr, reason: daily.reason, setup: daily.signalType.replace('_', ' ') };
+      }
+      if (!plan) {
+        const i = ictIntradayAnalyze(c15, price, 'intra');
+        if (i?.sig) plan = { action: i.sig.dir === 'long' ? 'BUY' : 'SELL', tf: '15M', conf: i.sig.conf, entry: i.sig.entry, sl: i.sig.sl, tp: i.sig.tp, rr: i.sig.rr, reason: i.sig.reason, setup: i.sig.setup };
+      }
+      if (!plan) {
+        const s = ictIntradayAnalyze(c5, price, 'scalp');
+        if (s?.sig) plan = { action: s.sig.dir === 'long' ? 'BUY' : 'SELL', tf: '5M', conf: s.sig.conf, entry: s.sig.entry, sl: s.sig.sl, tp: s.sig.tp, rr: s.sig.rr, reason: s.sig.reason, setup: s.sig.setup };
+      }
+      setPlans(prev => ({ ...prev, [sym]: { name, price, plan, bias: daily?.bias } }));
+    } catch {}
+    inflight.current[sym] = false;
+  }, []);
+
+  useEffect(() => {
+    const run = () => { load('XAUUSD', 'GOLD — XAU/USD'); load('XAGUSD', 'SILVER — XAG/USD'); };
+    run();
+    const t = setInterval(run, 30000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>METALS TRADE PLAN — CLEAR ENTRY OR WAIT</div>
+      {[['XAUUSD', 2], ['XAGUSD', 3]].map(([sym, dp]) => {
+        const m = plans[sym];
+        if (!m) {
+          return <div key={sym} style={{ padding: '12px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', fontSize: 11, color: '#4b5563' }}>Loading {sym === 'XAUUSD' ? 'gold' : 'silver'}…</div>;
+        }
+        const fp = v => v?.toFixed(dp);
+        const p = m.plan;
+        const ac = p ? (p.action === 'BUY' ? '#10b981' : '#ef4444') : '#6b7280';
+        return (
+          <div key={sym} style={{ padding: '12px 14px', borderRadius: 10, background: `${ac}08`, border: `1.5px solid ${ac}35`, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{ fontWeight: 900, fontSize: 13, color: '#f9fafb' }}>{m.name}</span>
+                <span style={{ fontSize: 12, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>{fp(m.price)}</span>
+                {onChart && (
+                  <button onClick={() => onChart(TV_SYMBOLS[sym] || sym)} title="Open TradingView chart" style={{
+                    background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 4,
+                    padding: '1px 6px', color: '#a5b4fc', fontSize: 8, fontWeight: 700, cursor: 'pointer',
+                  }}>📈 TV</button>
+                )}
+              </div>
+              <span style={{ padding: '4px 12px', borderRadius: 6, fontSize: 13, fontWeight: 900, background: `${ac}22`, color: ac, letterSpacing: '0.03em' }}>
+                {p ? (p.action === 'BUY' ? '▲ BUY' : '▼ SELL') : '⏸ WAIT'}
+              </span>
+            </div>
+            {p ? (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 5 }}>
+                  {[['ENTRY', fp(p.entry), '#e5e7eb'], ['STOP LOSS', fp(p.sl), '#ef4444'], ['TAKE PROFIT', fp(p.tp), '#10b981'], ['R:R', p.rr ? `${p.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
+                    <div key={lbl} style={{ padding: '6px 6px', borderRadius: 6, background: 'rgba(0,0,0,0.3)', textAlign: 'center', border: '1px solid rgba(255,255,255,0.05)' }}>
+                      <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 2 }}>{lbl}</div>
+                      <div style={{ fontSize: 13, fontFamily: "'Space Mono', monospace", fontWeight: 800, color }}>{val}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 8, fontWeight: 800, color: '#a5b4fc', background: 'rgba(99,102,241,0.14)', padding: '1px 6px', borderRadius: 3 }}>{p.tf}</span>
+                  <span style={{ fontSize: 8, fontWeight: 800, color: ac, background: `${ac}14`, padding: '1px 6px', borderRadius: 3 }}>{p.setup}</span>
+                  <span style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 800, color: p.conf >= 70 ? '#10b981' : '#f59e0b' }}>{p.conf}% confidence</span>
+                  <span style={{ fontSize: 9, color: '#6b7280', fontStyle: 'italic' }}>{p.reason}</span>
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 10, color: '#9ca3af' }}>
+                No trade available right now.{' '}
+                {m.bias && m.bias.verdict !== 'WAIT'
+                  ? `Leaning ${m.bias.verdict === 'BUY' ? 'bullish' : 'bearish'} (${m.bias.factors.join(', ')}) — waiting for an OB/FVG tap or OTE pullback to give a clean entry.`
+                  : 'Confluences are mixed — stand aside until structure, zone, and liquidity agree.'}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ICTPanel({ onChart }) {
   const [pairData, setPairData]   = useState({});
   const [loadingSet, setLoadingSet] = useState({});
@@ -3021,6 +3124,9 @@ function ICTPanel({ onChart }) {
         </div>
         <button onClick={() => ICT_PAIRS.forEach(p => fetchPair(p.symbol))} style={{ background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: 6, padding: '5px 10px', color: '#a5b4fc', fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>↻ Refresh</button>
       </div>
+
+      {/* Gold & silver: one clear instruction — BUY/SELL with levels, or WAIT */}
+      <MetalsTradePlan onChart={onChart} />
 
       {/* Institutional Order Flow grid */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
