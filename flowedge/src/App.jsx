@@ -2954,7 +2954,7 @@ function ictAnalyze(candles, currentPrice) {
 
 // One clear instruction per metal: BUY or SELL with entry/SL/TP, or WAIT.
 // Checks the daily ICT engine first, then 15m intraday, then 5m scalp.
-function MetalsTradePlan({ onChart }) {
+function MetalsTradePlan({ onChart, livePrices }) {
   const [plans, setPlans] = useState({});
   const inflight = useRef({});
 
@@ -3011,7 +3011,7 @@ function MetalsTradePlan({ onChart }) {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span style={{ fontWeight: 900, fontSize: 13, color: '#f9fafb' }}>{m.name}</span>
-                <span style={{ fontSize: 12, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>{fp(m.price)}</span>
+                <span style={{ fontSize: 12, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>{fp(livePrices?.[sym] ?? m.price)}</span>
                 {onChart && (
                   <button onClick={() => onChart(TV_SYMBOLS[sym] || sym)} title="Open TradingView chart" style={{
                     background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 4,
@@ -3055,7 +3055,7 @@ function MetalsTradePlan({ onChart }) {
   );
 }
 
-function ICTPanel({ onChart }) {
+function ICTPanel({ onChart, livePrices }) {
   const [pairData, setPairData]   = useState({});
   const [loadingSet, setLoadingSet] = useState({});
   const [selected, setSelected]   = useState(null);
@@ -3126,7 +3126,7 @@ function ICTPanel({ onChart }) {
       </div>
 
       {/* Gold & silver: one clear instruction — BUY/SELL with levels, or WAIT */}
-      <MetalsTradePlan onChart={onChart} />
+      <MetalsTradePlan onChart={onChart} livePrices={livePrices} />
 
       {/* Institutional Order Flow grid */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -3170,7 +3170,7 @@ function ICTPanel({ onChart }) {
         const pair  = ICT_PAIRS.find(p => p.symbol === selected);
         const d     = pairData[selected];
         const a     = d.analysis;
-        const price = d.meta?.regularMarketPrice || d.candles?.[d.candles.length - 1]?.close;
+        const price = livePrices?.[selected] ?? (d.meta?.regularMarketPrice || d.candles?.[d.candles.length - 1]?.close);
         const fp    = p => fmtPx(selected, p);
         const dc    = a.signal === 'long' ? '#10b981' : '#ef4444';
         const tc    = typeColor[a.signalType] || '#9ca3af';
@@ -3302,7 +3302,7 @@ function ICTPanel({ onChart }) {
         .map(pair => {
         const d     = pairData[pair.symbol];
         const a     = d.analysis;
-        const price = d.meta?.regularMarketPrice || d.candles?.[d.candles.length - 1]?.close;
+        const price = livePrices?.[pair.symbol] ?? (d.meta?.regularMarketPrice || d.candles?.[d.candles.length - 1]?.close);
         const bias  = a.bias || { verdict: 'WAIT', conf: 50, factors: [] };
         const vc    = bias.verdict === 'BUY' ? '#10b981' : bias.verdict === 'SELL' ? '#ef4444' : '#6b7280';
         const dc    = a.signal ? (a.signal === 'long' ? '#10b981' : '#ef4444') : vc;
@@ -3618,7 +3618,7 @@ function ICTCandleChart({ candles, zones = [], eq, bsl = [], ssl = [], sig, sym,
   );
 }
 
-function ScalpPanel({ onChart }) {
+function ScalpPanel({ onChart, livePrices }) {
   const [pairData, setPairData] = useState({});
   const [modeFilter, setModeFilter] = useState('all');
   const inflightRef   = useRef({});
@@ -3811,7 +3811,7 @@ function ScalpPanel({ onChart }) {
                 }}>📈 TV</button>
               )}
             </div>
-            <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>{d ? fmtPx(pair.symbol, d.price) : '…'}</span>
+            <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>{d ? fmtPx(pair.symbol, livePrices?.[pair.symbol] ?? d.price) : '…'}</span>
           </div>
           {d ? (
             <>
@@ -4728,6 +4728,9 @@ export default function App() {
   const [addInput, setAddInput] = useState("");
   const [stocks, setStocks] = useState([]);
   const priceHistoryRef = useRef({});
+  const fetchStocksInflightRef = useRef(false);
+  const firstLoadRef = useRef(true);
+  const lastHistPushRef = useRef(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [pulse, setPulse] = useState(true);
@@ -4895,7 +4898,9 @@ export default function App() {
 
   const fetchStocks = useCallback(async () => {
     if (!watchlist.length) return;
-    setLoading(true);
+    if (fetchStocksInflightRef.current) return; // 1s loop — never stack requests
+    fetchStocksInflightRef.current = true;
+    if (firstLoadRef.current) setLoading(true); // only flash LOADING on the very first fetch
     setError("");
     try {
       const res = await fetch(`/api/quotes?symbols=${watchlist.join(",")}`);
@@ -4903,9 +4908,13 @@ export default function App() {
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       const results = data?.quoteResponse?.result || [];
       if (!results.length) throw new Error("No data returned");
+      // Sparklines sample once a minute so they keep showing ~30 min of history,
+      // even though prices themselves now update every second
+      const pushHist = Date.now() - lastHistPushRef.current >= 60000;
+      if (pushHist) lastHistPushRef.current = Date.now();
       const withHistory = results.map(q => {
         const h = priceHistoryRef.current[q.symbol] ? [...priceHistoryRef.current[q.symbol]] : [];
-        if (q.regularMarketPrice) h.push(q.regularMarketPrice);
+        if (q.regularMarketPrice && (pushHist || !h.length)) h.push(q.regularMarketPrice);
         if (h.length > 30) h.shift();
         priceHistoryRef.current[q.symbol] = h;
         return { ...q, priceHistory: h };
@@ -4915,6 +4924,8 @@ export default function App() {
     } catch (e) {
       setError(e.message);
     } finally {
+      firstLoadRef.current = false;
+      fetchStocksInflightRef.current = false;
       setLoading(false);
     }
   }, [watchlist]);
@@ -4935,6 +4946,18 @@ export default function App() {
       setForexData(fxData?.quoteResponse?.result || []);
     } catch {}
   }, []);
+
+  // Live 1s price map for the ICT/Scalp/Metals tabs — overrides the slower
+  // candle-derived prices (the OHLCV edge cache is 30-300s)
+  const livePrices = useMemo(() => {
+    const map = {};
+    forexData.forEach(d => {
+      if (d?.regularMarketPrice == null) return;
+      const key = d.symbol === 'GC=F' ? 'XAUUSD' : d.symbol === 'SI=F' ? 'XAGUSD' : d.symbol;
+      map[key] = d.regularMarketPrice;
+    });
+    return map;
+  }, [forexData]);
 
   useEffect(() => { fetchMarketContext(); }, [fetchMarketContext]);
   useEffect(() => {
@@ -5009,21 +5032,11 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  // Auto-refresh quotes every 60 seconds
-  const [nextRefresh, setNextRefresh] = useState(60);
-  const refreshRef = useRef(null);
+  // Live prices — refresh every second (in-flight guard inside fetchStocks
+  // prevents stacking; the 1s edge cache on /api/quotes absorbs the polling)
   useEffect(() => {
-    setNextRefresh(60);
-    refreshRef.current = setInterval(() => {
-      setNextRefresh(prev => {
-        if (prev <= 1) {
-          fetchStocks();
-          return 60;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(refreshRef.current);
+    const t = setInterval(fetchStocks, 1000);
+    return () => clearInterval(t);
   }, [fetchStocks]);
 
   // When resizing from mobile to desktop, "Watch" tab has no desktop equivalent
@@ -5048,7 +5061,7 @@ export default function App() {
   useEffect(() => {
     const handler = (e) => {
       if (['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return;
-      if (e.key === 'r' || e.key === 'R') { fetchStocks(); setNextRefresh(60); }
+      if (e.key === 'r' || e.key === 'R') { fetchStocks(); }
       if (e.key === '/' ) { e.preventDefault(); document.querySelector('input[placeholder*="ticker"]')?.focus(); }
       const tabList = isMobile ? ["Watch", ...TABS] : TABS;
       const n = parseInt(e.key);
@@ -5108,10 +5121,10 @@ export default function App() {
               transition: "all 0.5s"
             }} />
             <span style={{ fontSize: 11, color: error ? "#ef4444" : "#10b981", fontFamily: "monospace" }}>
-              {loading ? "LOADING..." : error ? "ERROR" : `LIVE · ${lastUpdate} · ${nextRefresh}s`}
+              {loading ? "LOADING..." : error ? "ERROR" : `LIVE · ${lastUpdate} · 1s`}
             </span>
           </div>
-          <button onClick={() => { fetchStocks(); setNextRefresh(60); }} style={{
+          <button onClick={() => { fetchStocks(); }} style={{
             background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
             borderRadius: 6, padding: "6px 14px", color: "#9ca3af", fontSize: 11,
             cursor: "pointer", fontWeight: 600,
@@ -5130,7 +5143,7 @@ export default function App() {
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "60vh", gap: 12 }}>
           <div style={{ fontSize: 32 }}>⚠</div>
           <div style={{ color: "#ef4444", fontWeight: 700 }}>{error}</div>
-          <button onClick={() => { fetchStocks(); setNextRefresh(60); }} style={{
+          <button onClick={() => { fetchStocks(); }} style={{
             background: "#6366f1", border: "none", borderRadius: 8, padding: "10px 24px",
             color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: 13,
           }}>Try Again</button>
@@ -5212,8 +5225,8 @@ export default function App() {
                   </div>
                 )}
                 {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
-                {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} />}
-                {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} />}
+                {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "News" && <NewsPanel watchlist={watchlist} />}
                 {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
@@ -5324,8 +5337,8 @@ export default function App() {
 
                 <div style={{ flex: 1, overflowY: "auto" }}>
                   {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
-                  {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} />}
-                  {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} />}
+                  {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                  {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "News" && <NewsPanel watchlist={watchlist} />}
                   {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
