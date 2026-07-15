@@ -4035,7 +4035,7 @@ function NewsPanel({ watchlist }) {
   );
 }
 
-const TABS = ["Signals", "ICT", "News", "Journal", "Portfolio", "Alerts", "Perps", "Account"];
+const TABS = ["Signals", "ICT", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -4492,6 +4492,7 @@ export default function App() {
                 {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                 {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
+                {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
                 {tab === "Perps" && <HyperliquidPanel />}
                 {tab === "Account" && (clerkAvailable ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
               </div>
@@ -4602,6 +4603,7 @@ export default function App() {
                   {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
                   {tab === "Alerts" && <AlertsPanel stocks={stocks} />}
+                  {tab === "Gamma" && <ProGate><GammaPanel stocks={stocks} /></ProGate>}
                   {tab === "Perps" && <HyperliquidPanel />}
                   {tab === "Account" && (clerkAvailable ? <AccountPanel /> : <div style={{ fontSize: 12, color: '#6b7280', padding: 16 }}>Sign in to access account settings.</div>)}
                 </div>
