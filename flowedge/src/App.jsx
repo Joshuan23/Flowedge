@@ -3173,28 +3173,7 @@ function ICTPanel() {
   );
 }
 
-// ─── Forex Intraday / Scalping ──────────────────────────────────────────────
-
-function emaLast(values, period) {
-  if (!values.length) return null;
-  const k = 2 / (period + 1);
-  let e = values[0];
-  for (let i = 1; i < values.length; i++) e = values[i] * k + e * (1 - k);
-  return e;
-}
-
-function rsiLast(closes, period = 14) {
-  if (closes.length < period + 1) return 50;
-  let g = 0, l = 0;
-  for (let i = 1; i <= period; i++) { const d = closes[i] - closes[i - 1]; if (d >= 0) g += d; else l -= d; }
-  let ag = g / period, al = l / period;
-  for (let i = period + 1; i < closes.length; i++) {
-    const d = closes[i] - closes[i - 1];
-    ag = (ag * (period - 1) + Math.max(d, 0)) / period;
-    al = (al * (period - 1) + Math.max(-d, 0)) / period;
-  }
-  return al === 0 ? 100 : 100 - 100 / (1 + ag / al);
-}
+// ─── Forex Intraday / Scalping — ICT method on 5m/15m ──────────────────────
 
 function atrLast(candles, period = 14) {
   if (candles.length < period + 1) return null;
@@ -3216,56 +3195,93 @@ function fxSessions() {
   return s;
 }
 
-// 5-minute scalp entries: EMA9/21 pullback or 20-bar range break
-function scalpSignal(c5, price) {
-  if (!c5 || c5.length < 30) return null;
-  const closes = c5.map(c => c.close);
-  const e9 = emaLast(closes, 9), e21 = emaLast(closes, 21);
-  const rsi = rsiLast(closes);
-  const atr = atrLast(c5);
-  if (!e9 || !e21 || !atr) return null;
+// ICT intraday engine — order blocks, FVGs, OTE fib (62–79%), premium/discount,
+// liquidity sweeps. mode 'scalp' runs on 5m candles, 'intra' on 15m.
+function ictIntradayAnalyze(candles, price, mode) {
+  const isScalp = mode === 'scalp';
+  if (!candles || candles.length < (isScalp ? 40 : 60) || !price) return null;
+  const atr = atrLast(candles);
+  if (!atr) return null;
 
-  const prev20   = c5.slice(-21, -1);
-  const hi20     = Math.max(...prev20.map(c => c.high));
-  const lo20     = Math.min(...prev20.map(c => c.low));
-  const nearE9   = Math.abs(price - e9) <= atr * 0.4;
+  const swings    = ictFindSwings(candles, isScalp ? 2 : 3);
+  const structure = ictMarketStructure(swings);
+  const fvgs      = ictFairValueGaps(candles);
+  const obs       = ictOrderBlocks(candles);
+
+  // Dealing range + equilibrium → premium/discount
+  const rangeBars = candles.slice(isScalp ? -48 : -64);
+  const hi = Math.max(...rangeBars.map(c => c.high));
+  const lo = Math.min(...rangeBars.map(c => c.low));
+  if (hi <= lo) return null;
+  const eq   = (hi + lo) / 2;
+  const zone = price > eq ? 'premium' : 'discount';
+
+  // Fibonacci retracement of the dealing-range leg — OTE = 62–79% pullback
+  const retrLong   = (hi - price) / (hi - lo);
+  const retrShort  = (price - lo) / (hi - lo);
+  const inOTELong  = retrLong  >= 0.62 && retrLong  <= 0.79;
+  const inOTEShort = retrShort >= 0.62 && retrShort <= 0.79;
+
+  // Liquidity pools: BSL above swing highs, SSL below swing lows
+  const bsl  = swings.highs.slice(-3).map(s => s.price);
+  const ssl  = swings.lows.slice(-3).map(s => s.price);
+  const last = candles[candles.length - 1];
+  const sweptBSL = bsl.some(lv => last.high > lv && last.close < lv);
+  const sweptSSL = ssl.some(lv => last.low  < lv && last.close > lv);
+
+  // Is price sitting in an OB or FVG right now?
+  const tol = atr * 0.25;
+  const obLong   = obs.filter(o => o.type === 'bullish').find(o => price >= o.bottom - tol && price <= o.top + tol);
+  const obShort  = obs.filter(o => o.type === 'bearish').find(o => price >= o.bottom - tol && price <= o.top + tol);
+  const fvgLong  = fvgs.filter(f => f.type === 'bullish').find(f => price >= f.bottom && price <= f.top);
+  const fvgShort = fvgs.filter(f => f.type === 'bearish').find(f => price >= f.bottom && price <= f.top);
 
   let dir = null, setup = '', conf = 0, reason = '';
-  if      (e9 > e21 && price > hi20 && rsi < 76) { dir = 'long';  setup = 'BREAK';    conf = 70; reason = `5m break of 20-bar high, EMA9>21 · RSI ${rsi.toFixed(0)}`; }
-  else if (e9 < e21 && price < lo20 && rsi > 24) { dir = 'short'; setup = 'BREAK';    conf = 70; reason = `5m break of 20-bar low, EMA9<21 · RSI ${rsi.toFixed(0)}`; }
-  else if (e9 > e21 && nearE9 && rsi >= 42 && rsi <= 68) { dir = 'long';  setup = 'PULLBACK'; conf = 64; reason = `5m pullback to EMA9 in uptrend · RSI ${rsi.toFixed(0)}`; }
-  else if (e9 < e21 && nearE9 && rsi >= 32 && rsi <= 58) { dir = 'short'; setup = 'PULLBACK'; conf = 64; reason = `5m pullback to EMA9 in downtrend · RSI ${rsi.toFixed(0)}`; }
-  if (!dir) return null;
+  if (sweptSSL && structure !== 'bearish') {
+    dir = 'long';  setup = 'LIQ SWEEP'; conf = isScalp ? 75 : 78;
+    reason = 'SSL swept and reclaimed — smart money reversal long';
+  } else if (sweptBSL && structure !== 'bullish') {
+    dir = 'short'; setup = 'LIQ SWEEP'; conf = isScalp ? 75 : 78;
+    reason = 'BSL swept and rejected — smart money reversal short';
+  } else if (structure === 'bullish' && zone === 'discount') {
+    if      (obLong  && inOTELong) { dir = 'long'; setup = 'OB + OTE';    conf = 74; reason = `Bullish OB tap inside OTE (${(retrLong * 100).toFixed(0)}% retrace) in discount`; }
+    else if (fvgLong && inOTELong) { dir = 'long'; setup = 'FVG + OTE';   conf = 71; reason = `Bullish FVG fill inside OTE (${(retrLong * 100).toFixed(0)}% retrace) in discount`; }
+    else if (obLong)               { dir = 'long'; setup = 'ORDER BLOCK'; conf = 67; reason = 'Price tapping bullish order block in discount zone'; }
+    else if (fvgLong)              { dir = 'long'; setup = 'FVG';         conf = 64; reason = 'Price filling bullish fair value gap in discount zone'; }
+    else if (inOTELong)            { dir = 'long'; setup = 'OTE FIB';     conf = 62; reason = `${(retrLong * 100).toFixed(0)}% fib retracement — optimal trade entry in discount`; }
+  } else if (structure === 'bearish' && zone === 'premium') {
+    if      (obShort  && inOTEShort) { dir = 'short'; setup = 'OB + OTE';    conf = 74; reason = `Bearish OB tap inside OTE (${(retrShort * 100).toFixed(0)}% retrace) in premium`; }
+    else if (fvgShort && inOTEShort) { dir = 'short'; setup = 'FVG + OTE';   conf = 71; reason = `Bearish FVG fill inside OTE (${(retrShort * 100).toFixed(0)}% retrace) in premium`; }
+    else if (obShort)                { dir = 'short'; setup = 'ORDER BLOCK'; conf = 67; reason = 'Price tapping bearish order block in premium zone'; }
+    else if (fvgShort)               { dir = 'short'; setup = 'FVG';         conf = 64; reason = 'Price filling bearish fair value gap in premium zone'; }
+    else if (inOTEShort)             { dir = 'short'; setup = 'OTE FIB';     conf = 62; reason = `${(retrShort * 100).toFixed(0)}% fib retracement — optimal trade entry in premium`; }
+  }
 
-  const sl = dir === 'long' ? price - atr : price + atr;
-  const tp = dir === 'long' ? price + atr * 1.5 : price - atr * 1.5;
-  return { dir, setup, conf, reason, entry: price, sl, tp, rr: '1.5', rsi, atr };
-}
+  let sig = null;
+  if (dir) {
+    // Stop beyond the OB/FVG that defines the entry; target opposite liquidity pool
+    let sl, tp;
+    if (dir === 'long') {
+      const structSL = obLong ? obLong.bottom : fvgLong ? fvgLong.bottom : null;
+      sl = structSL != null ? structSL - atr * 0.3 : price - atr * (isScalp ? 1 : 1.5);
+      const target = bsl.filter(lv => lv > price + atr).sort((a, b) => a - b)[0];
+      tp = target ?? price + atr * (isScalp ? 1.5 : 3);
+    } else {
+      const structSL = obShort ? obShort.top : fvgShort ? fvgShort.top : null;
+      sl = structSL != null ? structSL + atr * 0.3 : price + atr * (isScalp ? 1 : 1.5);
+      const target = ssl.filter(lv => lv < price - atr).sort((a, b) => b - a)[0];
+      tp = target ?? price - atr * (isScalp ? 1.5 : 3);
+    }
+    const risk = Math.abs(price - sl);
+    sig = { dir, setup, conf, reason, entry: price, sl, tp, rr: risk > 0 ? (Math.abs(tp - price) / risk).toFixed(1) : null };
+  }
 
-// 15-minute intraday entries: EMA20/50 trend pullback or 40-bar range break
-function intradaySignal(c15, price) {
-  if (!c15 || c15.length < 60) return null;
-  const closes = c15.map(c => c.close);
-  const e20 = emaLast(closes, 20), e50 = emaLast(closes, 50);
-  const rsi = rsiLast(closes);
-  const atr = atrLast(c15);
-  if (!e20 || !e50 || !atr) return null;
-
-  const prev40  = c15.slice(-41, -1);
-  const hi40    = Math.max(...prev40.map(c => c.high));
-  const lo40    = Math.min(...prev40.map(c => c.low));
-  const nearE20 = Math.abs(price - e20) <= atr * 0.5;
-
-  let dir = null, setup = '', conf = 0, reason = '';
-  if      (e20 > e50 && price > hi40 && rsi < 74) { dir = 'long';  setup = 'BREAK';    conf = 72; reason = `15m break of 40-bar high, EMA20>50 · RSI ${rsi.toFixed(0)}`; }
-  else if (e20 < e50 && price < lo40 && rsi > 26) { dir = 'short'; setup = 'BREAK';    conf = 72; reason = `15m break of 40-bar low, EMA20<50 · RSI ${rsi.toFixed(0)}`; }
-  else if (e20 > e50 && price > e50 && nearE20 && rsi >= 40 && rsi <= 66) { dir = 'long';  setup = 'PULLBACK'; conf = 66; reason = `15m pullback to EMA20 in uptrend · RSI ${rsi.toFixed(0)}`; }
-  else if (e20 < e50 && price < e50 && nearE20 && rsi >= 34 && rsi <= 60) { dir = 'short'; setup = 'PULLBACK'; conf = 66; reason = `15m pullback to EMA20 in downtrend · RSI ${rsi.toFixed(0)}`; }
-  if (!dir) return null;
-
-  const sl = dir === 'long' ? price - atr * 1.5 : price + atr * 1.5;
-  const tp = dir === 'long' ? price + atr * 3 : price - atr * 3;
-  return { dir, setup, conf, reason, entry: price, sl, tp, rr: '2.0', rsi, atr };
+  return {
+    structure, zone, eq, hi, lo,
+    retr: structure === 'bearish' ? retrShort : retrLong,
+    inOTE: structure === 'bearish' ? inOTEShort : inOTELong,
+    fvgCount: fvgs.length, obCount: obs.length, sweptBSL, sweptSSL, sig,
+  };
 }
 
 function ScalpPanel() {
@@ -3286,12 +3302,12 @@ function ScalpPanel() {
       const c5 = d5.candles || [], c15 = d15.candles || [];
       const price = d5.meta?.regularMarketPrice || c5[c5.length - 1]?.close || c15[c15.length - 1]?.close;
       if (price) {
-        const scalp = scalpSignal(c5, price);
-        const intra = intradaySignal(c15, price);
+        const scalp = ictIntradayAnalyze(c5, price, 'scalp');
+        const intra = ictIntradayAnalyze(c15, price, 'intra');
         setPairData(prev => ({ ...prev, [sym]: { price, scalp, intra } }));
 
         // Alert on new/changed entries for both strategies
-        [['SCALP', scalp], ['INTRADAY', intra]].forEach(([mode, sig]) => {
+        [['SCALP', scalp?.sig], ['INTRADAY', intra?.sig]].forEach(([mode, sig]) => {
           const refKey = `${sym}|${mode}`;
           const key = sig ? `${sig.dir}|${sig.setup}` : null;
           const prev = prevAlertRef.current[refKey];
@@ -3332,24 +3348,55 @@ function ScalpPanel() {
   const rows = ICT_PAIRS.map(pair => ({ pair, d: pairData[pair.symbol] }))
     .filter(({ d }) => {
       if (!d) return modeFilter === 'all';
-      if (modeFilter === 'scalp') return !!d.scalp;
-      if (modeFilter === 'intra') return !!d.intra;
-      if (modeFilter === 'active') return !!(d.scalp || d.intra);
+      if (modeFilter === 'scalp') return !!d.scalp?.sig;
+      if (modeFilter === 'intra') return !!d.intra?.sig;
+      if (modeFilter === 'active') return !!(d.scalp?.sig || d.intra?.sig);
       return true;
     });
 
-  const scalpCount = ICT_PAIRS.filter(p => pairData[p.symbol]?.scalp).length;
-  const intraCount = ICT_PAIRS.filter(p => pairData[p.symbol]?.intra).length;
+  const scalpCount = ICT_PAIRS.filter(p => pairData[p.symbol]?.scalp?.sig).length;
+  const intraCount = ICT_PAIRS.filter(p => pairData[p.symbol]?.intra?.sig).length;
   const loaded     = Object.keys(pairData).length;
 
-  const StrategyRow = ({ mode, sig, sym }) => {
+  const structColor = s => s === 'bullish' ? '#10b981' : s === 'bearish' ? '#ef4444' : '#6b7280';
+
+  // ICT context tags shown on every row — structure, zone, fib retrace, OB/FVG counts
+  const CtxTags = ({ a }) => (
+    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+      {[
+        [a.structure === 'bullish' ? 'HH/HL' : a.structure === 'bearish' ? 'LH/LL' : 'RANGING', structColor(a.structure)],
+        [a.zone.toUpperCase(), a.zone === 'discount' ? '#10b981' : '#ef4444'],
+        [`FIB ${(Math.max(0, Math.min(1, a.retr)) * 100).toFixed(0)}%${a.inOTE ? ' OTE✓' : ''}`, a.inOTE ? '#f59e0b' : '#6b7280'],
+        [`OB ${a.obCount}`, a.obCount > 0 ? '#3b82f6' : '#374151'],
+        [`FVG ${a.fvgCount}`, a.fvgCount > 0 ? '#8b5cf6' : '#374151'],
+        ...(a.sweptSSL ? [['SSL SWEPT', '#f59e0b']] : []),
+        ...(a.sweptBSL ? [['BSL SWEPT', '#f59e0b']] : []),
+      ].map(([text, color]) => (
+        <span key={text} style={{ fontSize: 8, fontFamily: 'monospace', fontWeight: 700, color, background: `${color}12`, padding: '1px 5px', borderRadius: 3 }}>{text}</span>
+      ))}
+    </div>
+  );
+
+  const StrategyRow = ({ mode, a, sym }) => {
     const mc = mode === 'SCALP' ? '#f59e0b' : '#3b82f6';
     const fp = p => fmtPx(sym, p);
-    if (!sig) {
+    if (!a) {
       return (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.015)', border: '1px solid rgba(255,255,255,0.04)' }}>
           <span style={{ fontSize: 8, fontWeight: 800, color: mc, background: `${mc}14`, padding: '1px 5px', borderRadius: 3 }}>{mode}</span>
-          <span style={{ fontSize: 9, color: '#374151', fontWeight: 700 }}>WAITING — no setup</span>
+          <span style={{ fontSize: 9, color: '#374151', fontWeight: 700 }}>Not enough intraday data</span>
+        </div>
+      );
+    }
+    const sig = a.sig;
+    if (!sig) {
+      return (
+        <div style={{ padding: '5px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.015)', border: '1px solid rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 8, fontWeight: 800, color: mc, background: `${mc}14`, padding: '1px 5px', borderRadius: 3 }}>{mode}</span>
+            <span style={{ fontSize: 9, color: '#374151', fontWeight: 700 }}>WAITING — no OB/FVG/OTE confluence</span>
+          </div>
+          <CtxTags a={a} />
         </div>
       );
     }
@@ -3367,13 +3414,14 @@ function ScalpPanel() {
         </div>
         <div style={{ fontSize: 9, color: '#9ca3af', fontStyle: 'italic' }}>{sig.reason}</div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
-          {[['Entry', fp(sig.entry), '#e5e7eb'], ['TP', fp(sig.tp), '#10b981'], ['SL', fp(sig.sl), '#ef4444'], ['RR', `${sig.rr}×`, '#a5b4fc']].map(([lbl, val, color]) => (
+          {[['Entry', fp(sig.entry), '#e5e7eb'], ['TP', fp(sig.tp), '#10b981'], ['SL', fp(sig.sl), '#ef4444'], ['RR', sig.rr ? `${sig.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
             <div key={lbl} style={{ padding: '3px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
               <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{lbl}</div>
               <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
             </div>
           ))}
         </div>
+        <CtxTags a={a} />
       </div>
     );
   };
@@ -3383,8 +3431,8 @@ function ScalpPanel() {
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
-          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb', letterSpacing: '-0.01em' }}>FX Intraday & Scalping</div>
-          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>5m scalps · 15m intraday · EMA pullbacks & range breaks</div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb', letterSpacing: '-0.01em' }}>FX Intraday & Scalping — ICT</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>5m scalps · 15m intraday · Order Blocks · FVGs · OTE Fib · Premium/Discount</div>
         </div>
         <div style={{ fontSize: 9, fontFamily: 'monospace', color: '#4b5563' }}>{loaded}/{ICT_PAIRS.length} pairs</div>
       </div>
@@ -3425,8 +3473,8 @@ function ScalpPanel() {
           </div>
           {d ? (
             <>
-              <StrategyRow mode="SCALP" sig={d.scalp} sym={pair.symbol} />
-              <StrategyRow mode="INTRADAY" sig={d.intra} sym={pair.symbol} />
+              <StrategyRow mode="SCALP" a={d.scalp} sym={pair.symbol} />
+              <StrategyRow mode="INTRADAY" a={d.intra} sym={pair.symbol} />
             </>
           ) : (
             <div style={{ fontSize: 9, color: '#374151' }}>Loading 5m/15m candles…</div>
@@ -3437,12 +3485,12 @@ function ScalpPanel() {
       {rows.length === 0 && (
         <div style={{ padding: 20, textAlign: 'center', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
           <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>No pairs match this filter</div>
-          <div style={{ fontSize: 10, color: '#374151' }}>Entries appear when price sets up at an EMA pullback or range break</div>
+          <div style={{ fontSize: 10, color: '#374151' }}>Entries appear when price taps an order block, fills an FVG, or reaches the 62–79% OTE fib in the right zone</div>
         </div>
       )}
 
       <div style={{ fontSize: 9, color: '#374151', textAlign: 'center', paddingTop: 4 }}>
-        Scalp: 1×ATR stop / 1.5×ATR target · Intraday: 1.5×ATR stop / 3×ATR target · Educational use only
+        ICT intraday — stops beyond the OB/FVG, targets at opposite liquidity · Longs only in discount, shorts only in premium · Educational use only
       </div>
     </div>
   );
