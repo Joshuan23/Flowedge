@@ -2767,8 +2767,8 @@ const ICT_PAIRS = [
   { symbol: 'USDCAD=X',  name: 'USD/CAD' },
   { symbol: 'NZDUSD=X',  name: 'NZD/USD' },
   { symbol: 'GBPJPY=X',  name: 'GBP/JPY' },
-  { symbol: 'GC=F',      name: 'XAU/USD' },
-  { symbol: 'SI=F',      name: 'XAG/USD' },
+  { symbol: 'XAUUSD',    name: 'XAU/USD' },
+  { symbol: 'XAGUSD',    name: 'XAG/USD' },
 ];
 
 function ictFindSwings(candles, lookback = 3) {
@@ -2959,8 +2959,8 @@ function ICTPanel({ onChart }) {
 
   const fmtPx = (sym, p) => {
     if (!p) return '—';
-    if (sym?.startsWith('GC=')) return p.toFixed(2);
-    if (sym?.startsWith('SI=')) return p.toFixed(3);
+    if (sym?.startsWith('XAUUSD')) return p.toFixed(2);
+    if (sym?.startsWith('XAGUSD')) return p.toFixed(3);
     return p >= 100 ? p.toFixed(3) : p.toFixed(4);
   };
 
@@ -3339,7 +3339,7 @@ const TV_SYMBOLS = {
   'EURUSD=X': 'FX:EURUSD', 'GBPUSD=X': 'FX:GBPUSD', 'USDJPY=X': 'FX:USDJPY',
   'USDCHF=X': 'FX:USDCHF', 'AUDUSD=X': 'FX:AUDUSD', 'USDCAD=X': 'FX:USDCAD',
   'NZDUSD=X': 'FX:NZDUSD', 'GBPJPY=X': 'FX:GBPJPY',
-  'GC=F': 'OANDA:XAUUSD', 'SI=F': 'OANDA:XAGUSD',
+  'XAUUSD': 'OANDA:XAUUSD', 'XAGUSD': 'OANDA:XAGUSD',
 };
 
 // Shared ICT candle chart — used by both the ICT (daily) and Scalp (intraday)
@@ -3362,7 +3362,7 @@ function ICTCandleChart({ candles, zones = [], eq, bsl = [], ssl = [], sig, sym,
   const x  = i => 2 + (i / data.length) * (plotW - 4);
   const cw = Math.max(1.2, ((plotW - 4) / data.length) * 0.62);
   const inRange = v => v != null && v >= lo && v <= hi;
-  const fp = p => sym?.startsWith('GC=') ? p.toFixed(2) : sym?.startsWith('SI=') ? p.toFixed(3) : p >= 100 ? p.toFixed(2) : p.toFixed(4);
+  const fp = p => sym?.startsWith('XAUUSD') ? p.toFixed(2) : sym?.startsWith('XAGUSD') ? p.toFixed(3) : p >= 100 ? p.toFixed(2) : p.toFixed(4);
   const dc = sig ? (sig.dir === 'long' ? '#10b981' : '#ef4444') : '#6b7280';
 
   // Liquidity sweeps within the visible window: a wick through a BSL/SSL level
@@ -3502,8 +3502,8 @@ function ScalpPanel({ onChart }) {
 
   const fmtPx = (sym, p) => {
     if (p == null) return '—';
-    if (sym?.startsWith('GC=')) return p.toFixed(2);
-    if (sym?.startsWith('SI=')) return p.toFixed(3);
+    if (sym?.startsWith('XAUUSD')) return p.toFixed(2);
+    if (sym?.startsWith('XAGUSD')) return p.toFixed(3);
     return p >= 100 ? p.toFixed(3) : p.toFixed(4);
   };
 

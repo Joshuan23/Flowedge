@@ -52,6 +52,25 @@ export default async function handler(req) {
       results = results.filter(Boolean);
     }
 
+    // Re-anchor metal futures quotes onto live spot (matches TradingView OANDA spot)
+    const METALS = { 'GC=F': 'XAU', 'SI=F': 'XAG' };
+    await Promise.all(results.filter(r => METALS[r.symbol]).map(async r => {
+      try {
+        const s = await fetch(`https://api.gold-api.com/price/${METALS[r.symbol]}`, {
+          headers: { 'User-Agent': UA, 'Accept': 'application/json' },
+        }).then(x => x.json());
+        const spot = s?.price, ref = r.regularMarketPrice;
+        if (spot > 0 && ref > 0) {
+          const k = spot / ref;
+          for (const f of ['regularMarketPrice', 'regularMarketDayHigh', 'regularMarketDayLow', 'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'regularMarketPreviousClose']) {
+            if (r[f] != null) r[f] = r[f] * k;
+          }
+          if (r.regularMarketPreviousClose != null) r.regularMarketChange = r.regularMarketPrice - r.regularMarketPreviousClose;
+          r.spotAnchored = true;
+        }
+      } catch {}
+    }));
+
     return new Response(
       JSON.stringify({ quoteResponse: { result: results, error: null } }),
       { headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 's-maxage=1, stale-while-revalidate=2' } }
