@@ -718,6 +718,21 @@ function AlertsPanel({ stocks }) {
   const [adding, setAdding] = useState(false);
   const firedRef = useRef(new Set());
 
+  // Live feed of forex/ICT signal alerts (written by the signal engines)
+  const [signalLog, setSignalLog] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('fe_signal_alerts') || '[]'); } catch { return []; }
+  });
+  useEffect(() => {
+    const t = setInterval(() => {
+      try { setSignalLog(JSON.parse(localStorage.getItem('fe_signal_alerts') || '[]')); } catch {}
+    }, 2000);
+    return () => clearInterval(t);
+  }, []);
+  const clearSignalLog = () => {
+    try { localStorage.setItem('fe_signal_alerts', '[]'); } catch {}
+    setSignalLog([]);
+  };
+
   useEffect(() => {
     localStorage.setItem("fe_alerts", JSON.stringify(alerts));
   }, [alerts]);
@@ -776,6 +791,42 @@ function AlertsPanel({ stocks }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {signalLog.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>SIGNAL ALERTS — FOREX & ICT</span>
+            <button onClick={clearSignalLog} style={{ background: 'none', border: 'none', color: '#4b5563', fontSize: 9, cursor: 'pointer', padding: 0 }}>clear</button>
+          </div>
+          {signalLog.slice(0, 15).map(s => {
+            const dc = s.dir === 'long' ? '#10b981' : '#ef4444';
+            const sc = s.source === 'ICT' ? '#8b5cf6' : '#3b82f6';
+            const fmtP = p => p == null ? '' : p >= 100 ? p.toFixed(2) : p >= 10 ? p.toFixed(3) : p.toFixed(4);
+            const ago = (() => {
+              const m = Math.floor((Date.now() - s.time) / 60000);
+              return m < 1 ? 'now' : m < 60 ? `${m}m ago` : `${Math.floor(m / 60)}h ago`;
+            })();
+            return (
+              <div key={s.id} style={{ padding: '7px 10px', borderRadius: 7, background: `${dc}06`, border: `1px solid ${dc}20`, borderLeft: `3px solid ${dc}` }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span style={{ fontSize: 8, fontWeight: 800, color: sc, background: `${sc}18`, padding: '1px 4px', borderRadius: 3 }}>{s.source}</span>
+                    <span style={{ fontWeight: 800, fontSize: 11, color: '#f9fafb' }}>{s.name}</span>
+                    <span style={{ fontSize: 8, fontWeight: 800, color: dc }}>{s.dir === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
+                    <span style={{ fontSize: 8, color: '#6b7280', fontWeight: 700 }}>{s.type}</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    {s.price != null && <span style={{ fontSize: 9, fontFamily: 'monospace', color: '#9ca3af' }}>{fmtP(s.price)}</span>}
+                    <span style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 800, color: s.conf >= 70 ? '#10b981' : '#f59e0b' }}>{s.conf}%</span>
+                    <span style={{ fontSize: 8, color: '#374151' }}>{ago}</span>
+                  </div>
+                </div>
+                <div style={{ fontSize: 9, color: '#6b7280', fontStyle: 'italic', marginTop: 2 }}>{s.reason}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {alerts.map(a => {
         const priceMap = Object.fromEntries(stocks.map(s => [s.symbol, s.regularMarketPrice]));
         const currentPrice = priceMap[a.symbol];
@@ -2648,8 +2699,17 @@ function scoreCommoditySignal(d) {
 const FX_NAMES = {
   'EURUSD=X': 'EUR/USD', 'GBPUSD=X': 'GBP/USD', 'USDJPY=X': 'USD/JPY',
   'USDCHF=X': 'USD/CHF', 'AUDUSD=X': 'AUD/USD', 'USDCAD=X': 'USD/CAD', 'NZDUSD=X': 'NZD/USD',
-  'XAUUSD=X': 'XAU/USD', 'XAGUSD=X': 'XAG/USD',
+  'GBPJPY=X': 'GBP/JPY', 'XAUUSD=X': 'XAU/USD', 'XAGUSD=X': 'XAG/USD',
 };
+
+// Persistent signal-alert feed shared by forex + ICT engines (shown in Alerts tab)
+function logSignalAlert(entry) {
+  try {
+    const log = JSON.parse(localStorage.getItem('fe_signal_alerts') || '[]');
+    log.unshift({ ...entry, id: Date.now() + Math.random(), time: Date.now() });
+    localStorage.setItem('fe_signal_alerts', JSON.stringify(log.slice(0, 50)));
+  } catch {}
+}
 
 function scoreForexSignal(d) {
   const price = d?.regularMarketPrice;
@@ -2858,12 +2918,16 @@ function ICTPanel() {
         setPairData(prev => ({ ...prev, [sym]: { candles: data.candles, meta: data.meta, analysis } }));
         if (analysis?.signal) {
           const key = analysis.signal + analysis.signalType;
-          if (prevSignalsRef.current[sym] && prevSignalsRef.current[sym] !== key && Notification.permission === 'granted') {
+          const prev = prevSignalsRef.current[sym];
+          if (prev !== key) {
             const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
-            new Notification(`FlowEdge ICT — ${name}`, {
-              body: `${analysis.signal.toUpperCase()} ${analysis.signalType.replace('_', ' ')} · ${analysis.confidence}%\n${analysis.reason}`,
-              icon: '/icon.png',
-            });
+            logSignalAlert({ source: 'ICT', name, dir: analysis.signal, type: analysis.signalType.replace('_', ' '), conf: analysis.confidence, reason: analysis.reason, price: analysis.entry });
+            if (prev !== undefined && Notification.permission === 'granted') {
+              new Notification(`FlowEdge ICT — ${name}`, {
+                body: `${analysis.signal.toUpperCase()} ${analysis.signalType.replace('_', ' ')} · ${analysis.confidence}%\n${analysis.reason}`,
+                icon: '/icon.png',
+              });
+            }
           }
           prevSignalsRef.current[sym] = key;
         }
@@ -4183,7 +4247,7 @@ export default function App() {
       const [ctxRes, secRes, fxRes] = await Promise.all([
         fetch('/api/quotes?symbols=SPY,QQQ,IWM,%5EVIX,BZ%3DF,CL%3DF,BTC-USD,%5ETNX,EURUSD%3DX,GBPUSD%3DX,USDJPY%3DX'),
         fetch('/api/quotes?symbols=XLK,XLF,XLV,XLC,XLY,XLP,XLE,XLI,XLB,XLRE,XLU'),
-        fetch('/api/quotes?symbols=EURUSD%3DX,GBPUSD%3DX,USDJPY%3DX,USDCHF%3DX,AUDUSD%3DX,USDCAD%3DX,NZDUSD%3DX'),
+        fetch('/api/quotes?symbols=EURUSD%3DX,GBPUSD%3DX,USDJPY%3DX,USDCHF%3DX,AUDUSD%3DX,USDCAD%3DX,NZDUSD%3DX,GBPJPY%3DX,XAUUSD%3DX,XAGUSD%3DX'),
       ]);
       const [ctxData, secData, fxData] = await Promise.all([ctxRes.json(), secRes.json(), fxRes.json()]);
       setMarketContext(ctxData?.quoteResponse?.result || []);
@@ -4194,9 +4258,31 @@ export default function App() {
 
   useEffect(() => { fetchMarketContext(); }, [fetchMarketContext]);
   useEffect(() => {
-    const t = setInterval(fetchMarketContext, 60000);
+    const t = setInterval(fetchMarketContext, 1000);
     return () => clearInterval(t);
   }, [fetchMarketContext]);
+
+  // Forex signal auto-alerts — fires on new/changed signals no matter which tab is open
+  const fxAlertRef = useRef({});
+  useEffect(() => {
+    if (!forexData.length) return;
+    forexData.forEach(d => {
+      const sig = scoreForexSignal(d);
+      if (!sig) return;
+      const key = `${sig.dir}|${sig.type}`;
+      const prev = fxAlertRef.current[d.symbol];
+      if (prev === key) return;
+      fxAlertRef.current[d.symbol] = key;
+      logSignalAlert({ source: 'FOREX', name: sig.name, dir: sig.dir, type: sig.type, conf: sig.conf, reason: sig.reason, price: sig.entry });
+      // Skip the browser popup on first observation (page load) — only notify on changes
+      if (prev !== undefined && Notification.permission === 'granted') {
+        new Notification(`FlowEdge Forex — ${sig.name}`, {
+          body: `${sig.dir.toUpperCase()} ${sig.type} · ${sig.conf}%\n${sig.reason}`,
+          icon: '/favicon.ico',
+        });
+      }
+    });
+  }, [forexData]);
 
   // Auto-refresh quotes every 60 seconds
   const [nextRefresh, setNextRefresh] = useState(60);

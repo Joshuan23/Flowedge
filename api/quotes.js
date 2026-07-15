@@ -54,7 +54,7 @@ export default async function handler(req) {
 
     return new Response(
       JSON.stringify({ quoteResponse: { result: results, error: null } }),
-      { headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }
+      { headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 's-maxage=1, stale-while-revalidate=2' } }
     );
   } catch (e) {
     return new Response(JSON.stringify({ error: e.message }), { status: 500 });
