@@ -215,11 +215,18 @@ function MarketContextBar({ contextData }) {
       {contextData.filter(d => d && !String(d.symbol).includes('VIX')).map(d => {
         const up = (d.regularMarketChangePercent ?? 0) >= 0;
         const c = up ? '#10b981' : '#ef4444';
-        const label = { 'BZ=F': 'BRENT', 'CL=F': 'WTI', 'GC=F': 'GOLD', 'SI=F': 'SILVER', 'BTC-USD': 'BTC', '^TNX': '10Y' }[d.symbol] || d.symbol;
+        const label = {
+          'BZ=F': 'BRENT', 'CL=F': 'WTI', 'GC=F': 'GOLD', 'SI=F': 'SILVER',
+          'BTC-USD': 'BTC', '^TNX': '10Y',
+          ...Object.fromEntries(Object.entries(FX_NAMES).map(([k, v]) => [k, v])),
+        }[d.symbol] || d.symbol;
+        const isFx = d.symbol?.endsWith('=X');
         const priceStr = d.symbol === '^TNX'
           ? `${d.regularMarketPrice?.toFixed(2)}%`
           : d.symbol === 'BTC-USD'
           ? `$${((d.regularMarketPrice || 0) / 1000).toFixed(1)}k`
+          : isFx
+          ? ((d.regularMarketPrice || 0) >= 10 ? (d.regularMarketPrice || 0).toFixed(3) : (d.regularMarketPrice || 0).toFixed(4))
           : `$${d.regularMarketPrice?.toFixed(2)}`;
         return (
           <div key={d.symbol} style={{
@@ -2638,7 +2645,48 @@ function scoreCommoditySignal(d) {
   };
 }
 
-function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan, vixVal, sectorData, onTrade, commodities }) {
+const FX_NAMES = {
+  'EURUSD=X': 'EUR/USD', 'GBPUSD=X': 'GBP/USD', 'USDJPY=X': 'USD/JPY',
+  'USDCHF=X': 'USD/CHF', 'AUDUSD=X': 'AUD/USD', 'USDCAD=X': 'USD/CAD', 'NZDUSD=X': 'NZD/USD',
+};
+
+function scoreForexSignal(d) {
+  const price = d?.regularMarketPrice;
+  if (!price) return null;
+  const hi52 = d.fiftyTwoWeekHigh;
+  const lo52 = d.fiftyTwoWeekLow;
+  if (!hi52 || !lo52 || hi52 <= lo52) return null;
+
+  const range  = hi52 - lo52;
+  const pos    = (price - lo52) / range;
+  const chgPct = d.regularMarketChangePercent ?? 0;
+  const dayHi  = d.regularMarketDayHigh ?? price;
+  const dayLo  = d.regularMarketDayLow  ?? price;
+  const atrPct = Math.max(((dayHi - dayLo) / price) * 100, 0.15);
+
+  let dir = null, type = '', conf = 0, reason = '';
+
+  if      (pos > 0.93 && chgPct > 0)          { dir = 'short'; type = 'RESIST';  conf = 67; reason = `Near 52W high — overbought resistance zone`; }
+  else if (pos < 0.07 && chgPct < 0)          { dir = 'long';  type = 'SUPPORT'; conf = 70; reason = `Near 52W low — oversold support zone`; }
+  else if (chgPct >  0.5 && pos > 0.55)       { dir = 'long';  type = 'TREND';   conf = Math.min(72, 56 + Math.abs(chgPct) * 5); reason = `+${chgPct.toFixed(2)}% daily — uptrend momentum`; }
+  else if (chgPct < -0.5 && pos < 0.45)       { dir = 'short'; type = 'TREND';   conf = Math.min(70, 54 + Math.abs(chgPct) * 5); reason = `${chgPct.toFixed(2)}% daily — downtrend momentum`; }
+  else if (pos > 0.96)                         { dir = 'long';  type = 'BREAK';   conf = 62; reason = `Pressing 52W highs — potential upside breakout`; }
+  else if (pos < 0.04)                         { dir = 'short'; type = 'BREAK';   conf = 62; reason = `Pressing 52W lows — potential breakdown`; }
+
+  if (!dir) return null;
+
+  const slPct = (atrPct * 1.5) / 100;
+  const tpPct = (atrPct * 2.5) / 100;
+  return {
+    dir, type, conf: Math.round(conf), reason, pos, entry: price, chgPct,
+    name: FX_NAMES[d.symbol] || d.symbol,
+    sl: dir === 'long' ? price * (1 - slPct) : price * (1 + slPct),
+    tp: dir === 'long' ? price * (1 + tpPct) : price * (1 - tpPct),
+    rr: (tpPct / slPct).toFixed(1),
+  };
+}
+
+function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan, vixVal, sectorData, onTrade, commodities, forexData }) {
   const now = useNow(60000);
   const [filter, setFilter] = useState('all');
 
@@ -2711,6 +2759,52 @@ function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan
                   <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>{sig.reason}</div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 3 }}>
                     {[['Entry', `$${fmtPx(sig.entry)}`, '#e5e7eb'], ['TP', `$${fmtPx(sig.tp)}`, '#10b981'], ['SL', `$${fmtPx(sig.sl)}`, '#ef4444'], ['RR', `${sig.rr}×`, '#a5b4fc']].map(([label, val, color]) => (
+                      <div key={label} style={{ padding: '3px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
+                        <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{label}</div>
+                        <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                    {[
+                      [`${sig.chgPct >= 0 ? '▲' : '▼'} ${Math.abs(sig.chgPct).toFixed(2)}% 24h`, sig.chgPct >= 0 ? '#10b981' : '#ef4444'],
+                      [`52W pos: ${(sig.pos * 100).toFixed(0)}%`, '#6b7280'],
+                    ].map(([text, color]) => (
+                      <span key={text} style={{ fontSize: 9, fontFamily: 'monospace', color, background: `${color}12`, padding: '1px 5px', borderRadius: 3 }}>{text}</span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
+
+      {/* Forex signals */}
+      {forexData?.length > 0 && (() => {
+        const scored = forexData.map(d => ({ d, sig: scoreForexSignal(d) })).filter(x => x.sig);
+        if (!scored.length) return null;
+        const typeColor = { RESIST: '#ef4444', SUPPORT: '#10b981', TREND: '#3b82f6', BREAK: '#f59e0b' };
+        const fmtFx = p => p >= 100 ? p.toFixed(2) : p >= 10 ? p.toFixed(3) : p.toFixed(4);
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>FOREX SIGNALS</div>
+            {scored.map(({ d, sig }) => {
+              const dirColor = sig.dir === 'long' ? '#10b981' : '#ef4444';
+              const tc = typeColor[sig.type] || '#9ca3af';
+              return (
+                <div key={d.symbol} style={{ padding: '9px 11px', borderRadius: 9, background: `${dirColor}07`, border: `1px solid ${dirColor}25`, display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontWeight: 900, fontSize: 12, color: '#f9fafb' }}>{sig.name}</span>
+                      <span style={{ padding: '1px 5px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${dirColor}20`, color: dirColor }}>{sig.dir === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
+                      <span style={{ padding: '1px 5px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${tc}18`, color: tc }}>{sig.type}</span>
+                    </div>
+                    <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 800, color: sig.conf >= 65 ? '#10b981' : '#f59e0b' }}>{sig.conf}%</span>
+                  </div>
+                  <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>{sig.reason}</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 3 }}>
+                    {[['Entry', fmtFx(sig.entry), '#e5e7eb'], ['TP', fmtFx(sig.tp), '#10b981'], ['SL', fmtFx(sig.sl), '#ef4444'], ['RR', `${sig.rr}×`, '#a5b4fc']].map(([label, val, color]) => (
                       <div key={label} style={{ padding: '3px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
                         <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{label}</div>
                         <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
@@ -3482,6 +3576,7 @@ export default function App() {
   const [brokerConnected, setBrokerConnected] = useState(false);
   const [marketContext, setMarketContext] = useState([]);
   const [sectorData, setSectorData] = useState([]);
+  const [forexData, setForexData] = useState([]);
   const [watchlistSort, setWatchlistSort] = useState('default');
   const [watchlistView, setWatchlistView] = useState('cards');
   const [watchlistFilter, setWatchlistFilter] = useState('all');
@@ -3667,13 +3762,15 @@ export default function App() {
   // Market context (SPY/QQQ/IWM/VIX) — fetched separately, auto-refresh
   const fetchMarketContext = useCallback(async () => {
     try {
-      const [ctxRes, secRes] = await Promise.all([
-        fetch('/api/quotes?symbols=SPY,QQQ,IWM,%5EVIX,BZ%3DF,CL%3DF,BTC-USD,%5ETNX'),
+      const [ctxRes, secRes, fxRes] = await Promise.all([
+        fetch('/api/quotes?symbols=SPY,QQQ,IWM,%5EVIX,BZ%3DF,CL%3DF,BTC-USD,%5ETNX,EURUSD%3DX,GBPUSD%3DX,USDJPY%3DX'),
         fetch('/api/quotes?symbols=XLK,XLF,XLV,XLC,XLY,XLP,XLE,XLI,XLB,XLRE,XLU'),
+        fetch('/api/quotes?symbols=EURUSD%3DX,GBPUSD%3DX,USDJPY%3DX,USDCHF%3DX,AUDUSD%3DX,USDCAD%3DX,NZDUSD%3DX'),
       ]);
-      const [ctxData, secData] = await Promise.all([ctxRes.json(), secRes.json()]);
+      const [ctxData, secData, fxData] = await Promise.all([ctxRes.json(), secRes.json(), fxRes.json()]);
       setMarketContext(ctxData?.quoteResponse?.result || []);
       setSectorData(secData?.quoteResponse?.result || []);
+      setForexData(fxData?.quoteResponse?.result || []);
     } catch {}
   }, []);
 
@@ -3885,7 +3982,7 @@ export default function App() {
                     </div>
                   </div>
                 )}
-                {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
+                {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                 {tab === "News" && <NewsPanel watchlist={watchlist} />}
                 {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
@@ -3997,7 +4094,7 @@ export default function App() {
                 </div>
 
                 <div style={{ flex: 1, overflowY: "auto" }}>
-                  {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
+                  {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                   {tab === "News" && <NewsPanel watchlist={watchlist} />}
                   {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
