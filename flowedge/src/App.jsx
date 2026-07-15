@@ -2910,7 +2910,7 @@ function ictAnalyze(candles, currentPrice) {
   };
 }
 
-function ICTPanel() {
+function ICTPanel({ onChart }) {
   const [pairData, setPairData]   = useState({});
   const [loadingSet, setLoadingSet] = useState({});
   const [selected, setSelected]   = useState(null);
@@ -3027,9 +3027,26 @@ function ICTPanel() {
         const fp    = p => fmtPx(selected, p);
         const dc    = a.signal === 'long' ? '#10b981' : '#ef4444';
         const tc    = typeColor[a.signalType] || '#9ca3af';
+        const chartSig = a.signal ? { dir: a.signal, entry: a.entry, sl: a.sl, tp: a.tp, setup: a.signalType.replace('_', ' ') } : null;
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>ICT ANALYSIS — {pair.name}</div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>ICT ANALYSIS — {pair.name}</span>
+              {onChart && (
+                <button onClick={() => onChart(TV_SYMBOLS[selected] || selected)} title="Open TradingView chart" style={{
+                  background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 4,
+                  padding: '1px 6px', color: '#a5b4fc', fontSize: 8, fontWeight: 700, cursor: 'pointer',
+                }}>📈 TradingView</button>
+              )}
+            </div>
+
+            {/* Confluence chart — sweeps, OBs, FVGs, EQ, liquidity, entry/TP/SL */}
+            <ICTCandleChart candles={d.candles} sym={selected} tfLabel="1D · ICT" bars={90}
+              zones={[
+                ...(a.activeOBs || []).map(o => ({ ...o, fill: 'rgba(59,130,246,0.13)' })),
+                ...(a.activeFVGs || []).map(f => ({ ...f, fill: 'rgba(139,92,246,0.13)' })),
+              ]}
+              eq={a.rangeMid} bsl={a.bsl || []} ssl={a.ssl || []} sig={chartSig} />
 
             {/* Stats row */}
             <div style={{ padding: '10px 12px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -3140,12 +3157,25 @@ function ICTPanel() {
                 <span style={{ fontWeight: 900, fontSize: 12, color: '#f9fafb' }}>{pair.name}</span>
                 <span style={{ padding: '1px 5px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${dc}20`, color: dc }}>{a.signal === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
                 <span style={{ padding: '1px 5px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${tc}18`, color: tc }}>{a.signalType.replace('_', ' ')}</span>
+                {onChart && (
+                  <button onClick={e => { e.stopPropagation(); onChart(TV_SYMBOLS[pair.symbol] || pair.symbol); }} title="Open TradingView chart" style={{
+                    background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 4,
+                    padding: '1px 6px', color: '#a5b4fc', fontSize: 8, fontWeight: 700, cursor: 'pointer',
+                  }}>📈 TV</button>
+                )}
               </div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#9ca3af' }}>{fp(price)}</span>
                 <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 800, color: a.confidence >= 70 ? '#10b981' : '#f59e0b' }}>{a.confidence}%</span>
               </div>
             </div>
+            <ICTCandleChart candles={d.candles} sym={pair.symbol} tfLabel="1D · ICT" bars={90}
+              zones={[
+                ...(a.activeOBs || []).map(o => ({ ...o, fill: 'rgba(59,130,246,0.13)' })),
+                ...(a.activeFVGs || []).map(f => ({ ...f, fill: 'rgba(139,92,246,0.13)' })),
+              ]}
+              eq={a.rangeMid} bsl={a.bsl || []} ssl={a.ssl || []}
+              sig={{ dir: a.signal, entry: a.entry, sl: a.sl, tp: a.tp, setup: a.signalType.replace('_', ' ') }} />
             <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>{a.reason}</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
               {[['Entry', fp(a.entry), '#e5e7eb'], ['TP', fp(a.tp), '#10b981'], ['SL', fp(a.sl), '#ef4444'], ['RR', a.rr ? `${a.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
@@ -3304,15 +3334,24 @@ function ictIntradayAnalyze(candles, price, mode) {
   };
 }
 
-// Mini candle chart with the ICT levels drawn on it: entry/TP/SL lines, the OB/FVG
-// zone that produced the alert, equilibrium, BSL/SSL liquidity, and a setup marker.
-function ScalpChart({ candles, a, sym, tfLabel }) {
-  if (!candles || candles.length < 12) return null;
-  const data   = candles.slice(-72);
-  const offset = candles.length - data.length;
-  const sig    = a?.sig;
+// Yahoo symbol → TradingView symbol for the embedded advanced chart
+const TV_SYMBOLS = {
+  'EURUSD=X': 'FX:EURUSD', 'GBPUSD=X': 'FX:GBPUSD', 'USDJPY=X': 'FX:USDJPY',
+  'USDCHF=X': 'FX:USDCHF', 'AUDUSD=X': 'FX:AUDUSD', 'USDCAD=X': 'FX:USDCAD',
+  'NZDUSD=X': 'FX:NZDUSD', 'GBPJPY=X': 'FX:GBPJPY',
+  'XAUUSD=X': 'OANDA:XAUUSD', 'XAGUSD=X': 'OANDA:XAGUSD',
+};
 
-  const W = 320, H = 116, labelW = 46;
+// Shared ICT candle chart — used by both the ICT (daily) and Scalp (intraday)
+// tabs. Draws every confluence on the price: OB/FVG zones, equilibrium, BSL/SSL
+// liquidity, ▼/▲ markers on the candles where liquidity sweeps happened, and
+// entry/TP/SL when a signal is live.
+function ICTCandleChart({ candles, zones = [], eq, bsl = [], ssl = [], sig, sym, tfLabel, bars = 72 }) {
+  if (!candles || candles.length < 12) return null;
+  const data   = candles.slice(-bars);
+  const offset = candles.length - data.length;
+
+  const W = 320, H = 128, labelW = 46;
   const plotW = W - labelW;
   let lo = Math.min(...data.map(c => c.low));
   let hi = Math.max(...data.map(c => c.high));
@@ -3321,27 +3360,45 @@ function ScalpChart({ candles, a, sym, tfLabel }) {
   lo -= vpad; hi += vpad;
   const y  = v => ((hi - v) / (hi - lo)) * (H - 10) + 5;
   const x  = i => 2 + (i / data.length) * (plotW - 4);
-  const cw = Math.max(1.4, ((plotW - 4) / data.length) * 0.62);
+  const cw = Math.max(1.2, ((plotW - 4) / data.length) * 0.62);
   const inRange = v => v != null && v >= lo && v <= hi;
   const fp = p => sym?.startsWith('XAUUSD') ? p.toFixed(2) : sym?.startsWith('XAGUSD') ? p.toFixed(3) : p >= 100 ? p.toFixed(2) : p.toFixed(4);
   const dc = sig ? (sig.dir === 'long' ? '#10b981' : '#ef4444') : '#6b7280';
-  const zoneRect = (z, fill) => {
-    if (!z || !inRange(z.bottom) && !inRange(z.top)) return null;
-    const xs = x(Math.max(0, (z.idx ?? 0) - offset));
-    const yt = y(Math.min(hi, z.top)), yb = y(Math.max(lo, z.bottom));
-    return <rect x={xs} y={yt} width={Math.max(0, plotW - xs)} height={Math.max(1, yb - yt)} fill={fill} />;
-  };
+
+  // Liquidity sweeps within the visible window: a wick through a BSL/SSL level
+  // with the close back on the other side. Marked on the exact candle.
+  const sweeps = [];
+  data.forEach((c, i) => {
+    if (bsl.some(lv => c.high > lv && c.close < lv)) sweeps.push({ i, type: 'BSL', yv: c.high });
+    if (ssl.some(lv => c.low < lv && c.close > lv))  sweeps.push({ i, type: 'SSL', yv: c.low });
+  });
+  const sweepMarks = sweeps.slice(-6);
+  const lastSweep  = sweepMarks[sweepMarks.length - 1];
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block', background: 'rgba(0,0,0,0.3)', borderRadius: 7, border: '1px solid rgba(255,255,255,0.05)' }}>
-      {/* OB / FVG zone that defines the alert */}
-      {sig && zoneRect(sig.ob,  'rgba(59,130,246,0.15)')}
-      {sig && zoneRect(sig.fvg, 'rgba(139,92,246,0.15)')}
+      {/* OB / FVG confluence zones */}
+      {zones.filter(z => z && (inRange(z.bottom) || inRange(z.top))).map((z, i) => {
+        const xs = x(Math.max(0, (z.idx ?? 0) - offset));
+        const yt = y(Math.min(hi, z.top)), yb = y(Math.max(lo, z.bottom));
+        return <rect key={`z${i}`} x={xs} y={yt} width={Math.max(0, plotW - xs)} height={Math.max(1, yb - yt)} fill={z.fill} />;
+      })}
 
       {/* equilibrium + liquidity pools */}
-      {a && inRange(a.eq) && <line x1={0} x2={plotW} y1={y(a.eq)} y2={y(a.eq)} stroke="#6b7280" strokeWidth="0.6" strokeDasharray="2 3" />}
-      {(a?.bsl || []).filter(inRange).map((lv, i) => <line key={`b${i}`} x1={0} x2={plotW} y1={y(lv)} y2={y(lv)} stroke="#f59e0b" strokeWidth="0.5" strokeDasharray="1.5 3" opacity="0.7" />)}
-      {(a?.ssl || []).filter(inRange).map((lv, i) => <line key={`s${i}`} x1={0} x2={plotW} y1={y(lv)} y2={y(lv)} stroke="#f59e0b" strokeWidth="0.5" strokeDasharray="1.5 3" opacity="0.7" />)}
+      {inRange(eq) && <line x1={0} x2={plotW} y1={y(eq)} y2={y(eq)} stroke="#6b7280" strokeWidth="0.6" strokeDasharray="2 3" />}
+      {inRange(eq) && <text x={2} y={y(eq) - 1.5} fontSize="5.5" fill="#6b7280">EQ</text>}
+      {bsl.filter(inRange).map((lv, i) => (
+        <g key={`b${i}`}>
+          <line x1={0} x2={plotW} y1={y(lv)} y2={y(lv)} stroke="#f59e0b" strokeWidth="0.5" strokeDasharray="1.5 3" opacity="0.7" />
+          {i === 0 && <text x={2} y={y(lv) - 1.5} fontSize="5.5" fill="#f59e0b">BSL</text>}
+        </g>
+      ))}
+      {ssl.filter(inRange).map((lv, i) => (
+        <g key={`s${i}`}>
+          <line x1={0} x2={plotW} y1={y(lv)} y2={y(lv)} stroke="#f59e0b" strokeWidth="0.5" strokeDasharray="1.5 3" opacity="0.7" />
+          {i === 0 && <text x={2} y={y(lv) + 5.5} fontSize="5.5" fill="#f59e0b">SSL</text>}
+        </g>
+      ))}
 
       {/* candles */}
       {data.map((c, i) => {
@@ -3355,6 +3412,20 @@ function ScalpChart({ candles, a, sym, tfLabel }) {
           </g>
         );
       })}
+
+      {/* liquidity sweep markers on the candles where they happened */}
+      {sweepMarks.map((s, k) => (
+        <text key={`sw${k}`} x={x(s.i) + cw / 2} textAnchor="middle" fontSize="7.5" fontWeight="900" fill="#f59e0b"
+          y={s.type === 'BSL' ? Math.max(7, y(s.yv) - 3) : Math.min(H - 2, y(s.yv) + 9)}>
+          {s.type === 'BSL' ? '▼' : '▲'}
+        </text>
+      ))}
+      {lastSweep && (
+        <text x={x(lastSweep.i) + cw / 2} textAnchor="middle" fontSize="5.5" fontWeight="800" fill="#f59e0b"
+          y={lastSweep.type === 'BSL' ? Math.max(14, y(lastSweep.yv) + 4) : Math.min(H - 9, y(lastSweep.yv) - 4)}>
+          {lastSweep.type} SWEEP
+        </text>
+      )}
 
       {/* entry / TP / SL with price labels */}
       {sig && [['E', sig.entry, '#a5b4fc', null], ['TP', sig.tp, '#10b981', '4 3'], ['SL', sig.sl, '#ef4444', '4 3']].map(([lbl, v, col, dash]) => inRange(v) && (
@@ -3373,12 +3444,12 @@ function ScalpChart({ candles, a, sym, tfLabel }) {
       )}
 
       <text x={5} y={11} fontSize="7" fontWeight="800" fill="#4b5563" letterSpacing="0.08em">{tfLabel}</text>
-      {!sig && <text x={5} y={22} fontSize="7.5" fill="#374151">no active entry — showing EQ + liquidity</text>}
+      {!sig && <text x={5} y={22} fontSize="7.5" fill="#374151">no active entry — EQ, liquidity & sweeps shown</text>}
     </svg>
   );
 }
 
-function ScalpPanel() {
+function ScalpPanel({ onChart }) {
   const [pairData, setPairData] = useState({});
   const [modeFilter, setModeFilter] = useState('all');
   const inflightRef   = useRef({});
@@ -3562,7 +3633,15 @@ function ScalpPanel() {
       {rows.map(({ pair, d }) => (
         <div key={pair.symbol} style={{ padding: '9px 11px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ fontWeight: 900, fontSize: 12, color: '#f9fafb' }}>{pair.name}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+              <span style={{ fontWeight: 900, fontSize: 12, color: '#f9fafb' }}>{pair.name}</span>
+              {onChart && (
+                <button onClick={() => onChart(TV_SYMBOLS[pair.symbol] || pair.symbol)} title="Open TradingView chart" style={{
+                  background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 4,
+                  padding: '1px 6px', color: '#a5b4fc', fontSize: 8, fontWeight: 700, cursor: 'pointer',
+                }}>📈 TV</button>
+              )}
+            </div>
             <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>{d ? fmtPx(pair.symbol, d.price) : '…'}</span>
           </div>
           {d ? (
@@ -3572,7 +3651,10 @@ function ScalpPanel() {
                 const use = d.scalp?.sig || !d.intra?.sig
                   ? { candles: d.c5, a: d.scalp, tf: '5M · SCALP' }
                   : { candles: d.c15, a: d.intra, tf: '15M · INTRADAY' };
-                return <ScalpChart candles={use.candles} a={use.a} sym={pair.symbol} tfLabel={use.tf} />;
+                const a = use.a;
+                return <ICTCandleChart candles={use.candles} sym={pair.symbol} tfLabel={use.tf}
+                  zones={[a?.sig?.ob && { ...a.sig.ob, fill: 'rgba(59,130,246,0.15)' }, a?.sig?.fvg && { ...a.sig.fvg, fill: 'rgba(139,92,246,0.15)' }].filter(Boolean)}
+                  eq={a?.eq} bsl={a?.bsl || []} ssl={a?.ssl || []} sig={a?.sig || null} />;
               })()}
               <StrategyRow mode="SCALP" a={d.scalp} sym={pair.symbol} />
               <StrategyRow mode="INTRADAY" a={d.intra} sym={pair.symbol} />
@@ -4955,8 +5037,8 @@ export default function App() {
                   </div>
                 )}
                 {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
-                {tab === "ICT" && <ICTPanel />}
-                {tab === "Scalp" && <ScalpPanel />}
+                {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} />}
+                {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} />}
                 {tab === "News" && <NewsPanel watchlist={watchlist} />}
                 {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
@@ -5067,8 +5149,8 @@ export default function App() {
 
                 <div style={{ flex: 1, overflowY: "auto" }}>
                   {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
-                  {tab === "ICT" && <ICTPanel />}
-                  {tab === "Scalp" && <ScalpPanel />}
+                  {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} />}
+                  {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} />}
                   {tab === "News" && <NewsPanel watchlist={watchlist} />}
                   {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
