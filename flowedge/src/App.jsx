@@ -3173,6 +3173,281 @@ function ICTPanel() {
   );
 }
 
+// ─── Forex Intraday / Scalping ──────────────────────────────────────────────
+
+function emaLast(values, period) {
+  if (!values.length) return null;
+  const k = 2 / (period + 1);
+  let e = values[0];
+  for (let i = 1; i < values.length; i++) e = values[i] * k + e * (1 - k);
+  return e;
+}
+
+function rsiLast(closes, period = 14) {
+  if (closes.length < period + 1) return 50;
+  let g = 0, l = 0;
+  for (let i = 1; i <= period; i++) { const d = closes[i] - closes[i - 1]; if (d >= 0) g += d; else l -= d; }
+  let ag = g / period, al = l / period;
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    ag = (ag * (period - 1) + Math.max(d, 0)) / period;
+    al = (al * (period - 1) + Math.max(-d, 0)) / period;
+  }
+  return al === 0 ? 100 : 100 - 100 / (1 + ag / al);
+}
+
+function atrLast(candles, period = 14) {
+  if (candles.length < period + 1) return null;
+  const trs = [];
+  for (let i = 1; i < candles.length; i++) {
+    const c = candles[i], pc = candles[i - 1].close;
+    trs.push(Math.max(c.high - c.low, Math.abs(c.high - pc), Math.abs(c.low - pc)));
+  }
+  return trs.slice(-period).reduce((s, x) => s + x, 0) / period;
+}
+
+// Active forex sessions by UTC hour — scalping edge is best during London/NY
+function fxSessions() {
+  const h = new Date().getUTCHours();
+  const s = [];
+  if (h >= 22 || h < 7) s.push('ASIA');
+  if (h >= 7 && h < 16) s.push('LONDON');
+  if (h >= 12 && h < 21) s.push('NEW YORK');
+  return s;
+}
+
+// 5-minute scalp entries: EMA9/21 pullback or 20-bar range break
+function scalpSignal(c5, price) {
+  if (!c5 || c5.length < 30) return null;
+  const closes = c5.map(c => c.close);
+  const e9 = emaLast(closes, 9), e21 = emaLast(closes, 21);
+  const rsi = rsiLast(closes);
+  const atr = atrLast(c5);
+  if (!e9 || !e21 || !atr) return null;
+
+  const prev20   = c5.slice(-21, -1);
+  const hi20     = Math.max(...prev20.map(c => c.high));
+  const lo20     = Math.min(...prev20.map(c => c.low));
+  const nearE9   = Math.abs(price - e9) <= atr * 0.4;
+
+  let dir = null, setup = '', conf = 0, reason = '';
+  if      (e9 > e21 && price > hi20 && rsi < 76) { dir = 'long';  setup = 'BREAK';    conf = 70; reason = `5m break of 20-bar high, EMA9>21 · RSI ${rsi.toFixed(0)}`; }
+  else if (e9 < e21 && price < lo20 && rsi > 24) { dir = 'short'; setup = 'BREAK';    conf = 70; reason = `5m break of 20-bar low, EMA9<21 · RSI ${rsi.toFixed(0)}`; }
+  else if (e9 > e21 && nearE9 && rsi >= 42 && rsi <= 68) { dir = 'long';  setup = 'PULLBACK'; conf = 64; reason = `5m pullback to EMA9 in uptrend · RSI ${rsi.toFixed(0)}`; }
+  else if (e9 < e21 && nearE9 && rsi >= 32 && rsi <= 58) { dir = 'short'; setup = 'PULLBACK'; conf = 64; reason = `5m pullback to EMA9 in downtrend · RSI ${rsi.toFixed(0)}`; }
+  if (!dir) return null;
+
+  const sl = dir === 'long' ? price - atr : price + atr;
+  const tp = dir === 'long' ? price + atr * 1.5 : price - atr * 1.5;
+  return { dir, setup, conf, reason, entry: price, sl, tp, rr: '1.5', rsi, atr };
+}
+
+// 15-minute intraday entries: EMA20/50 trend pullback or 40-bar range break
+function intradaySignal(c15, price) {
+  if (!c15 || c15.length < 60) return null;
+  const closes = c15.map(c => c.close);
+  const e20 = emaLast(closes, 20), e50 = emaLast(closes, 50);
+  const rsi = rsiLast(closes);
+  const atr = atrLast(c15);
+  if (!e20 || !e50 || !atr) return null;
+
+  const prev40  = c15.slice(-41, -1);
+  const hi40    = Math.max(...prev40.map(c => c.high));
+  const lo40    = Math.min(...prev40.map(c => c.low));
+  const nearE20 = Math.abs(price - e20) <= atr * 0.5;
+
+  let dir = null, setup = '', conf = 0, reason = '';
+  if      (e20 > e50 && price > hi40 && rsi < 74) { dir = 'long';  setup = 'BREAK';    conf = 72; reason = `15m break of 40-bar high, EMA20>50 · RSI ${rsi.toFixed(0)}`; }
+  else if (e20 < e50 && price < lo40 && rsi > 26) { dir = 'short'; setup = 'BREAK';    conf = 72; reason = `15m break of 40-bar low, EMA20<50 · RSI ${rsi.toFixed(0)}`; }
+  else if (e20 > e50 && price > e50 && nearE20 && rsi >= 40 && rsi <= 66) { dir = 'long';  setup = 'PULLBACK'; conf = 66; reason = `15m pullback to EMA20 in uptrend · RSI ${rsi.toFixed(0)}`; }
+  else if (e20 < e50 && price < e50 && nearE20 && rsi >= 34 && rsi <= 60) { dir = 'short'; setup = 'PULLBACK'; conf = 66; reason = `15m pullback to EMA20 in downtrend · RSI ${rsi.toFixed(0)}`; }
+  if (!dir) return null;
+
+  const sl = dir === 'long' ? price - atr * 1.5 : price + atr * 1.5;
+  const tp = dir === 'long' ? price + atr * 3 : price - atr * 3;
+  return { dir, setup, conf, reason, entry: price, sl, tp, rr: '2.0', rsi, atr };
+}
+
+function ScalpPanel() {
+  const [pairData, setPairData] = useState({});
+  const [modeFilter, setModeFilter] = useState('all');
+  const inflightRef   = useRef({});
+  const prevAlertRef  = useRef({});
+
+  const fetchPair = useCallback(async (sym) => {
+    if (inflightRef.current[sym]) return;
+    inflightRef.current[sym] = true;
+    try {
+      const [r5, r15] = await Promise.all([
+        fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=5m&range=1d`),
+        fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=15m&range=5d`),
+      ]);
+      const [d5, d15] = await Promise.all([r5.json(), r15.json()]);
+      const c5 = d5.candles || [], c15 = d15.candles || [];
+      const price = d5.meta?.regularMarketPrice || c5[c5.length - 1]?.close || c15[c15.length - 1]?.close;
+      if (price) {
+        const scalp = scalpSignal(c5, price);
+        const intra = intradaySignal(c15, price);
+        setPairData(prev => ({ ...prev, [sym]: { price, scalp, intra } }));
+
+        // Alert on new/changed entries for both strategies
+        [['SCALP', scalp], ['INTRADAY', intra]].forEach(([mode, sig]) => {
+          const refKey = `${sym}|${mode}`;
+          const key = sig ? `${sig.dir}|${sig.setup}` : null;
+          const prev = prevAlertRef.current[refKey];
+          if (key && prev !== key) {
+            const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
+            logSignalAlert({ source: mode, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry });
+            if (prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+              new Notification(`FlowEdge ${mode} — ${name}`, {
+                body: `${sig.dir.toUpperCase()} ${sig.setup} · ${sig.conf}%\n${sig.reason}`,
+                icon: '/favicon.ico',
+              });
+            }
+          }
+          if (key) prevAlertRef.current[refKey] = key;
+        });
+      }
+    } catch (_) {}
+    inflightRef.current[sym] = false;
+  }, []);
+
+  useEffect(() => {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') Notification.requestPermission();
+    ICT_PAIRS.forEach(p => fetchPair(p.symbol));
+    const iv = setInterval(() => ICT_PAIRS.forEach(p => fetchPair(p.symbol)), 1000);
+    return () => clearInterval(iv);
+  }, [fetchPair]);
+
+  const fmtPx = (sym, p) => {
+    if (p == null) return '—';
+    if (sym?.startsWith('XAUUSD')) return p.toFixed(2);
+    if (sym?.startsWith('XAGUSD')) return p.toFixed(3);
+    return p >= 100 ? p.toFixed(3) : p.toFixed(4);
+  };
+
+  const sessions = fxSessions();
+  const overlap  = sessions.includes('LONDON') && sessions.includes('NEW YORK');
+
+  const rows = ICT_PAIRS.map(pair => ({ pair, d: pairData[pair.symbol] }))
+    .filter(({ d }) => {
+      if (!d) return modeFilter === 'all';
+      if (modeFilter === 'scalp') return !!d.scalp;
+      if (modeFilter === 'intra') return !!d.intra;
+      if (modeFilter === 'active') return !!(d.scalp || d.intra);
+      return true;
+    });
+
+  const scalpCount = ICT_PAIRS.filter(p => pairData[p.symbol]?.scalp).length;
+  const intraCount = ICT_PAIRS.filter(p => pairData[p.symbol]?.intra).length;
+  const loaded     = Object.keys(pairData).length;
+
+  const StrategyRow = ({ mode, sig, sym }) => {
+    const mc = mode === 'SCALP' ? '#f59e0b' : '#3b82f6';
+    const fp = p => fmtPx(sym, p);
+    if (!sig) {
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.015)', border: '1px solid rgba(255,255,255,0.04)' }}>
+          <span style={{ fontSize: 8, fontWeight: 800, color: mc, background: `${mc}14`, padding: '1px 5px', borderRadius: 3 }}>{mode}</span>
+          <span style={{ fontSize: 9, color: '#374151', fontWeight: 700 }}>WAITING — no setup</span>
+        </div>
+      );
+    }
+    const dc = sig.dir === 'long' ? '#10b981' : '#ef4444';
+    return (
+      <div style={{ padding: '7px 9px', borderRadius: 7, background: `${dc}07`, border: `1px solid ${dc}22`, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ fontSize: 8, fontWeight: 800, color: mc, background: `${mc}18`, padding: '1px 5px', borderRadius: 3 }}>{mode}</span>
+            <span style={{ fontSize: 8, fontWeight: 900, color: '#10b981', background: 'rgba(16,185,129,0.14)', padding: '1px 5px', borderRadius: 3 }}>● ACTIVE</span>
+            <span style={{ fontSize: 8, fontWeight: 800, color: dc }}>{sig.dir === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
+            <span style={{ fontSize: 8, color: '#6b7280', fontWeight: 700 }}>{sig.setup}</span>
+          </div>
+          <span style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 800, color: sig.conf >= 70 ? '#10b981' : '#f59e0b' }}>{sig.conf}%</span>
+        </div>
+        <div style={{ fontSize: 9, color: '#9ca3af', fontStyle: 'italic' }}>{sig.reason}</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
+          {[['Entry', fp(sig.entry), '#e5e7eb'], ['TP', fp(sig.tp), '#10b981'], ['SL', fp(sig.sl), '#ef4444'], ['RR', `${sig.rr}×`, '#a5b4fc']].map(([lbl, val, color]) => (
+            <div key={lbl} style={{ padding: '3px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
+              <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{lbl}</div>
+              <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb', letterSpacing: '-0.01em' }}>FX Intraday & Scalping</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>5m scalps · 15m intraday · EMA pullbacks & range breaks</div>
+        </div>
+        <div style={{ fontSize: 9, fontFamily: 'monospace', color: '#4b5563' }}>{loaded}/{ICT_PAIRS.length} pairs</div>
+      </div>
+
+      {/* Session bar */}
+      <div style={{ padding: '8px 12px', borderRadius: 8, background: overlap ? 'rgba(16,185,129,0.06)' : 'rgba(255,255,255,0.02)', border: `1px solid ${overlap ? 'rgba(16,185,129,0.2)' : 'rgba(255,255,255,0.06)'}`, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>SESSIONS</span>
+        {['ASIA', 'LONDON', 'NEW YORK'].map(s => {
+          const on = sessions.includes(s);
+          return <span key={s} style={{ fontSize: 9, fontWeight: 800, color: on ? '#10b981' : '#374151', background: on ? 'rgba(16,185,129,0.12)' : 'rgba(255,255,255,0.03)', padding: '2px 7px', borderRadius: 4 }}>{on ? '● ' : '○ '}{s}</span>;
+        })}
+        {overlap && <span style={{ fontSize: 9, color: '#10b981', fontWeight: 700 }}>London/NY overlap — peak liquidity for scalps</span>}
+        {!sessions.includes('LONDON') && !sessions.includes('NEW YORK') && <span style={{ fontSize: 9, color: '#f59e0b' }}>Thin liquidity — reduce scalp size</span>}
+      </div>
+
+      {/* Mode filter */}
+      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+        {[
+          ['all', `All (${ICT_PAIRS.length})`],
+          ['active', `● Active (${scalpCount + intraCount > 0 ? ICT_PAIRS.filter(p => pairData[p.symbol]?.scalp || pairData[p.symbol]?.intra).length : 0})`],
+          ['scalp', `SCALP (${scalpCount})`],
+          ['intra', `INTRADAY (${intraCount})`],
+        ].map(([key, label]) => (
+          <button key={key} onClick={() => setModeFilter(key)} style={{
+            padding: '3px 9px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
+            background: modeFilter === key ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: modeFilter === key ? '#a5b4fc' : '#4b5563',
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {/* Pair cards */}
+      {rows.map(({ pair, d }) => (
+        <div key={pair.symbol} style={{ padding: '9px 11px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span style={{ fontWeight: 900, fontSize: 12, color: '#f9fafb' }}>{pair.name}</span>
+            <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>{d ? fmtPx(pair.symbol, d.price) : '…'}</span>
+          </div>
+          {d ? (
+            <>
+              <StrategyRow mode="SCALP" sig={d.scalp} sym={pair.symbol} />
+              <StrategyRow mode="INTRADAY" sig={d.intra} sym={pair.symbol} />
+            </>
+          ) : (
+            <div style={{ fontSize: 9, color: '#374151' }}>Loading 5m/15m candles…</div>
+          )}
+        </div>
+      ))}
+
+      {rows.length === 0 && (
+        <div style={{ padding: 20, textAlign: 'center', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>No pairs match this filter</div>
+          <div style={{ fontSize: 10, color: '#374151' }}>Entries appear when price sets up at an EMA pullback or range break</div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 9, color: '#374151', textAlign: 'center', paddingTop: 4 }}>
+        Scalp: 1×ATR stop / 1.5×ATR target · Intraday: 1.5×ATR stop / 3×ATR target · Educational use only
+      </div>
+    </div>
+  );
+}
+
 function SignalsPanel({ scanResults, scanning, scanProgress, watchlist, onRescan, vixVal, sectorData, onTrade, commodities, forexData }) {
   const now = useNow(60000);
   const [filter, setFilter] = useState('all');
@@ -4040,7 +4315,7 @@ function NewsPanel({ watchlist }) {
   );
 }
 
-const TABS = ["Signals", "ICT", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
+const TABS = ["Signals", "ICT", "Scalp", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -4493,6 +4768,7 @@ export default function App() {
                 )}
                 {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                 {tab === "ICT" && <ICTPanel />}
+                {tab === "Scalp" && <ScalpPanel />}
                 {tab === "News" && <NewsPanel watchlist={watchlist} />}
                 {tab === "Journal" && <JournalPanel />}
                 {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}
@@ -4604,6 +4880,7 @@ export default function App() {
                 <div style={{ flex: 1, overflowY: "auto" }}>
                   {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                   {tab === "ICT" && <ICTPanel />}
+                  {tab === "Scalp" && <ScalpPanel />}
                   {tab === "News" && <NewsPanel watchlist={watchlist} />}
                   {tab === "Journal" && <JournalPanel />}
                   {tab === "Portfolio" && <PortfolioPanel stocks={stocks} />}

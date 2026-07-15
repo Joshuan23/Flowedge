@@ -54,10 +54,11 @@ export default async function handler(req) {
       regularMarketPrice:  result.meta?.regularMarketPrice,
     };
 
+    const isIntraday = ['1m', '2m', '5m', '15m', '30m', '60m', '90m'].includes(interval);
     return new Response(JSON.stringify({ candles, meta }), {
       headers: {
         'Content-Type': 'application/json',
-        'Cache-Control': 's-maxage=300, stale-while-revalidate=60',
+        'Cache-Control': isIntraday ? 's-maxage=30, stale-while-revalidate=15' : 's-maxage=300, stale-while-revalidate=60',
         'Access-Control-Allow-Origin': '*',
       },
     });
