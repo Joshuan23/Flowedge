@@ -2720,6 +2720,19 @@ function logSignalAlert(entry) {
   } catch { return false; }
 }
 
+// Alert quality gate — only A-grade setups reach the feed and notifications:
+// confidence >= 70 (liquidity sweeps and OB/OTE confluence), reward:risk >= 1.5,
+// and scalps only during London/NY sessions where liquidity supports the move.
+function isHighQualitySignal(source, conf, rr) {
+  if ((conf ?? 0) < 70) return false;
+  if (rr != null && parseFloat(rr) < 1.5) return false;
+  if (source === 'SCALP') {
+    const s = fxSessions();
+    if (!s.includes('LONDON') && !s.includes('NEW YORK')) return false;
+  }
+  return true;
+}
+
 function scoreForexSignal(d) {
   const price = d?.regularMarketPrice;
   if (!price) return null;
@@ -2899,8 +2912,29 @@ function ictAnalyze(candles, currentPrice) {
   if      (sweptSSL || (structure === 'bullish' && priceZone === 'discount')) orderFlow = 'accumulating';
   else if (sweptBSL || (structure === 'bearish' && priceZone === 'premium'))  orderFlow = 'distributing';
 
+  // Always-on ICT verdict — BUY / SELL / WAIT from the confluence score, so every
+  // pair gets a directional read even when no A+ entry is firing
+  let score = 0;
+  const factors = [];
+  if (structure === 'bullish')      { score += 2; factors.push('HH/HL structure'); }
+  else if (structure === 'bearish') { score -= 2; factors.push('LH/LL structure'); }
+  if (sweptSSL) { score += 2; factors.push('SSL sweep'); }
+  if (sweptBSL) { score -= 2; factors.push('BSL sweep'); }
+  if (priceZone === 'discount') { score += 1; factors.push('discount zone'); }
+  else                          { score -= 1; factors.push('premium zone'); }
+  if (activeOBs.some(o => o.type === 'bullish' && currentPrice >= o.bottom && currentPrice <= o.top + atr * 0.3)) { score += 1; factors.push('at bullish OB'); }
+  if (activeOBs.some(o => o.type === 'bearish' && currentPrice >= o.bottom - atr * 0.3 && currentPrice <= o.top)) { score -= 1; factors.push('at bearish OB'); }
+  if (activeFVGs.some(f => f.type === 'bullish' && currentPrice >= f.bottom && currentPrice <= f.top)) { score += 1; factors.push('in bullish FVG'); }
+  if (activeFVGs.some(f => f.type === 'bearish' && currentPrice >= f.bottom && currentPrice <= f.top)) { score -= 1; factors.push('in bearish FVG'); }
+  const bias = {
+    verdict: score >= 2 ? 'BUY' : score <= -2 ? 'SELL' : 'WAIT',
+    score,
+    conf: Math.min(85, 50 + Math.abs(score) * 6),
+    factors,
+  };
+
   return {
-    structure, priceZone, orderFlow, bsl, ssl,
+    structure, priceZone, orderFlow, bsl, ssl, bias,
     fvgCount: activeFVGs.length, obCount: activeOBs.length,
     sweptBSL, sweptSSL,
     activeFVGs: activeFVGs.slice(-3), activeOBs: activeOBs.slice(-3),
@@ -2932,7 +2966,7 @@ function ICTPanel({ onChart }) {
         if (analysis?.signal) {
           const key = analysis.signal + analysis.signalType;
           const prev = prevSignalsRef.current[sym];
-          if (prev !== key) {
+          if (prev !== key && isHighQualitySignal('ICT', analysis.confidence, analysis.rr)) {
             const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
             const isNew = logSignalAlert({ source: 'ICT', name, dir: analysis.signal, type: analysis.signalType.replace('_', ' '), conf: analysis.confidence, reason: analysis.reason, price: analysis.entry });
             if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -2968,7 +3002,6 @@ function ICTPanel({ onChart }) {
   const flowColor   = f => f === 'accumulating' ? '#10b981' : f === 'distributing' ? '#ef4444' : '#6b7280';
   const typeColor   = { LIQ_SWEEP: '#f59e0b', ORDER_BLOCK: '#3b82f6', FAIR_VALUE_GAP: '#8b5cf6', STRUCTURE: '#6b7280' };
 
-  const pairsWithSignal = ICT_PAIRS.filter(p => pairData[p.symbol]?.analysis?.signal);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -3031,7 +3064,14 @@ function ICTPanel({ onChart }) {
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>ICT ANALYSIS — {pair.name}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 9, color: '#4b5563', fontWeight: 800, letterSpacing: '0.1em' }}>ICT ANALYSIS — {pair.name}</span>
+                {(() => {
+                  const b = a.bias || { verdict: 'WAIT', conf: 50 };
+                  const vc = b.verdict === 'BUY' ? '#10b981' : b.verdict === 'SELL' ? '#ef4444' : '#6b7280';
+                  return <span style={{ padding: '1px 6px', borderRadius: 3, fontSize: 8, fontWeight: 900, background: `${vc}20`, color: vc }}>{b.verdict === 'BUY' ? '▲ BUY' : b.verdict === 'SELL' ? '▼ SELL' : '◦ WAIT'}{b.verdict !== 'WAIT' ? ` ${b.conf}%` : ''}</span>;
+                })()}
+              </div>
               {onChart && (
                 <button onClick={() => onChart(TV_SYMBOLS[selected] || selected)} title="Open TradingView chart" style={{
                   background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 4,
@@ -3142,21 +3182,27 @@ function ICTPanel({ onChart }) {
         );
       })()}
 
-      {/* All pairs with signals (compact list, excluding selected) */}
-      {pairsWithSignal.filter(p => p.symbol !== selected).map(pair => {
-        const d   = pairData[pair.symbol];
-        const a   = d.analysis;
+      {/* Every pair: chart + BUY/SELL/WAIT verdict, entry details when a setup is live */}
+      {ICT_PAIRS.filter(p => pairData[p.symbol]?.analysis && p.symbol !== selected)
+        .sort((p1, p2) => (pairData[p2.symbol].analysis.signal ? 1 : 0) - (pairData[p1.symbol].analysis.signal ? 1 : 0))
+        .map(pair => {
+        const d     = pairData[pair.symbol];
+        const a     = d.analysis;
         const price = d.meta?.regularMarketPrice || d.candles?.[d.candles.length - 1]?.close;
-        const dc  = a.signal === 'long' ? '#10b981' : '#ef4444';
-        const tc  = typeColor[a.signalType] || '#9ca3af';
-        const fp  = p => fmtPx(pair.symbol, p);
+        const bias  = a.bias || { verdict: 'WAIT', conf: 50, factors: [] };
+        const vc    = bias.verdict === 'BUY' ? '#10b981' : bias.verdict === 'SELL' ? '#ef4444' : '#6b7280';
+        const dc    = a.signal ? (a.signal === 'long' ? '#10b981' : '#ef4444') : vc;
+        const tc    = typeColor[a.signalType] || '#9ca3af';
+        const fp    = p => fmtPx(pair.symbol, p);
         return (
           <div key={pair.symbol} onClick={() => setSelected(pair.symbol)} style={{ padding: '9px 12px', borderRadius: 9, background: `${dc}06`, border: `1px solid ${dc}20`, display: 'flex', flexDirection: 'column', gap: 5, cursor: 'pointer' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 <span style={{ fontWeight: 900, fontSize: 12, color: '#f9fafb' }}>{pair.name}</span>
-                <span style={{ padding: '1px 5px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${dc}20`, color: dc }}>{a.signal === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
-                <span style={{ padding: '1px 5px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${tc}18`, color: tc }}>{a.signalType.replace('_', ' ')}</span>
+                <span style={{ padding: '1px 6px', borderRadius: 3, fontSize: 8, fontWeight: 900, background: `${vc}20`, color: vc }}>
+                  {bias.verdict === 'BUY' ? '▲ BUY' : bias.verdict === 'SELL' ? '▼ SELL' : '◦ WAIT'} {bias.verdict !== 'WAIT' ? `${bias.conf}%` : ''}
+                </span>
+                {a.signal && <span style={{ padding: '1px 5px', borderRadius: 3, fontSize: 8, fontWeight: 800, background: `${tc}18`, color: tc }}>{a.signalType.replace('_', ' ')} ENTRY</span>}
                 {onChart && (
                   <button onClick={e => { e.stopPropagation(); onChart(TV_SYMBOLS[pair.symbol] || pair.symbol); }} title="Open TradingView chart" style={{
                     background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 4,
@@ -3166,7 +3212,7 @@ function ICTPanel({ onChart }) {
               </div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#9ca3af' }}>{fp(price)}</span>
-                <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 800, color: a.confidence >= 70 ? '#10b981' : '#f59e0b' }}>{a.confidence}%</span>
+                {a.signal && <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 800, color: a.confidence >= 70 ? '#10b981' : '#f59e0b' }}>{a.confidence}%</span>}
               </div>
             </div>
             <ICTCandleChart candles={d.candles} sym={pair.symbol} tfLabel="1D · ICT" bars={90}
@@ -3175,16 +3221,20 @@ function ICTPanel({ onChart }) {
                 ...(a.activeFVGs || []).map(f => ({ ...f, fill: 'rgba(139,92,246,0.13)' })),
               ]}
               eq={a.rangeMid} bsl={a.bsl || []} ssl={a.ssl || []}
-              sig={{ dir: a.signal, entry: a.entry, sl: a.sl, tp: a.tp, setup: a.signalType.replace('_', ' ') }} />
-            <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>{a.reason}</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
-              {[['Entry', fp(a.entry), '#e5e7eb'], ['TP', fp(a.tp), '#10b981'], ['SL', fp(a.sl), '#ef4444'], ['RR', a.rr ? `${a.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
-                <div key={lbl} style={{ padding: '3px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
-                  <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{lbl}</div>
-                  <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
-                </div>
-              ))}
+              sig={a.signal ? { dir: a.signal, entry: a.entry, sl: a.sl, tp: a.tp, setup: a.signalType.replace('_', ' ') } : null} />
+            <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>
+              {a.signal ? a.reason : `${bias.verdict === 'WAIT' ? 'No edge yet' : `Bias ${bias.verdict.toLowerCase()}`} — ${bias.factors.join(' · ') || 'no confluences'}`}
             </div>
+            {a.signal && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
+                {[['Entry', fp(a.entry), '#e5e7eb'], ['TP', fp(a.tp), '#10b981'], ['SL', fp(a.sl), '#ef4444'], ['RR', a.rr ? `${a.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
+                  <div key={lbl} style={{ padding: '3px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
+                    <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{lbl}</div>
+                    <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
+                  </div>
+                ))}
+              </div>
+            )}
             <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
               {[
                 [a.structure === 'bullish' ? 'HH/HL' : a.structure === 'bearish' ? 'LH/LL' : 'RANGING', structColor(a.structure)],
@@ -3198,7 +3248,7 @@ function ICTPanel({ onChart }) {
         );
       })}
 
-      {pairsWithSignal.length === 0 && (
+      {ICT_PAIRS.every(p => !pairData[p.symbol]?.analysis) && (
         <div style={{ padding: 20, textAlign: 'center', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
           <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>Loading ICT analysis…</div>
           <div style={{ fontSize: 10, color: '#374151' }}>Fetching 90 days of OHLCV data for 10 pairs</div>
@@ -3476,7 +3526,7 @@ function ScalpPanel({ onChart }) {
           const refKey = `${sym}|${mode}`;
           const key = sig ? `${sig.dir}|${sig.setup}` : null;
           const prev = prevAlertRef.current[refKey];
-          if (key && prev !== key) {
+          if (key && prev !== key && isHighQualitySignal(mode, sig.conf, sig.rr)) {
             const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
             const isNew = logSignalAlert({ source: mode, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry });
             if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -4784,6 +4834,7 @@ export default function App() {
       const prev = fxAlertRef.current[d.symbol];
       if (prev === key) return;
       fxAlertRef.current[d.symbol] = key;
+      if (!isHighQualitySignal('FOREX', sig.conf, sig.rr)) return;
       const isNew = logSignalAlert({ source: 'FOREX', name: sig.name, dir: sig.dir, type: sig.type, conf: sig.conf, reason: sig.reason, price: sig.entry });
       // Skip the browser popup on first observation (page load) — only notify on changes
       if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -4815,7 +4866,7 @@ export default function App() {
             const refKey = `${p.symbol}|${mode}`;
             const key = sig ? `${sig.dir}|${sig.setup}` : null;
             const prev = scalpWatchRef.current[refKey];
-            if (key && prev !== key) {
+            if (key && prev !== key && isHighQualitySignal(mode, sig.conf, sig.rr)) {
               const isNew = logSignalAlert({ source: mode, name: p.name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry });
               if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
                 new Notification(`FlowEdge ${mode} — ${p.name}`, {
