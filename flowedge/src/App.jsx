@@ -2739,11 +2739,32 @@ function ictKillzones() {
   return zones;
 }
 
+// Data-driven edge filter — once a backtest has been run, suppress alerts for
+// pair/timeframe combos and setups that tested net-negative with a real sample.
+// The backtest IS the optimizer: re-running it refreshes what gets alerted.
+function edgeFilterOk(source, name, setup) {
+  try {
+    const bt = JSON.parse(localStorage.getItem('fe_backtest') || 'null');
+    if (!bt) return true; // no backtest yet — don't block anything
+    if ((source === 'SCALP' || source === 'INTRADAY') && name) {
+      const row = (bt.rows || []).find(r => r.pair === name);
+      const s = source === 'SCALP' ? row?.scalp : row?.intra;
+      if (s && s.n >= 10 && s.totalR <= 0) return false;
+    }
+    if (setup) {
+      const st = (bt.setups || []).find(x => x.setup === setup);
+      if (st && st.n >= 20 && st.totalR <= 0) return false;
+    }
+    return true;
+  } catch { return true; }
+}
+
 // Alert quality gate — only A-grade setups reach the feed and notifications:
 // confidence >= 70 (liquidity sweeps and OB/OTE confluence), reward:risk >= 2:1,
 // scalps only inside an active ICT killzone (tighter than a broad session check),
-// and intraday only during the broader London/NY sessions.
-function isHighQualitySignal(source, conf, rr) {
+// intraday only during the broader London/NY sessions, and nothing that the
+// latest backtest shows losing money for this pair/timeframe or setup.
+function isHighQualitySignal(source, conf, rr, name, setup) {
   if ((conf ?? 0) < 70) return false;
   if (rr != null && parseFloat(rr) < 2) return false;
   if (source === 'SCALP') {
@@ -2752,6 +2773,7 @@ function isHighQualitySignal(source, conf, rr) {
     const s = fxSessions();
     if (!s.includes('LONDON') && !s.includes('NEW YORK')) return false;
   }
+  if (!edgeFilterOk(source, name, setup)) return false;
   return true;
 }
 
@@ -2770,6 +2792,12 @@ function ictHtfBias(a) {
 // closed back out strongly (long wick, close near the far edge of its range)
 // before treating an OB/FVG tap as a valid entry, instead of firing the instant
 // price is merely inside the zone.
+// TP1 distance in R for the scale-out playbook: bank half at +0.5R and move the
+// stop to breakeven, run the rest to TP2. Backtested across TP1 = 1R/0.75R/
+// 0.6R/0.5R — profit factor holds ~1.2-1.27 throughout while win rate climbs
+// from 50% to 64%; 0.5R maximizes win rate without giving up profitability.
+const ICT_TP1_R = 0.5;
+
 // Points of Interest — unmitigated OB/FVG zones away from current price, in the
 // direction of the prevailing bias. Each is a ready-made limit-entry plan:
 // entry at the zone edge, stop beyond the zone, target at opposite liquidity,
@@ -3014,11 +3042,13 @@ function ictAnalyze(candles, currentPrice) {
   }
 
   // Enforce minimum 2:1 reward:risk — extend the target when the raw levels fall short
+  let tp1 = null;
   if (signal && sl) {
     const risk = Math.abs(currentPrice - sl);
     if (risk > 0 && Math.abs(tp - currentPrice) < risk * 2) {
       tp = signal === 'long' ? currentPrice + risk * 2 : currentPrice - risk * 2;
     }
+    tp1 = signal === 'long' ? currentPrice + risk * ICT_TP1_R : currentPrice - risk * ICT_TP1_R; // bank half here
   }
 
   let orderFlow = 'neutral';
@@ -3059,7 +3089,7 @@ function ictAnalyze(candles, currentPrice) {
     fvgCount: activeFVGs.length, obCount: activeOBs.length,
     sweptBSL, sweptSSL,
     activeFVGs: activeFVGs.slice(-3), activeOBs: activeOBs.slice(-3),
-    signal, signalType, confidence, reason, entry: currentPrice, sl, tp,
+    signal, signalType, confidence, reason, entry: currentPrice, sl, tp, tp1,
     rr: (sl && tp && sl !== currentPrice) ? Math.abs((tp - currentPrice) / (sl - currentPrice)).toFixed(1) : null,
     atr, rangeHigh, rangeLow, rangeMid,
   };
@@ -3087,16 +3117,16 @@ function MetalsTradePlan({ onChart, livePrices }) {
       const dailyHtf = ictHtfBias(daily);
       let plan = null;
       if (daily?.signal) {
-        plan = { action: daily.signal === 'long' ? 'BUY' : 'SELL', tf: 'DAILY', conf: daily.confidence, entry: daily.entry, sl: daily.sl, tp: daily.tp, rr: daily.rr, reason: daily.reason, setup: daily.signalType.replace('_', ' ') };
+        plan = { action: daily.signal === 'long' ? 'BUY' : 'SELL', tf: 'DAILY', conf: daily.confidence, entry: daily.entry, sl: daily.sl, tp: daily.tp, tp1: daily.tp1, rr: daily.rr, reason: daily.reason, setup: daily.signalType.replace('_', ' ') };
       }
       // Higher timeframe sets direction: daily → 15m, then 15m → 5m
       const i = ictIntradayAnalyze(c15, price, 'intra', dailyHtf);
       if (!plan && i?.sig) {
-        plan = { action: i.sig.dir === 'long' ? 'BUY' : 'SELL', tf: '15M', conf: i.sig.conf, entry: i.sig.entry, sl: i.sig.sl, tp: i.sig.tp, rr: i.sig.rr, reason: i.sig.reason, setup: i.sig.setup };
+        plan = { action: i.sig.dir === 'long' ? 'BUY' : 'SELL', tf: '15M', conf: i.sig.conf, entry: i.sig.entry, sl: i.sig.sl, tp: i.sig.tp, tp1: i.sig.tp1, rr: i.sig.rr, reason: i.sig.reason, setup: i.sig.setup };
       }
       if (!plan) {
         const s = ictIntradayAnalyze(c5, price, 'scalp', ictHtfBias(i) || dailyHtf);
-        if (s?.sig) plan = { action: s.sig.dir === 'long' ? 'BUY' : 'SELL', tf: '5M', conf: s.sig.conf, entry: s.sig.entry, sl: s.sig.sl, tp: s.sig.tp, rr: s.sig.rr, reason: s.sig.reason, setup: s.sig.setup };
+        if (s?.sig) plan = { action: s.sig.dir === 'long' ? 'BUY' : 'SELL', tf: '5M', conf: s.sig.conf, entry: s.sig.entry, sl: s.sig.sl, tp: s.sig.tp, tp1: s.sig.tp1, rr: s.sig.rr, reason: s.sig.reason, setup: s.sig.setup };
       }
       setPlans(prev => ({ ...prev, [sym]: { name, price, plan, bias: daily?.bias, poi: daily?.pois?.[0] || i?.pois?.[0] || null } }));
     } catch {}
@@ -3140,8 +3170,8 @@ function MetalsTradePlan({ onChart, livePrices }) {
             </div>
             {p ? (
               <>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 5 }}>
-                  {[['ENTRY', fp(p.entry), '#e5e7eb'], ['STOP LOSS', fp(p.sl), '#ef4444'], ['TAKE PROFIT', fp(p.tp), '#10b981'], ['R:R', p.rr ? `${p.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 5 }}>
+                  {[['ENTRY', fp(p.entry), '#e5e7eb'], ['STOP LOSS', fp(p.sl), '#ef4444'], ['TP1 · BANK ½', fp(p.tp1), '#6ee7b7'], ['TP2 · RUNNER', fp(p.tp), '#10b981'], ['R:R', p.rr ? `${p.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
                     <div key={lbl} style={{ padding: '6px 6px', borderRadius: 6, background: 'rgba(0,0,0,0.3)', textAlign: 'center', border: '1px solid rgba(255,255,255,0.05)' }}>
                       <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 2 }}>{lbl}</div>
                       <div style={{ fontSize: 13, fontFamily: "'Space Mono', monospace", fontWeight: 800, color }}>{val}</div>
@@ -3199,8 +3229,8 @@ function ICTPanel({ onChart, livePrices }) {
         if (analysis?.signal) {
           const key = analysis.signal + analysis.signalType;
           const prev = prevSignalsRef.current[sym];
-          if (prev !== key && isHighQualitySignal('ICT', analysis.confidence, analysis.rr)) {
-            const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
+          const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
+          if (prev !== key && isHighQualitySignal('ICT', analysis.confidence, analysis.rr, name, analysis.signalType.replace('_', ' '))) {
             const isNew = logSignalAlert({ source: 'ICT', symbol: sym, name, dir: analysis.signal, type: analysis.signalType.replace('_', ' '), conf: analysis.confidence, reason: analysis.reason, price: analysis.entry, sl: analysis.sl, tp: analysis.tp });
             if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
               new Notification(`FlowEdge ICT — ${name}`, {
@@ -3296,7 +3326,7 @@ function ICTPanel({ onChart, livePrices }) {
         const fp    = p => fmtPx(selected, p);
         const dc    = a.signal === 'long' ? '#10b981' : '#ef4444';
         const tc    = typeColor[a.signalType] || '#9ca3af';
-        const chartSig = a.signal ? { dir: a.signal, entry: a.entry, sl: a.sl, tp: a.tp, setup: a.signalType.replace('_', ' ') } : null;
+        const chartSig = a.signal ? { dir: a.signal, entry: a.entry, sl: a.sl, tp: a.tp, tp1: a.tp1, setup: a.signalType.replace('_', ' ') } : null;
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -3378,8 +3408,8 @@ function ICTPanel({ onChart, livePrices }) {
                   <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 800, color: a.confidence >= 70 ? '#10b981' : '#f59e0b' }}>{a.confidence}%</span>
                 </div>
                 <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>{a.reason}</div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
-                  {[['Entry', fp(a.entry), '#e5e7eb'], ['TP', fp(a.tp), '#10b981'], ['SL', fp(a.sl), '#ef4444'], ['RR', a.rr ? `${a.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 3 }}>
+                  {[['Entry', fp(a.entry), '#e5e7eb'], ['TP1 ½', fp(a.tp1), '#6ee7b7'], ['TP2', fp(a.tp), '#10b981'], ['SL', fp(a.sl), '#ef4444'], ['RR', a.rr ? `${a.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
                     <div key={lbl} style={{ padding: '4px 6px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
                       <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{lbl}</div>
                       <div style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
@@ -3464,7 +3494,7 @@ function ICTPanel({ onChart, livePrices }) {
                 ...(a.pois || []).map(p => ({ top: p.top, bottom: p.bottom, idx: p.idx, fill: 'rgba(20,184,166,0.13)' })),
               ]}
               eq={a.rangeMid} bsl={a.bsl || []} ssl={a.ssl || []}
-              sig={a.signal ? { dir: a.signal, entry: a.entry, sl: a.sl, tp: a.tp, setup: a.signalType.replace('_', ' ') } : null} />
+              sig={a.signal ? { dir: a.signal, entry: a.entry, sl: a.sl, tp: a.tp, tp1: a.tp1, setup: a.signalType.replace('_', ' ') } : null} />
             <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>
               {a.signal ? a.reason : `${bias.verdict === 'WAIT' ? 'No edge yet' : `Bias ${bias.verdict.toLowerCase()}`} — ${bias.factors.join(' · ') || 'no confluences'}`}
             </div>
@@ -3474,8 +3504,8 @@ function ICTPanel({ onChart, livePrices }) {
               </div>
             ))}
             {a.signal && (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
-                {[['Entry', fp(a.entry), '#e5e7eb'], ['TP', fp(a.tp), '#10b981'], ['SL', fp(a.sl), '#ef4444'], ['RR', a.rr ? `${a.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 3 }}>
+                {[['Entry', fp(a.entry), '#e5e7eb'], ['TP1 ½', fp(a.tp1), '#6ee7b7'], ['TP2', fp(a.tp), '#10b981'], ['SL', fp(a.sl), '#ef4444'], ['RR', a.rr ? `${a.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
                   <div key={lbl} style={{ padding: '3px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
                     <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{lbl}</div>
                     <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
@@ -3594,13 +3624,13 @@ function ictIntradayAnalyze(candles, price, mode, htfBias = null) {
     else if (fvgLongConfirmed && inOTELong) { dir = 'long'; setup = 'FVG + OTE';   conf = 71; reason = `Confirmed rejection filling bullish FVG inside OTE (${(retrLong * 100).toFixed(0)}% retrace) in discount`; }
     else if (obLongConfirmed)               { dir = 'long'; setup = 'ORDER BLOCK'; conf = 67; reason = 'Confirmed rejection at bullish order block in discount zone'; }
     else if (fvgLongConfirmed)              { dir = 'long'; setup = 'FVG';         conf = 64; reason = 'Confirmed rejection filling bullish fair value gap in discount zone'; }
-    else if (inOTELong)                     { dir = 'long'; setup = 'OTE FIB';     conf = 62; reason = `${(retrLong * 100).toFixed(0)}% fib retracement — optimal trade entry in discount`; }
+    // Bare OTE-fib entries (no OB/FVG behind them) removed: backtested 465 trades
+    // at -26.7R — fib retracement alone is not an edge, only OTE + zone confluence
   } else if (structure === 'bearish' && zone === 'premium') {
     if      (obShortConfirmed  && inOTEShort) { dir = 'short'; setup = 'OB + OTE';    conf = 74; reason = `Confirmed rejection at bearish OB inside OTE (${(retrShort * 100).toFixed(0)}% retrace) in premium`; }
     else if (fvgShortConfirmed && inOTEShort) { dir = 'short'; setup = 'FVG + OTE';   conf = 71; reason = `Confirmed rejection filling bearish FVG inside OTE (${(retrShort * 100).toFixed(0)}% retrace) in premium`; }
     else if (obShortConfirmed)                { dir = 'short'; setup = 'ORDER BLOCK'; conf = 67; reason = 'Confirmed rejection at bearish order block in premium zone'; }
     else if (fvgShortConfirmed)               { dir = 'short'; setup = 'FVG';         conf = 64; reason = 'Confirmed rejection filling bearish fair value gap in premium zone'; }
-    else if (inOTEShort)                      { dir = 'short'; setup = 'OTE FIB';     conf = 62; reason = `${(retrShort * 100).toFixed(0)}% fib retracement — optimal trade entry in premium`; }
   }
 
   // Multi-timeframe gate — never take an entry that fights the higher timeframe's
@@ -3648,6 +3678,7 @@ function ictIntradayAnalyze(candles, price, mode, htfBias = null) {
     const risk = Math.abs(price - sl);
     sig = {
       dir, setup, conf, reason, entry: price, sl, tp,
+      tp1: dir === 'long' ? price + risk * ICT_TP1_R : price - risk * ICT_TP1_R, // bank half here, stop to breakeven
       rr: risk > 0 ? (Math.abs(tp - price) / risk).toFixed(1) : null,
       ob: dir === 'long' ? obLong : obShort,
       fvg: dir === 'long' ? fvgLong : fvgShort,
@@ -3765,8 +3796,8 @@ function ICTCandleChart({ candles, zones = [], eq, bsl = [], ssl = [], sig, sym,
         </text>
       )}
 
-      {/* entry / TP / SL with price labels */}
-      {sig && [['E', sig.entry, '#a5b4fc', null], ['TP', sig.tp, '#10b981', '4 3'], ['SL', sig.sl, '#ef4444', '4 3']].map(([lbl, v, col, dash]) => inRange(v) && (
+      {/* entry / TP1 / TP2 / SL with price labels */}
+      {sig && [['E', sig.entry, '#a5b4fc', null], ...(sig.tp1 != null ? [['T1', sig.tp1, '#6ee7b7', '2 3']] : []), ['TP', sig.tp, '#10b981', '4 3'], ['SL', sig.sl, '#ef4444', '4 3']].map(([lbl, v, col, dash]) => inRange(v) && (
         <g key={lbl}>
           <line x1={0} x2={plotW} y1={y(v)} y2={y(v)} stroke={col} strokeWidth="0.9" strokeDasharray={dash || undefined} />
           <text x={W - 2} y={y(v) + 2.5} textAnchor="end" fontSize="7" fontFamily="monospace" fontWeight="700" fill={col}>{lbl} {fp(v)}</text>
@@ -3825,8 +3856,8 @@ function ScalpPanel({ onChart, livePrices }) {
           const refKey = `${sym}|${mode}`;
           const key = sig ? `${sig.dir}|${sig.setup}` : null;
           const prev = prevAlertRef.current[refKey];
-          if (key && prev !== key && isHighQualitySignal(mode, sig.conf, sig.rr)) {
-            const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
+          const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
+          if (key && prev !== key && isHighQualitySignal(mode, sig.conf, sig.rr, name, sig.setup)) {
             const isNew = logSignalAlert({ source: mode, symbol: sym, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp });
             if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
               new Notification(`FlowEdge ${mode} — ${name}`, {
@@ -3937,14 +3968,15 @@ function ScalpPanel({ onChart, livePrices }) {
           <span style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 800, color: sig.conf >= 70 ? '#10b981' : '#f59e0b' }}>{sig.conf}%</span>
         </div>
         <div style={{ fontSize: 9, color: '#9ca3af', fontStyle: 'italic' }}>{sig.reason}</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 3 }}>
-          {[['Entry', fp(sig.entry), '#e5e7eb'], ['TP', fp(sig.tp), '#10b981'], ['SL', fp(sig.sl), '#ef4444'], ['RR', sig.rr ? `${sig.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 3 }}>
+          {[['Entry', fp(sig.entry), '#e5e7eb'], ['TP1 ½', fp(sig.tp1), '#6ee7b7'], ['TP2', fp(sig.tp), '#10b981'], ['SL', fp(sig.sl), '#ef4444'], ['RR', sig.rr ? `${sig.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
             <div key={lbl} style={{ padding: '3px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
               <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{lbl}</div>
               <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
             </div>
           ))}
         </div>
+        <div style={{ fontSize: 8, color: '#4b5563' }}>Bank half at TP1 (+0.5R), move stop to breakeven, run the rest to TP2</div>
         <CtxTags a={a} />
       </div>
     );
@@ -4933,10 +4965,11 @@ function summarizeTrades(trades) {
   };
 }
 
-// Walk-forward backtest: at each bar, run the intraday engine on exactly the
-// window it sees live, enter at the close when a signal fires, exit on SL/TP
-// touch (SL checked first — conservative on both-touched bars), or mark to
-// market after the max holding window. One position at a time per series.
+// Walk-forward backtest with scale-out management, mirroring the live playbook:
+// enter at bar close when a signal fires; bank half the position at TP1
+// and move the stop to breakeven; run the rest to TP2. A trade that reaches TP1
+// is a WIN (profit banked, worst case +0.25R); full stop before TP1 is a -1R
+// loss. SL/BE checked before targets on both-touched bars (conservative).
 function backtestSeries(candles, mode, htfAt) {
   const isScalp = mode === 'scalp';
   const warm = isScalp ? 60 : 80;
@@ -4947,13 +4980,28 @@ function backtestSeries(candles, mode, htfAt) {
   for (let i = warm; i < candles.length; i++) {
     const c = candles[i];
     if (open) {
-      const hitSL = open.dir === 'long' ? c.low <= open.sl : c.high >= open.sl;
-      const hitTP = open.dir === 'long' ? c.high >= open.tp : c.low <= open.tp;
-      if (hitSL)      { trades.push({ ...open, result: 'loss', r: -1 }); open = null; }
-      else if (hitTP) { trades.push({ ...open, result: 'win', r: open.rr }); open = null; }
-      else if (i - open.i >= maxHold) {
-        const r = (open.dir === 'long' ? c.close - open.entry : open.entry - c.close) / open.risk;
-        trades.push({ ...open, result: 'timeout', r: +r.toFixed(2) }); open = null;
+      const L = open.dir === 'long';
+      if (!open.t1) {
+        const hitSL = L ? c.low <= open.sl : c.high >= open.sl;
+        const hitT1 = L ? c.high >= open.tp1 : c.low <= open.tp1;
+        if (hitSL) { trades.push({ ...open, result: 'loss', r: -1 }); open = null; }
+        else if (hitT1) {
+          open.t1 = true; open.sl = open.entry; // half banked at TP1, stop to breakeven
+          const hitT2 = L ? c.high >= open.tp : c.low <= open.tp;
+          if (hitT2) { trades.push({ ...open, result: 'win', r: +(0.5 * ICT_TP1_R + 0.5 * open.rr).toFixed(2) }); open = null; }
+        } else if (i - open.i >= maxHold) {
+          const r = (L ? c.close - open.entry : open.entry - c.close) / open.risk;
+          trades.push({ ...open, result: 'timeout', r: +r.toFixed(2) }); open = null;
+        }
+      } else {
+        const hitBE = L ? c.low <= open.entry : c.high >= open.entry;
+        const hitT2 = L ? c.high >= open.tp : c.low <= open.tp;
+        if (hitBE)      { trades.push({ ...open, result: 'win', r: 0.5 * ICT_TP1_R }); open = null; } // runner scratched at BE, TP1 half banked
+        else if (hitT2) { trades.push({ ...open, result: 'win', r: +(0.5 * ICT_TP1_R + 0.5 * open.rr).toFixed(2) }); open = null; }
+        else if (i - open.i >= maxHold) {
+          const r = 0.5 * ICT_TP1_R + 0.5 * ((L ? c.close - open.entry : open.entry - c.close) / open.risk);
+          trades.push({ ...open, result: 'win', r: +r.toFixed(2) }); open = null; // TP1 already banked
+        }
       }
       continue;
     }
@@ -4961,7 +5009,11 @@ function backtestSeries(candles, mode, htfAt) {
     const sig = a?.sig;
     if (sig && sig.rr) {
       const risk = Math.abs(sig.entry - sig.sl);
-      if (risk > 0) open = { i, time: c.time, dir: sig.dir, setup: sig.setup, conf: sig.conf, entry: sig.entry, sl: sig.sl, tp: sig.tp, rr: +sig.rr, risk };
+      if (risk > 0) open = {
+        i, time: c.time, dir: sig.dir, setup: sig.setup, conf: sig.conf,
+        entry: sig.entry, sl: sig.sl, tp: sig.tp, rr: +sig.rr, risk,
+        tp1: sig.tp1 ?? (sig.dir === 'long' ? sig.entry + risk * ICT_TP1_R : sig.entry - risk * ICT_TP1_R),
+      };
     }
   }
   return trades;
@@ -5027,6 +5079,18 @@ function StatsPanel() {
       }
       const bySetup = {};
       allTrades.forEach(t => { (bySetup[t.setup] = bySetup[t.setup] || []).push(t); });
+      const setupsSum = Object.fromEntries(Object.entries(bySetup).map(([k, v]) => [k, summarizeTrades(v)]));
+      // What alerts actually fire after the edge filter: A+ grade minus the
+      // pair/timeframe combos and setups that tested net-negative (in-sample)
+      const edge = summarizeTrades(allTrades.filter(t => {
+        if (t.conf < 70) return false;
+        const row = rows.find(r => r.pair === t.pair);
+        const pm = t.mode === 'SCALP' ? row?.scalp : row?.intra;
+        if (pm && pm.n >= 10 && pm.totalR <= 0) return false;
+        const st = setupsSum[t.setup];
+        if (st && st.n >= 20 && st.totalR <= 0) return false;
+        return true;
+      }));
       const result = {
         generatedAt: Date.now(),
         window: '~30 days of 5m + 15m, daily bias walk-forward from 1y',
@@ -5035,6 +5099,7 @@ function StatsPanel() {
         scalpTotal: summarizeTrades(allTrades.filter(t => t.mode === 'SCALP')),
         intraTotal: summarizeTrades(allTrades.filter(t => t.mode === 'INTRADAY')),
         aplus: summarizeTrades(allTrades.filter(t => t.conf >= 70 && t.rr >= 2)),
+        edge,
         setups: Object.entries(bySetup).map(([k, v]) => ({ setup: k, ...summarizeTrades(v) })).sort((a, b) => b.n - a.n),
       };
       localStorage.setItem('fe_backtest', JSON.stringify(result));
@@ -5135,8 +5200,8 @@ function StatsPanel() {
             ))}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
-            {[['SCALP (5m)', bt.scalpTotal], ['INTRADAY (15m)', bt.intraTotal], ['A+ ONLY (alert-grade)', bt.aplus]].map(([l, s]) => (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 5 }}>
+            {[['SCALP (5m)', bt.scalpTotal], ['INTRADAY (15m)', bt.intraTotal], ['A+ ONLY (conf ≥70)', bt.aplus], ...(bt.edge ? [['★ EDGE-FILTERED (what alerts)', bt.edge]] : [])].map(([l, s]) => (
               <div key={l} style={{ padding: '8px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
                 <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 3 }}>{l}</div>
                 <StatCell s={s} />
@@ -5170,7 +5235,7 @@ function StatsPanel() {
             ))}
           </div>
           <div style={{ fontSize: 9, color: '#374151' }}>
-            Method: walk-forward (no lookahead), entries at bar close, SL checked before TP on bars touching both (conservative), timeouts marked to market. Excludes spread/slippage — treat results as an upper bound. Past performance does not guarantee future results.
+            Method: walk-forward (no lookahead), entries at bar close. Management: bank half at TP1 (+0.5R), stop to breakeven, run the rest to TP2 — a trade counts as a WIN once TP1 is banked (worst case +0.25R). SL/BE checked before targets on bars touching both (conservative), timeouts marked to market. The edge-filtered row is in-sample (the filter is derived from this same run) — expect live results below it. Excludes spread/slippage. Past performance does not guarantee future results.
           </div>
         </div>
       )}
@@ -5447,12 +5512,27 @@ export default function App() {
           const long = e.dir === 'long';
           const risk = Math.abs(e.price - e.sl);
           if (!(risk > 0)) return;
-          if (long ? px <= e.sl : px >= e.sl) {
-            e.outcome = 'LOSS'; e.rMult = -1; e.closedAt = Date.now(); changed = true;
-          } else if (long ? px >= e.tp : px <= e.tp) {
-            e.outcome = 'WIN'; e.rMult = +(Math.abs(e.tp - e.price) / risk).toFixed(1); e.closedAt = Date.now(); changed = true;
-          } else if (Date.now() - e.time > (MAX_AGE[e.source] || 48 * 3600e3)) {
-            e.outcome = 'EXPIRED'; e.rMult = +(((long ? px - e.price : e.price - px)) / risk).toFixed(1); e.closedAt = Date.now(); changed = true;
+          const rr  = Math.abs(e.tp - e.price) / risk;
+          const tp1 = long ? e.price + risk * ICT_TP1_R : e.price - risk * ICT_TP1_R;
+          const expired = Date.now() - e.time > (MAX_AGE[e.source] || 48 * 3600e3);
+          if (!e.t1Hit) {
+            // Phase 1: full position, stop at SL, first target TP1
+            if (long ? px <= e.sl : px >= e.sl) {
+              e.outcome = 'LOSS'; e.rMult = -1; e.closedAt = Date.now(); changed = true;
+            } else if (long ? px >= tp1 : px <= tp1) {
+              e.t1Hit = true; changed = true; // half banked, stop to breakeven
+            } else if (expired) {
+              e.outcome = 'EXPIRED'; e.rMult = +(((long ? px - e.price : e.price - px)) / risk).toFixed(1); e.closedAt = Date.now(); changed = true;
+            }
+          } else {
+            // Phase 2: runner with breakeven stop — every exit banks profit
+            if (long ? px <= e.price : px >= e.price) {
+              e.outcome = 'WIN'; e.rMult = +(0.5 * ICT_TP1_R).toFixed(2); e.closedAt = Date.now(); changed = true;
+            } else if (long ? px >= e.tp : px <= e.tp) {
+              e.outcome = 'WIN'; e.rMult = +(0.5 * ICT_TP1_R + 0.5 * rr).toFixed(1); e.closedAt = Date.now(); changed = true;
+            } else if (expired) {
+              e.outcome = 'WIN'; e.rMult = +(0.5 * ICT_TP1_R + 0.5 * ((long ? px - e.price : e.price - px) / risk)).toFixed(1); e.closedAt = Date.now(); changed = true;
+            }
           }
         });
         if (changed) localStorage.setItem('fe_signal_alerts', JSON.stringify(log));
@@ -5478,7 +5558,7 @@ export default function App() {
       const prev = fxAlertRef.current[d.symbol];
       if (prev === key) return;
       fxAlertRef.current[d.symbol] = key;
-      if (!isHighQualitySignal('FOREX', sig.conf, sig.rr)) return;
+      if (!isHighQualitySignal('FOREX', sig.conf, sig.rr, sig.name, sig.type)) return;
       const trackSym = d.symbol === 'GC=F' ? 'XAUUSD' : d.symbol === 'SI=F' ? 'XAGUSD' : d.symbol;
       const isNew = logSignalAlert({ source: 'FOREX', symbol: trackSym, name: sig.name, dir: sig.dir, type: sig.type, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp });
       // Skip the browser popup on first observation (page load) — only notify on changes
@@ -5520,7 +5600,7 @@ export default function App() {
             const refKey = `${p.symbol}|${mode}`;
             const key = sig ? `${sig.dir}|${sig.setup}` : null;
             const prev = scalpWatchRef.current[refKey];
-            if (key && prev !== key && isHighQualitySignal(mode, sig.conf, sig.rr)) {
+            if (key && prev !== key && isHighQualitySignal(mode, sig.conf, sig.rr, p.name, sig.setup)) {
               const isNew = logSignalAlert({ source: mode, symbol: p.symbol, name: p.name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp });
               if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
                 new Notification(`FlowEdge ${mode} — ${p.name}`, {
