@@ -799,7 +799,7 @@ function AlertsPanel({ stocks }) {
           </div>
           {signalLog.slice(0, 15).map(s => {
             const dc = s.dir === 'long' ? '#10b981' : '#ef4444';
-            const sc = s.source === 'ICT' ? '#8b5cf6' : '#3b82f6';
+            const sc = { ICT: '#8b5cf6', SCALP: '#f59e0b', INTRADAY: '#3b82f6', FOREX: '#6366f1', ORB: '#f97316', SMC: '#14b8a6' }[s.source] || '#3b82f6';
             const fmtP = p => p == null ? '' : p >= 100 ? p.toFixed(2) : p >= 10 ? p.toFixed(3) : p.toFixed(4);
             const ago = (() => {
               const m = Math.floor((Date.now() - s.time) / 60000);
@@ -2769,7 +2769,7 @@ function isHighQualitySignal(source, conf, rr, name, setup) {
   if (rr != null && parseFloat(rr) < 1.5) return false;
   if (source === 'SCALP') {
     if (!ictKillzones().length) return false;
-  } else if (source === 'INTRADAY') {
+  } else if (source === 'INTRADAY' || source === 'SMC') {
     const s = fxSessions();
     if (!s.includes('LONDON') && !s.includes('NEW YORK')) return false;
   }
@@ -3699,6 +3699,185 @@ function ictIntradayAnalyze(candles, price, mode, htfBias = null) {
     fvgCount: fvgs.length, obCount: obs.length, sweptBSL, sweptSSL, sig,
     mtfVetoed, mtfAligned,
     vetoedSetup: mtfVetoed ? { dir: rawDir, setup: rawSetup, reason: rawReason } : null,
+  };
+}
+
+// ─── Opening Range Breakout (ORB) ───────────────────────────────────────────
+
+// Minutes to add to UTC to get New York time (DST-safe via Intl round-trip)
+function etOffsetMin() {
+  const now = new Date();
+  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  return Math.round((et.getTime() - now.getTime()) / 60000);
+}
+
+const ORB_SESSIONS = [
+  { key: 'LONDON OPEN', startMin: 3 * 60 },      // 3:00 AM ET
+  { key: 'NY OPEN',     startMin: 9 * 60 + 30 }, // 9:30 AM ET
+];
+const ORB_WINDOW = 30;  // minutes that define the opening range
+const ORB_VALID  = 240; // breakout stays tradeable this long after the open
+
+// The first 30 minutes after the London / New York opens define a range; the
+// first candle CLOSE beyond it trades the breakout. Stop at the range midpoint
+// (floored/capped), target the measured move (1x range) with a 1.5R minimum.
+// Counter-HTF breakouts are skipped, ranges too wide or too thin are skipped.
+function orbAnalyze(candles, price, htfBias = null) {
+  if (!candles || candles.length < 20 || !price) return null;
+  const atr = atrLast(candles);
+  if (!atr) return null;
+  const off = etOffsetMin();
+  const minOfDay = ts => (((Math.floor(ts / 60) + off) % 1440) + 1440) % 1440;
+  const dayOf    = ts => Math.floor((Math.floor(ts / 60) + off) / 1440);
+  const last   = candles[candles.length - 1];
+  const nowMin = minOfDay(last.time), nowDay = dayOf(last.time);
+
+  const sessions = [];
+  let sig = null;
+  for (const s of ORB_SESSIONS) {
+    const sDay = nowMin >= s.startMin ? nowDay : nowDay - 1;
+    const winIdx = [];
+    for (let i = candles.length - 1; i >= 0; i--) {
+      const d = dayOf(candles[i].time);
+      if (d < sDay) break;
+      const m = minOfDay(candles[i].time);
+      if (d === sDay && m >= s.startMin && m < s.startMin + ORB_WINDOW) winIdx.unshift(i);
+    }
+    if (winIdx.length < 3) continue;
+    const orHigh = Math.max(...winIdx.map(i => candles[i].high));
+    const orLow  = Math.min(...winIdx.map(i => candles[i].low));
+    const orMid  = (orHigh + orLow) / 2;
+    const range  = orHigh - orLow;
+    const endIdx = winIdx[winIdx.length - 1];
+    const forming = nowDay === sDay && nowMin >= s.startMin && nowMin < s.startMin + ORB_WINDOW;
+    const minutesSinceOpen = (nowDay - sDay) * 1440 + nowMin - s.startMin;
+    const sess = { key: s.key, orHigh, orLow, orMid, range, startIdx: winIdx[0], state: forming ? 'forming' : 'set', dir: null, brokeIdx: null };
+
+    if (!forming && minutesSinceOpen <= ORB_VALID + ORB_WINDOW) {
+      for (let i = endIdx + 1; i < candles.length; i++) {
+        if (candles[i].close > orHigh) { sess.state = 'long';  sess.dir = 'long';  sess.brokeIdx = i; break; }
+        if (candles[i].close < orLow)  { sess.state = 'short'; sess.dir = 'short'; sess.brokeIdx = i; break; }
+      }
+      const tooWide = range > atr * 4;
+      const tooThin = range < Math.max(atr * 0.6, price * 0.0006);
+      if (sess.dir && !tooWide && !tooThin && !sig) {
+        const fresh     = candles.length - 1 - sess.brokeIdx <= 6; // breakout within ~30 min
+        const level     = sess.dir === 'long' ? orHigh : orLow;
+        const nearLevel = Math.abs(price - level) <= range * 0.75;  // not chasing an extended move
+        const against   = htfBias && htfBias.verdict !== 'WAIT' && ((sess.dir === 'long') !== (htfBias.verdict === 'BUY'));
+        if (fresh && nearLevel && !against) {
+          let sl = orMid;
+          const minRisk = Math.max(price * 0.0008, atr * 0.5);
+          const maxRisk = atr * 1.5;
+          if (Math.abs(price - sl) < minRisk) sl = sess.dir === 'long' ? price - minRisk : price + minRisk;
+          if (Math.abs(price - sl) > maxRisk) sl = sess.dir === 'long' ? price - maxRisk : price + maxRisk;
+          const risk = Math.abs(price - sl);
+          const measured = sess.dir === 'long' ? level + range : level - range;
+          const tp = sess.dir === 'long' ? Math.max(price + risk * 1.5, measured) : Math.min(price - risk * 1.5, measured);
+          const aligned = !!(htfBias && htfBias.verdict !== 'WAIT');
+          sig = {
+            dir: sess.dir, setup: `${s.key} ORB`, conf: aligned ? 76 : 71,
+            reason: `${s.key} ${ORB_WINDOW}m opening range broke ${sess.dir === 'long' ? 'up' : 'down'} — trading the breakout${aligned ? ' · HTF aligned' : ''}`,
+            entry: price, sl, tp,
+            tp1: sess.dir === 'long' ? price + risk * ICT_TP1_R : price - risk * ICT_TP1_R,
+            rr: (Math.abs(tp - price) / risk).toFixed(1),
+            session: s.key,
+          };
+        }
+      }
+    }
+    sessions.push(sess);
+  }
+  return { sessions, sig, atr };
+}
+
+// ─── Smart Money Concepts (SMC) ─────────────────────────────────────────────
+
+// Structure first: BOS (break of structure) confirms continuation, CHoCH
+// (change of character) flags reversal. The entry is the mitigation — price
+// returning to the zone that caused the break, confirmed by a rejection
+// candle, in the direction the higher timeframe allows.
+function smcAnalyze(candles, price, htfBias = null) {
+  if (!candles || candles.length < 60 || !price) return null;
+  const atr = atrLast(candles);
+  if (!atr) return null;
+  const LOOK = 3;
+  const { highs, lows } = ictFindSwings(candles, LOOK);
+  if (!highs.length || !lows.length) return null;
+
+  // Walk candles chronologically, tracking the last confirmed swing each side;
+  // a close beyond it is BOS (with trend) or CHoCH (against it)
+  let trend = 'range', refHigh = null, refLow = null, hi = 0, li = 0;
+  const events = [];
+  for (let i = 0; i < candles.length; i++) {
+    while (hi < highs.length && highs[hi].idx + LOOK <= i) { refHigh = highs[hi]; hi++; }
+    while (li < lows.length && lows[li].idx + LOOK <= i)   { refLow = lows[li];  li++; }
+    const c = candles[i];
+    if (refHigh && c.close > refHigh.price) {
+      events.push({ dir: 'up', type: trend === 'down' ? 'CHOCH' : 'BOS', idx: i, level: refHigh.price });
+      trend = 'up'; refHigh = null;
+    } else if (refLow && c.close < refLow.price) {
+      events.push({ dir: 'down', type: trend === 'up' ? 'CHOCH' : 'BOS', idx: i, level: refLow.price });
+      trend = 'down'; refLow = null;
+    }
+  }
+  const lastEvent = events[events.length - 1] || null;
+
+  // Mitigation zone: last opposing candle before the breaking move, still valid
+  let zone = null;
+  if (lastEvent) {
+    for (let i = lastEvent.idx - 1; i >= Math.max(0, lastEvent.idx - 20); i--) {
+      const c = candles[i];
+      if (lastEvent.dir === 'up' ? c.close < c.open : c.close > c.open) {
+        zone = lastEvent.dir === 'up'
+          ? { top: Math.max(c.open, c.close), bottom: c.low, idx: i }
+          : { top: c.high, bottom: Math.min(c.open, c.close), idx: i };
+        break;
+      }
+    }
+    if (zone) {
+      for (let i = lastEvent.idx + 1; i < candles.length; i++) {
+        if (lastEvent.dir === 'up' ? candles[i].close < zone.bottom : candles[i].close > zone.top) { zone = null; break; }
+      }
+    }
+  }
+
+  let sig = null, mtfVetoed = false, mtfAligned = false;
+  if (lastEvent && zone) {
+    const dir = lastEvent.dir === 'up' ? 'long' : 'short';
+    const tol = atr * 0.25;
+    const inZone = price >= zone.bottom - tol && price <= zone.top + tol;
+    if (inZone && hasRejectionCandle(candles, zone.top, zone.bottom, dir)) {
+      const against = htfBias && htfBias.verdict !== 'WAIT' && ((dir === 'long') !== (htfBias.verdict === 'BUY'));
+      if (against) mtfVetoed = true;
+      else {
+        mtfAligned = !!(htfBias && htfBias.verdict !== 'WAIT');
+        let sl = dir === 'long' ? zone.bottom - atr * 0.2 : zone.top + atr * 0.2;
+        const minRisk = Math.max(price * 0.0008, atr * 0.4);
+        const maxRisk = atr * 1.5;
+        if (Math.abs(price - sl) < minRisk) sl = dir === 'long' ? price - minRisk : price + minRisk;
+        if (Math.abs(price - sl) > maxRisk) sl = dir === 'long' ? price - maxRisk : price + maxRisk;
+        const risk = Math.abs(price - sl);
+        const targets = dir === 'long'
+          ? highs.map(h => h.price).filter(v => v > price + risk * 1.5).sort((a, b) => a - b)
+          : lows.map(l => l.price).filter(v => v < price - risk * 1.5).sort((a, b) => b - a);
+        const tp = targets[0] ?? (dir === 'long' ? price + risk * 1.5 : price - risk * 1.5);
+        const base = lastEvent.type === 'CHOCH' ? 74 : 68;
+        sig = {
+          dir, setup: `${lastEvent.type} MITIGATION`, conf: Math.min(90, base + (mtfAligned ? 6 : 0)),
+          reason: `${lastEvent.type === 'CHOCH' ? 'Change of character' : 'Break of structure'} ${lastEvent.dir} — mitigating the origin zone with rejection${mtfAligned ? ' · HTF aligned' : ''}`,
+          entry: price, sl, tp,
+          tp1: dir === 'long' ? price + risk * ICT_TP1_R : price - risk * ICT_TP1_R,
+          rr: (Math.abs(tp - price) / risk).toFixed(1),
+        };
+      }
+    }
+  }
+
+  return {
+    trend, events: events.slice(-4), lastEvent, zone, sig, mtfVetoed, mtfAligned,
+    structureHighs: highs.slice(-3).map(h => h.price),
+    structureLows:  lows.slice(-3).map(l => l.price),
   };
 }
 
@@ -4947,6 +5126,241 @@ function NewsPanel({ watchlist }) {
   );
 }
 
+// Shared signal card body used by the ORB and SMC panels
+function StratSigCard({ sig, fp, extraTags = [] }) {
+  const dc = sig.dir === 'long' ? '#10b981' : '#ef4444';
+  return (
+    <div style={{ padding: '7px 9px', borderRadius: 7, background: `${dc}07`, border: `1px solid ${dc}22`, display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 8, fontWeight: 900, color: '#10b981', background: 'rgba(16,185,129,0.14)', padding: '1px 5px', borderRadius: 3 }}>● ACTIVE</span>
+          <span style={{ fontSize: 8, fontWeight: 800, color: dc }}>{sig.dir === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
+          <span style={{ fontSize: 8, color: '#6b7280', fontWeight: 700 }}>{sig.setup}</span>
+          {extraTags.map(([t, c]) => <span key={t} style={{ fontSize: 7, fontWeight: 800, color: c, background: `${c}16`, padding: '1px 5px', borderRadius: 3 }}>{t}</span>)}
+        </div>
+        <span style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 800, color: sig.conf >= 70 ? '#10b981' : '#f59e0b' }}>{sig.conf}%</span>
+      </div>
+      <div style={{ fontSize: 9, color: '#9ca3af', fontStyle: 'italic' }}>{sig.reason}</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 3 }}>
+        {[['Entry', fp(sig.entry), '#e5e7eb'], ['TP1 ½', fp(sig.tp1), '#6ee7b7'], ['TP2', fp(sig.tp), '#10b981'], ['SL', fp(sig.sl), '#ef4444'], ['RR', sig.rr ? `${sig.rr}×` : '—', '#a5b4fc']].map(([lbl, val, color]) => (
+          <div key={lbl} style={{ padding: '3px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', textAlign: 'center' }}>
+            <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 700, letterSpacing: '0.06em', marginBottom: 1 }}>{lbl}</div>
+            <div style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700, color }}>{val}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 8, color: '#4b5563' }}>Bank half at TP1, move stop to breakeven, run the rest to TP2</div>
+    </div>
+  );
+}
+
+const stratFmtPx = (sym, p) => p == null ? '—' : sym?.startsWith('XAUUSD') ? p.toFixed(2) : sym?.startsWith('XAGUSD') ? p.toFixed(3) : p >= 100 ? p.toFixed(3) : p.toFixed(4);
+
+function ORBPanel({ onChart, livePrices }) {
+  const [pairData, setPairData] = useState({});
+  const inflightRef  = useRef({});
+  const prevAlertRef = useRef({});
+  const dailyRef     = useRef({});
+
+  const fetchPair = useCallback(async (sym) => {
+    if (inflightRef.current[sym]) return;
+    inflightRef.current[sym] = true;
+    try {
+      const needDaily = !dailyRef.current[sym] || Date.now() - dailyRef.current[sym].time > 60000;
+      const reqs = [fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=5m&range=5d`)];
+      if (needDaily) reqs.push(fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=1d&range=90d`));
+      const [d5, d1d] = await Promise.all((await Promise.all(reqs)).map(r => r.json()));
+      const c5 = d5.candles || [];
+      const price = d5.meta?.regularMarketPrice || c5[c5.length - 1]?.close;
+      if (needDaily && d1d) {
+        const c1 = d1d.candles || [];
+        const dPrice = d1d.meta?.regularMarketPrice || c1[c1.length - 1]?.close;
+        dailyRef.current[sym] = { htf: dPrice ? ictHtfBias(ictAnalyze(c1, dPrice)) : null, time: Date.now() };
+      }
+      if (!price) { inflightRef.current[sym] = false; return; }
+      const a = orbAnalyze(c5, price, dailyRef.current[sym]?.htf || null);
+      setPairData(prev => ({ ...prev, [sym]: { price, a, c5 } }));
+      const sig = a?.sig;
+      const refKey = `${sym}|ORB`;
+      const key = sig ? `${sig.dir}|${sig.setup}` : null;
+      const prev = prevAlertRef.current[refKey];
+      const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
+      if (key && prev !== key && isHighQualitySignal('ORB', sig.conf, sig.rr, name, sig.setup)) {
+        const isNew = logSignalAlert({ source: 'ORB', symbol: sym, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp });
+        if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+          new Notification(`FlowEdge ORB — ${name}`, { body: `${sig.dir.toUpperCase()} ${sig.setup} · ${sig.conf}%\n${sig.reason}`, icon: '/favicon.ico' });
+        }
+      }
+      if (key) prevAlertRef.current[refKey] = key;
+    } catch {}
+    inflightRef.current[sym] = false;
+  }, []);
+
+  useEffect(() => {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') Notification.requestPermission();
+    ICT_PAIRS.forEach(p => fetchPair(p.symbol));
+    const iv = setInterval(() => ICT_PAIRS.forEach(p => fetchPair(p.symbol)), 1000);
+    return () => clearInterval(iv);
+  }, [fetchPair]);
+
+  const loaded = Object.keys(pairData).length;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Opening Range Breakout</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>First 30m of London (3:00 ET) & NY (9:30 ET) opens · first close beyond the range trades the break · measured-move target</div>
+        </div>
+        <div style={{ fontSize: 9, fontFamily: 'monospace', color: '#4b5563' }}>{loaded}/{ICT_PAIRS.length} pairs</div>
+      </div>
+
+      {ICT_PAIRS.map(pair => {
+        const d = pairData[pair.symbol];
+        const fp = p => stratFmtPx(pair.symbol, p);
+        const a = d?.a;
+        const dispSess = a?.sessions?.find(s => a.sig && s.key === a.sig.session) || a?.sessions?.[a.sessions.length - 1];
+        return (
+          <div key={pair.symbol} style={{ padding: '9px 11px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                <span style={{ fontWeight: 900, fontSize: 12, color: '#f9fafb' }}>{pair.name}</span>
+                {onChart && <button onClick={() => onChart(TV_SYMBOLS[pair.symbol] || pair.symbol)} style={{ background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 4, padding: '1px 6px', color: '#a5b4fc', fontSize: 8, fontWeight: 700, cursor: 'pointer' }}>📈 TV</button>}
+              </div>
+              <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>{d ? fp(livePrices?.[pair.symbol] ?? d.price) : '…'}</span>
+            </div>
+            {d ? (
+              <>
+                <ICTCandleChart candles={d.c5} sym={pair.symbol} tfLabel="5M · ORB" bars={84}
+                  zones={dispSess ? [{ top: dispSess.orHigh, bottom: dispSess.orLow, idx: dispSess.startIdx, fill: 'rgba(245,158,11,0.10)' }] : []}
+                  bsl={dispSess ? [dispSess.orHigh] : []} ssl={dispSess ? [dispSess.orLow] : []}
+                  sig={a?.sig || null} />
+                <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                  {(a?.sessions || []).map(s => {
+                    const stc = s.state === 'long' ? '#10b981' : s.state === 'short' ? '#ef4444' : s.state === 'forming' ? '#f59e0b' : '#6b7280';
+                    return (
+                      <span key={s.key} style={{ fontSize: 8.5, fontFamily: 'monospace', fontWeight: 700, color: stc, background: `${stc}10`, border: `1px solid ${stc}25`, padding: '2px 7px', borderRadius: 4 }}>
+                        {s.key}: {fp(s.orLow)}–{fp(s.orHigh)} · {s.state === 'forming' ? 'RANGE FORMING' : s.state === 'set' ? 'WAITING FOR BREAK' : s.state === 'long' ? 'BROKE ▲' : 'BROKE ▼'}
+                      </span>
+                    );
+                  })}
+                  {!a?.sessions?.length && <span style={{ fontSize: 9, color: '#374151' }}>No session range in the current data window</span>}
+                </div>
+                {a?.sig && <StratSigCard sig={a.sig} fp={fp} />}
+              </>
+            ) : <div style={{ fontSize: 9, color: '#374151' }}>Loading 5m candles…</div>}
+          </div>
+        );
+      })}
+      <div style={{ fontSize: 9, color: '#374151', textAlign: 'center', paddingTop: 4 }}>
+        ORB — stop at the range midpoint (floored/capped) · target = measured move, min 1.5:1 · counter-HTF breaks and abnormal ranges skipped · Educational use only
+      </div>
+    </div>
+  );
+}
+
+function SMCPanel({ onChart, livePrices }) {
+  const [pairData, setPairData] = useState({});
+  const inflightRef  = useRef({});
+  const prevAlertRef = useRef({});
+  const dailyRef     = useRef({});
+
+  const fetchPair = useCallback(async (sym) => {
+    if (inflightRef.current[sym]) return;
+    inflightRef.current[sym] = true;
+    try {
+      const needDaily = !dailyRef.current[sym] || Date.now() - dailyRef.current[sym].time > 60000;
+      const reqs = [fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=15m&range=5d`)];
+      if (needDaily) reqs.push(fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=1d&range=90d`));
+      const [d15, d1d] = await Promise.all((await Promise.all(reqs)).map(r => r.json()));
+      const c15 = d15.candles || [];
+      const price = d15.meta?.regularMarketPrice || c15[c15.length - 1]?.close;
+      if (needDaily && d1d) {
+        const c1 = d1d.candles || [];
+        const dPrice = d1d.meta?.regularMarketPrice || c1[c1.length - 1]?.close;
+        dailyRef.current[sym] = { htf: dPrice ? ictHtfBias(ictAnalyze(c1, dPrice)) : null, time: Date.now() };
+      }
+      if (!price) { inflightRef.current[sym] = false; return; }
+      const a = smcAnalyze(c15, price, dailyRef.current[sym]?.htf || null);
+      setPairData(prev => ({ ...prev, [sym]: { price, a, c15 } }));
+      const sig = a?.sig;
+      const refKey = `${sym}|SMC`;
+      const key = sig ? `${sig.dir}|${sig.setup}` : null;
+      const prev = prevAlertRef.current[refKey];
+      const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
+      if (key && prev !== key && isHighQualitySignal('SMC', sig.conf, sig.rr, name, sig.setup)) {
+        const isNew = logSignalAlert({ source: 'SMC', symbol: sym, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp });
+        if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+          new Notification(`FlowEdge SMC — ${name}`, { body: `${sig.dir.toUpperCase()} ${sig.setup} · ${sig.conf}%\n${sig.reason}`, icon: '/favicon.ico' });
+        }
+      }
+      if (key) prevAlertRef.current[refKey] = key;
+    } catch {}
+    inflightRef.current[sym] = false;
+  }, []);
+
+  useEffect(() => {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') Notification.requestPermission();
+    ICT_PAIRS.forEach(p => fetchPair(p.symbol));
+    const iv = setInterval(() => ICT_PAIRS.forEach(p => fetchPair(p.symbol)), 1000);
+    return () => clearInterval(iv);
+  }, [fetchPair]);
+
+  const loaded = Object.keys(pairData).length;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Smart Money Concepts</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>15m market structure · BOS continuation · CHoCH reversal · entries at zone mitigation with rejection</div>
+        </div>
+        <div style={{ fontSize: 9, fontFamily: 'monospace', color: '#4b5563' }}>{loaded}/{ICT_PAIRS.length} pairs</div>
+      </div>
+
+      {ICT_PAIRS.map(pair => {
+        const d = pairData[pair.symbol];
+        const fp = p => stratFmtPx(pair.symbol, p);
+        const a = d?.a;
+        const ev = a?.lastEvent;
+        const tc = a?.trend === 'up' ? '#10b981' : a?.trend === 'down' ? '#ef4444' : '#6b7280';
+        return (
+          <div key={pair.symbol} style={{ padding: '9px 11px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                <span style={{ fontWeight: 900, fontSize: 12, color: '#f9fafb' }}>{pair.name}</span>
+                {a && <span style={{ fontSize: 8, fontWeight: 800, color: tc, background: `${tc}14`, padding: '1px 6px', borderRadius: 3 }}>{a.trend === 'up' ? '▲ UPTREND' : a.trend === 'down' ? '▼ DOWNTREND' : '◦ RANGE'}</span>}
+                {ev && <span style={{ fontSize: 8, fontWeight: 800, color: ev.type === 'CHOCH' ? '#f59e0b' : '#3b82f6', background: ev.type === 'CHOCH' ? 'rgba(245,158,11,0.14)' : 'rgba(59,130,246,0.14)', padding: '1px 6px', borderRadius: 3 }}>{ev.type} {ev.dir === 'up' ? '▲' : '▼'} @ {fp(ev.level)}</span>}
+                {onChart && <button onClick={() => onChart(TV_SYMBOLS[pair.symbol] || pair.symbol)} style={{ background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 4, padding: '1px 6px', color: '#a5b4fc', fontSize: 8, fontWeight: 700, cursor: 'pointer' }}>📈 TV</button>}
+              </div>
+              <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>{d ? fp(livePrices?.[pair.symbol] ?? d.price) : '…'}</span>
+            </div>
+            {d ? (
+              <>
+                <ICTCandleChart candles={d.c15} sym={pair.symbol} tfLabel="15M · SMC" bars={96}
+                  zones={a?.zone ? [{ ...a.zone, fill: ev?.dir === 'up' ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)' }] : []}
+                  bsl={a?.structureHighs || []} ssl={a?.structureLows || []}
+                  sig={a?.sig || null} />
+                {a?.sig ? (
+                  <StratSigCard sig={a.sig} fp={fp} extraTags={a.mtfAligned ? [['✓ MTF ALIGNED', '#a5b4fc']] : []} />
+                ) : (
+                  <div style={{ fontSize: 9, color: '#374151', fontWeight: 700 }}>
+                    {a?.mtfVetoed ? 'WAITING — mitigation setup found but it fights the daily bias (MTF veto)'
+                      : ev && a?.zone ? `WAITING — ${ev.type} ${ev.dir} confirmed; watching for mitigation of ${fp(a.zone.bottom)}–${fp(a.zone.top)} with a rejection candle`
+                      : ev ? `${ev.type} ${ev.dir} confirmed — origin zone already invalidated, waiting for new structure`
+                      : 'Building structure…'}
+                  </div>
+                )}
+              </>
+            ) : <div style={{ fontSize: 9, color: '#374151' }}>Loading 15m candles…</div>}
+          </div>
+        );
+      })}
+      <div style={{ fontSize: 9, color: '#374151', textAlign: 'center', paddingTop: 4 }}>
+        SMC — CHoCH mitigation (74%) ranks above BOS pullback (68%) · rejection candle required · daily bias vetoes counter-trend entries · min 1.5:1, runners to structure · Educational use only
+      </div>
+    </div>
+  );
+}
+
 // ─── Backtest & live performance ────────────────────────────────────────────
 
 function summarizeTrades(trades) {
@@ -5249,7 +5663,7 @@ function StatsPanel() {
   );
 }
 
-const TABS = ["Signals", "ICT", "Scalp", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
+const TABS = ["Signals", "ICT", "Scalp", "ORB", "SMC", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -5499,7 +5913,7 @@ export default function App() {
   // WIN when TP is reached, LOSS when SL is hit, EXPIRED (marked-to-market in R)
   // past its holding window. This builds the verifiable live track record.
   useEffect(() => {
-    const MAX_AGE = { SCALP: 12 * 3600e3, INTRADAY: 48 * 3600e3, ICT: 14 * 86400e3, FOREX: 14 * 86400e3 };
+    const MAX_AGE = { SCALP: 12 * 3600e3, INTRADAY: 48 * 3600e3, ORB: 12 * 3600e3, SMC: 48 * 3600e3, ICT: 14 * 86400e3, FOREX: 14 * 86400e3 };
     const t = setInterval(() => {
       try {
         const log = JSON.parse(localStorage.getItem('fe_signal_alerts') || '[]');
@@ -5595,7 +6009,9 @@ export default function App() {
           const dailyHtf = ictHtfBias(an);
           const intra = ictIntradayAnalyze(c15, price, 'intra', dailyHtf);
           const scalp = ictIntradayAnalyze(c5, price, 'scalp', ictHtfBias(intra) || dailyHtf);
-          [['SCALP', scalp?.sig], ['INTRADAY', intra?.sig], ['ICT', ictSig]].forEach(([mode, sig]) => {
+          const orb = orbAnalyze(c5, price, dailyHtf);
+          const smc = smcAnalyze(c15, price, dailyHtf);
+          [['SCALP', scalp?.sig], ['INTRADAY', intra?.sig], ['ICT', ictSig], ['ORB', orb?.sig], ['SMC', smc?.sig]].forEach(([mode, sig]) => {
             const refKey = `${p.symbol}|${mode}`;
             const key = sig ? `${sig.dir}|${sig.setup}` : null;
             const prev = scalpWatchRef.current[refKey];
@@ -5813,6 +6229,8 @@ export default function App() {
                 {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                {tab === "SMC" && <SMCPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "Stats" && <StatsPanel />}
                 {tab === "News" && <NewsPanel watchlist={watchlist} />}
                 {tab === "Journal" && <JournalPanel />}
@@ -5926,6 +6344,8 @@ export default function App() {
                   {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                   {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                  {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                  {tab === "SMC" && <SMCPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "Stats" && <StatsPanel />}
                   {tab === "News" && <NewsPanel watchlist={watchlist} />}
                   {tab === "Journal" && <JournalPanel />}
