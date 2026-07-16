@@ -799,7 +799,7 @@ function AlertsPanel({ stocks }) {
           </div>
           {signalLog.slice(0, 15).map(s => {
             const dc = s.dir === 'long' ? '#10b981' : '#ef4444';
-            const sc = { ICT: '#8b5cf6', SCALP: '#f59e0b', INTRADAY: '#3b82f6', FOREX: '#6366f1', ORB: '#f97316', SMC: '#14b8a6' }[s.source] || '#3b82f6';
+            const sc = { ICT: '#8b5cf6', SCALP: '#f59e0b', INTRADAY: '#3b82f6', FOREX: '#6366f1', ORB: '#f97316', SMC: '#14b8a6', CONFLUENCE: '#fbbf24' }[s.source] || '#3b82f6';
             const fmtP = p => p == null ? '' : p >= 100 ? p.toFixed(2) : p >= 10 ? p.toFixed(3) : p.toFixed(4);
             const ago = (() => {
               const m = Math.floor((Date.now() - s.time) / 60000);
@@ -5361,6 +5361,236 @@ function SMCPanel({ onChart, livePrices }) {
   );
 }
 
+// ─── Order flow ─────────────────────────────────────────────────────────────
+
+// Order-flow proxy — where the money is coming from. Uses real volume when the
+// feed provides it (metals futures carry volume on Yahoo); FX pairs report no
+// volume, so each candle's close position in its range stands in for aggression
+// (buyers in control close candles near their highs). Produces a -100..+100
+// pressure score, a cumulative-delta series, and absorption detection (heavy
+// volume that moves price nowhere — a big passive player soaking up aggression).
+function orderFlowAnalyze(candles) {
+  if (!candles || candles.length < 30) return null;
+  const recent = candles.slice(-96);
+  const hasVol = recent.some(c => (c.volume || 0) > 0);
+  let cum = 0;
+  const cumSeries = [];
+  const deltas = recent.map(c => {
+    const range = c.high - c.low;
+    const pos = range > 0 ? (c.close - c.low) / range : 0.5;
+    const aggression = pos * 2 - 1; // -1 (sellers slammed it) .. +1 (buyers ran it)
+    const weight = hasVol ? (c.volume || 0) : range;
+    const d = aggression * weight;
+    cum += d;
+    cumSeries.push(cum);
+    return d;
+  });
+  const norm = deltas.reduce((s, d) => s + Math.abs(d), 0) || 1;
+  const score = Math.max(-100, Math.min(100, Math.round((deltas.slice(-24).reduce((s, d) => s + d, 0) / norm) * 400)));
+  const recentD = deltas.slice(-12).reduce((s, d) => s + d, 0);
+  const priorD  = deltas.slice(-36, -12).reduce((s, d) => s + d, 0) / 2;
+  const avgW = recent.reduce((s, c) => s + (hasVol ? (c.volume || 0) : c.high - c.low), 0) / recent.length;
+  const absorption = recent.slice(-8).filter(c => {
+    const w = hasVol ? (c.volume || 0) : c.high - c.low;
+    return w > avgW * 2 && Math.abs(c.close - c.open) < (c.high - c.low) * 0.3;
+  }).length;
+  return {
+    flow: score > 15 ? 'buyers' : score < -15 ? 'sellers' : 'neutral',
+    score, cumSeries: cumSeries.slice(-48), hasVol, absorption,
+    shifting: recentD !== 0 && priorD !== 0 && Math.sign(recentD) !== Math.sign(priorD),
+  };
+}
+
+// Cumulative-delta sparkline for the order-flow row
+function CumDeltaSpark({ series }) {
+  if (!series || series.length < 4) return null;
+  const W = 90, H = 22;
+  const lo = Math.min(...series), hi = Math.max(...series);
+  const y = v => hi > lo ? ((hi - v) / (hi - lo)) * (H - 4) + 2 : H / 2;
+  const x = i => (i / (series.length - 1)) * W;
+  const up = series[series.length - 1] >= series[0];
+  const dPath = series.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: 90, height: 22 }}>
+      <line x1={0} x2={W} y1={y(0)} y2={y(0)} stroke="#374151" strokeWidth="0.5" strokeDasharray="2 2" />
+      <path d={dPath} fill="none" stroke={up ? '#10b981' : '#ef4444'} strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+// ─── Confluence — every engine on one page ──────────────────────────────────
+
+function ConfluencePanel({ onChart, livePrices }) {
+  const [pairData, setPairData] = useState({});
+  const inflightRef  = useRef({});
+  const prevAlertRef = useRef({});
+
+  const fetchPair = useCallback(async (sym) => {
+    if (inflightRef.current[sym]) return;
+    inflightRef.current[sym] = true;
+    try {
+      const [d5, d15, d1] = await Promise.all([
+        fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=5m&range=5d`).then(r => r.json()),
+        fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=15m&range=5d`).then(r => r.json()),
+        fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=1d&range=90d`).then(r => r.json()),
+      ]);
+      const c5 = d5.candles || [], c15 = d15.candles || [], c1 = d1.candles || [];
+      const price = d5.meta?.regularMarketPrice || c5[c5.length - 1]?.close;
+      if (!price || c1.length < 25) { inflightRef.current[sym] = false; return; }
+
+      const daily    = ictAnalyze(c1, d1.meta?.regularMarketPrice || c1[c1.length - 1].close);
+      const dailyHtf = ictHtfBias(daily);
+      const intra = ictIntradayAnalyze(c15, price, 'intra', dailyHtf);
+      const scalp = ictIntradayAnalyze(c5, price, 'scalp', ictHtfBias(intra) || dailyHtf);
+      const orb   = orbAnalyze(c5, price, dailyHtf);
+      const smc   = smcAnalyze(c15, price, dailyHtf);
+      const flow  = orderFlowAnalyze(c5);
+
+      const dailySig = daily?.signal ? { dir: daily.signal, setup: daily.signalType.replace('_', ' '), conf: daily.confidence, reason: daily.reason, entry: daily.entry, sl: daily.sl, tp: daily.tp, tp1: daily.tp1, rr: daily.rr } : null;
+      const reads = [
+        { key: 'DAILY ICT', dir: daily?.bias?.verdict === 'BUY' ? 'long' : daily?.bias?.verdict === 'SELL' ? 'short' : null, sig: dailySig },
+        { key: '15M ICT',   dir: intra?.sig?.dir || null, sig: intra?.sig || null },
+        { key: '5M SCALP',  dir: scalp?.sig?.dir || null, sig: scalp?.sig || null },
+        { key: 'ORB',       dir: orb?.sig?.dir || null,   sig: orb?.sig || null },
+        { key: 'SMC',       dir: smc?.sig?.dir || (smc?.trend === 'up' ? 'long' : smc?.trend === 'down' ? 'short' : null), sig: smc?.sig || null },
+        { key: 'ORDER FLOW', dir: flow?.flow === 'buyers' ? 'long' : flow?.flow === 'sellers' ? 'short' : null, sig: null },
+      ];
+      const longs  = reads.filter(r => r.dir === 'long').length;
+      const shorts = reads.filter(r => r.dir === 'short').length;
+      const dir    = longs > shorts ? 'long' : shorts > longs ? 'short' : null;
+      const agree  = Math.max(longs, shorts);
+      const activeAligned = reads.filter(r => r.sig && r.sig.dir === dir);
+      const flowAgrees = (dir === 'long' && flow?.flow === 'buyers') || (dir === 'short' && flow?.flow === 'sellers');
+      const grade =
+        dir && agree >= 4 && activeAligned.length >= 1 && flowAgrees ? 'IMPECCABLE'
+        : dir && agree >= 3 && activeAligned.length >= 1 ? 'STRONG'
+        : dir && agree >= 3 ? 'LEANING'
+        : 'MIXED';
+      let combo = null;
+      if ((grade === 'IMPECCABLE' || grade === 'STRONG') && activeAligned.length) {
+        const best = [...activeAligned].sort((a, b) => (b.sig.conf || 0) - (a.sig.conf || 0))[0].sig;
+        combo = {
+          ...best,
+          setup: `${grade} · ${agree}/6 ENGINES`,
+          conf: Math.min(95, 60 + agree * 6 + (flowAgrees ? 5 : 0)),
+          reason: `${agree}/6 engines agree ${dir === 'long' ? 'LONG' : 'SHORT'} (${reads.filter(r => r.dir === dir).map(r => r.key).join(', ')}) — levels from the highest-conviction entry (${best.setup})`,
+        };
+      }
+      setPairData(prev => ({ ...prev, [sym]: { price, reads, dir, agree, grade, flow, combo, c15, smc } }));
+
+      // Alert only on the top grade — this is the "impeccable trade" signal
+      const refKey = `${sym}|CONFLUENCE`;
+      const key = combo && grade === 'IMPECCABLE' ? `${combo.dir}|${grade}` : null;
+      const prev = prevAlertRef.current[refKey];
+      const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
+      if (key && prev !== key && isHighQualitySignal('CONFLUENCE', combo.conf, combo.rr, name, combo.setup)) {
+        const isNew = logSignalAlert({ source: 'CONFLUENCE', symbol: sym, name, dir: combo.dir, type: combo.setup, conf: combo.conf, reason: combo.reason, price: combo.entry, sl: combo.sl, tp: combo.tp });
+        if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+          new Notification(`FlowEdge ★ CONFLUENCE — ${name}`, { body: `${combo.dir.toUpperCase()} ${combo.setup} · ${combo.conf}%\n${combo.reason}`, icon: '/favicon.ico' });
+        }
+      }
+      if (key) prevAlertRef.current[refKey] = key;
+    } catch {}
+    inflightRef.current[sym] = false;
+  }, []);
+
+  useEffect(() => {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') Notification.requestPermission();
+    ICT_PAIRS.forEach(p => fetchPair(p.symbol));
+    const iv = setInterval(() => ICT_PAIRS.forEach(p => fetchPair(p.symbol)), 1000);
+    return () => clearInterval(iv);
+  }, [fetchPair]);
+
+  const GRADE_STYLE = {
+    IMPECCABLE: { c: '#fbbf24', label: '★ IMPECCABLE' },
+    STRONG:     { c: '#10b981', label: '● STRONG' },
+    LEANING:    { c: '#a5b4fc', label: '◐ LEANING' },
+    MIXED:      { c: '#4b5563', label: '◦ MIXED' },
+  };
+  const gradeRank = { IMPECCABLE: 0, STRONG: 1, LEANING: 2, MIXED: 3 };
+  const rows = ICT_PAIRS.map(p => ({ p, d: pairData[p.symbol] }))
+    .sort((a, b) => (gradeRank[a.d?.grade] ?? 9) - (gradeRank[b.d?.grade] ?? 9) || (b.d?.agree ?? 0) - (a.d?.agree ?? 0));
+  const loaded = Object.keys(pairData).length;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Confluence — All Engines</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>Daily ICT · 15m ICT · 5m Scalp · ORB · SMC · Order Flow — one verdict per pair, ★ when they stack</div>
+        </div>
+        <div style={{ fontSize: 9, fontFamily: 'monospace', color: '#4b5563' }}>{loaded}/{ICT_PAIRS.length} pairs</div>
+      </div>
+
+      {rows.map(({ p: pair, d }) => {
+        const fp = px => stratFmtPx(pair.symbol, px);
+        const gs = GRADE_STYLE[d?.grade] || GRADE_STYLE.MIXED;
+        return (
+          <div key={pair.symbol} style={{ padding: '10px 12px', borderRadius: 9, background: d?.grade === 'IMPECCABLE' ? 'rgba(251,191,36,0.05)' : 'rgba(255,255,255,0.02)', border: `1px solid ${d?.grade === 'IMPECCABLE' ? 'rgba(251,191,36,0.35)' : 'rgba(255,255,255,0.06)'}`, display: 'flex', flexDirection: 'column', gap: 7 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 5 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                <span style={{ fontWeight: 900, fontSize: 12, color: '#f9fafb' }}>{pair.name}</span>
+                <span style={{ fontSize: 9, fontWeight: 900, color: gs.c, background: `${gs.c}18`, padding: '2px 8px', borderRadius: 4 }}>{gs.label}{d?.dir ? ` — ${d.dir === 'long' ? 'LONG' : 'SHORT'} ${d.agree}/6` : ''}</span>
+                {onChart && <button onClick={() => onChart(TV_SYMBOLS[pair.symbol] || pair.symbol)} style={{ background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 4, padding: '1px 6px', color: '#a5b4fc', fontSize: 8, fontWeight: 700, cursor: 'pointer' }}>📈 TV</button>}
+              </div>
+              <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: '#e5e7eb' }}>{d ? fp(livePrices?.[pair.symbol] ?? d.price) : '…'}</span>
+            </div>
+            {d ? (
+              <>
+                {/* Engine votes */}
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  {d.reads.map(r => {
+                    const rc = r.dir === 'long' ? '#10b981' : r.dir === 'short' ? '#ef4444' : '#374151';
+                    return (
+                      <span key={r.key} style={{ fontSize: 8, fontFamily: 'monospace', fontWeight: 800, color: rc, background: `${rc}10`, border: `1px solid ${r.sig ? rc + '55' : rc + '20'}`, padding: '2px 6px', borderRadius: 4 }}>
+                        {r.key} {r.dir === 'long' ? '▲' : r.dir === 'short' ? '▼' : '—'}{r.sig ? ' ●' : ''}
+                      </span>
+                    );
+                  })}
+                </div>
+                {/* Order flow meter */}
+                {d.flow && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 9px', borderRadius: 7, background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.05)', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em' }}>MONEY FLOW</span>
+                    <div style={{ flex: 1, minWidth: 80, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.06)', position: 'relative', overflow: 'hidden' }}>
+                      <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, width: 1, background: 'rgba(255,255,255,0.2)' }} />
+                      <div style={{ position: 'absolute', top: 0, bottom: 0, left: d.flow.score >= 0 ? '50%' : `${50 + d.flow.score / 2}%`, width: `${Math.abs(d.flow.score) / 2}%`, background: d.flow.score >= 0 ? '#10b981' : '#ef4444', borderRadius: 3 }} />
+                    </div>
+                    <span style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 800, color: d.flow.flow === 'buyers' ? '#10b981' : d.flow.flow === 'sellers' ? '#ef4444' : '#6b7280' }}>
+                      {d.flow.flow.toUpperCase()} {d.flow.score > 0 ? '+' : ''}{d.flow.score}
+                    </span>
+                    <CumDeltaSpark series={d.flow.cumSeries} />
+                    <span style={{ fontSize: 7.5, color: '#4b5563' }}>
+                      {d.flow.hasVol ? 'real volume Δ' : 'aggression proxy'}{d.flow.absorption > 0 ? ` · ${d.flow.absorption} absorption bar${d.flow.absorption > 1 ? 's' : ''}` : ''}{d.flow.shifting ? ' · flow shifting' : ''}
+                    </span>
+                  </div>
+                )}
+                {/* Combined trade when engines stack */}
+                {d.combo ? (
+                  <StratSigCard sig={d.combo} fp={fp} extraTags={d.grade === 'IMPECCABLE' ? [['★ ALL SYSTEMS ALIGNED', '#fbbf24']] : []} />
+                ) : (
+                  <div style={{ fontSize: 9, color: '#374151', fontWeight: 700 }}>
+                    {d.grade === 'LEANING' ? `Leaning ${d.dir} (${d.agree}/6) — no live entry from an aligned engine yet` : 'Engines disagree — no confluence trade'}
+                  </div>
+                )}
+                {d.grade === 'IMPECCABLE' && d.c15 && (
+                  <ICTCandleChart candles={d.c15} sym={pair.symbol} tfLabel="15M · CONFLUENCE" bars={96}
+                    zones={d.smc?.zone ? [{ ...d.smc.zone, fill: 'rgba(251,191,36,0.10)' }] : []}
+                    bsl={d.smc?.structureHighs || []} ssl={d.smc?.structureLows || []}
+                    sig={d.combo} />
+                )}
+              </>
+            ) : <div style={{ fontSize: 9, color: '#374151' }}>Running all engines…</div>}
+          </div>
+        );
+      })}
+      <div style={{ fontSize: 9, color: '#374151', textAlign: 'center', paddingTop: 4 }}>
+        ★ IMPECCABLE = 4+ of 6 engines agree + a live entry + order flow confirms · STRONG = 3+ with a live entry · levels come from the highest-conviction engine · Educational use only
+      </div>
+    </div>
+  );
+}
+
 // ─── Backtest & live performance ────────────────────────────────────────────
 
 function summarizeTrades(trades) {
@@ -5663,7 +5893,7 @@ function StatsPanel() {
   );
 }
 
-const TABS = ["Signals", "ICT", "Scalp", "ORB", "SMC", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
+const TABS = ["Signals", "Confluence", "ICT", "Scalp", "ORB", "SMC", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -5913,7 +6143,7 @@ export default function App() {
   // WIN when TP is reached, LOSS when SL is hit, EXPIRED (marked-to-market in R)
   // past its holding window. This builds the verifiable live track record.
   useEffect(() => {
-    const MAX_AGE = { SCALP: 12 * 3600e3, INTRADAY: 48 * 3600e3, ORB: 12 * 3600e3, SMC: 48 * 3600e3, ICT: 14 * 86400e3, FOREX: 14 * 86400e3 };
+    const MAX_AGE = { SCALP: 12 * 3600e3, INTRADAY: 48 * 3600e3, ORB: 12 * 3600e3, SMC: 48 * 3600e3, CONFLUENCE: 48 * 3600e3, ICT: 14 * 86400e3, FOREX: 14 * 86400e3 };
     const t = setInterval(() => {
       try {
         const log = JSON.parse(localStorage.getItem('fe_signal_alerts') || '[]');
@@ -6227,6 +6457,7 @@ export default function App() {
                   </div>
                 )}
                 {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
+                {tab === "Confluence" && <ConfluencePanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
@@ -6342,7 +6573,8 @@ export default function App() {
 
                 <div style={{ flex: 1, overflowY: "auto" }}>
                   {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
-                  {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                  {tab === "Confluence" && <ConfluencePanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "Scalp" && <ScalpPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "SMC" && <SMCPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
