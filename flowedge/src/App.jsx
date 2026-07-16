@@ -2741,7 +2741,10 @@ function ictKillzones() {
 
 // Data-driven edge filter — once a backtest has been run, suppress alerts for
 // pair/timeframe combos and setups that tested net-negative with a real sample.
-// The backtest IS the optimizer: re-running it refreshes what gets alerted.
+// bt.rows / bt.setups are derived from the IN-SAMPLE slice only (see StatsPanel's
+// out-of-sample split) — the held-out slice never informs this filter, so its
+// results are an honest check of whether the filter generalizes. Re-running the
+// backtest refreshes both the filter and the validation.
 function edgeFilterOk(source, name, setup) {
   try {
     const bt = JSON.parse(localStorage.getItem('fe_backtest') || 'null');
@@ -5356,48 +5359,68 @@ function StatsPanel() {
     return () => clearInterval(t);
   }, []);
 
+  // Out-of-sample split: the edge filter (which pairs/setups are allowed to
+  // alert live) is derived ONLY from the in-sample slice — the first 70% of
+  // each pair's history. The held-out final 30% never informs the filter; it
+  // just measures whether that filter's edge survives on data it never saw.
+  // A filter that looks great in-sample but collapses out-of-sample was fit
+  // to noise, not a real edge — this is how you catch that before it costs you.
+  const OOS_SPLIT = 0.7;
+
   const run = async () => {
     if (running) return;
     setRunning(true);
-    const rows = [], allTrades = [];
+    const rowsIS = [], rowsOOS = [], allIS = [], allOOS = [];
     try {
       for (const p of ICT_PAIRS) {
         setProg(`${p.name} — fetching candles…`);
         await new Promise(r => setTimeout(r, 20));
         const [d1, d15] = await Promise.all([
           fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=1d&range=1y`).then(r => r.json()),
-          fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=15m&range=1mo`).then(r => r.json()),
+          fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=15m&range=60d`).then(r => r.json()),
         ]);
         const daily = d1.candles || [], c15 = d15.candles || [];
         const htfAt = daily.length > 30 ? buildDailyBiasAt(daily) : null;
         setProg(`${p.name} — simulating 15m…`);
         await new Promise(r => setTimeout(r, 20));
-        const t15 = c15.length > 120 ? backtestSeries(c15, 'intra', htfAt) : [];
-        t15.forEach(t => allTrades.push({ ...t, pair: p.name, mode: 'INTRADAY' }));
-        rows.push({ pair: p.name, intra: summarizeTrades(t15) });
+        const t15 = c15.length > 200 ? backtestSeries(c15, 'intra', htfAt) : [];
+        const splitTime = c15.length > 200 ? c15[Math.floor(c15.length * OOS_SPLIT)].time : Infinity;
+        const tIS  = t15.filter(t => t.time <  splitTime).map(t => ({ ...t, pair: p.name, mode: 'INTRADAY' }));
+        const tOOS = t15.filter(t => t.time >= splitTime).map(t => ({ ...t, pair: p.name, mode: 'INTRADAY' }));
+        allIS.push(...tIS); allOOS.push(...tOOS);
+        rowsIS.push({ pair: p.name, intra: summarizeTrades(tIS) });
+        rowsOOS.push({ pair: p.name, intra: summarizeTrades(tOOS) });
       }
-      const bySetup = {};
-      allTrades.forEach(t => { (bySetup[t.setup] = bySetup[t.setup] || []).push(t); });
-      const setupsSum = Object.fromEntries(Object.entries(bySetup).map(([k, v]) => [k, summarizeTrades(v)]));
-      // What alerts actually fire after the edge filter: A+ grade minus the
-      // pair combos and setups that tested net-negative (in-sample)
-      const edge = summarizeTrades(allTrades.filter(t => {
+      // Filter rules derived from IN-SAMPLE data only
+      const bySetupIS = {};
+      allIS.forEach(t => { (bySetupIS[t.setup] = bySetupIS[t.setup] || []).push(t); });
+      const setupsSumIS = Object.fromEntries(Object.entries(bySetupIS).map(([k, v]) => [k, summarizeTrades(v)]));
+      const passesFilter = (t, rows, setupsSum) => {
         if (t.conf < 70) return false;
         const row = rows.find(r => r.pair === t.pair);
         if (row?.intra && row.intra.n >= 10 && row.intra.totalR <= 0) return false;
         const st = setupsSum[t.setup];
         if (st && st.n >= 20 && st.totalR <= 0) return false;
         return true;
-      }));
+      };
+      const edge    = summarizeTrades(allIS.filter(t => passesFilter(t, rowsIS, setupsSumIS)));
+      // The critical check: apply the IS-derived filter to data it never saw
+      const edgeOOS = summarizeTrades(allOOS.filter(t => passesFilter(t, rowsIS, setupsSumIS)));
+
+      const bySetupOOS = {};
+      allOOS.forEach(t => { (bySetupOOS[t.setup] = bySetupOOS[t.setup] || []).push(t); });
+
+      const allTrades = [...allIS, ...allOOS];
       const result = {
         generatedAt: Date.now(),
-        window: '~30 days of 15m, daily bias walk-forward from 1y',
-        rows,
+        window: `~${Math.round(84 * OOS_SPLIT)}d in-sample / ~${Math.round(84 * (1 - OOS_SPLIT))}d out-of-sample of 15m, daily bias walk-forward from 1y`,
+        rows: rowsIS, rowsOOS,
         total: summarizeTrades(allTrades),
         intraTotal: summarizeTrades(allTrades.filter(t => t.mode === 'INTRADAY')),
         aplus: summarizeTrades(allTrades.filter(t => t.conf >= 70 && t.rr >= 1.5)),
-        edge,
-        setups: Object.entries(bySetup).map(([k, v]) => ({ setup: k, ...summarizeTrades(v) })).sort((a, b) => b.n - a.n),
+        edge, edgeOOS,
+        setups: Object.entries(bySetupIS).map(([k, v]) => ({ setup: k, ...summarizeTrades(v) })).sort((a, b) => b.n - a.n),
+        setupsOOS: Object.entries(bySetupOOS).map(([k, v]) => ({ setup: k, ...summarizeTrades(v) })).sort((a, b) => b.n - a.n),
       };
       localStorage.setItem('fe_backtest', JSON.stringify(result));
       setBt(result);
@@ -5438,7 +5461,7 @@ function StatsPanel() {
 
       {running && (
         <div style={{ padding: '10px 12px', borderRadius: 8, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.2)', fontSize: 11, color: '#a5b4fc', fontFamily: 'monospace' }}>
-          {prog || 'Starting…'} <span style={{ color: '#4b5563' }}>— simulating ~1 month of 15m bars across all pairs</span>
+          {prog || 'Starting…'} <span style={{ color: '#4b5563' }}>— simulating ~12 weeks of 15m bars across all pairs, split in/out of sample</span>
         </div>
       )}
       {!running && prog && <div style={{ fontSize: 10, color: '#ef4444' }}>{prog}</div>}
@@ -5498,7 +5521,7 @@ function StatsPanel() {
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 5 }}>
-            {[['INTRADAY (15m)', bt.intraTotal], ['A+ ONLY (conf ≥70)', bt.aplus], ...(bt.edge ? [['★ EDGE-FILTERED (what alerts)', bt.edge]] : [])].map(([l, s]) => (
+            {[['INTRADAY (15m)', bt.intraTotal], ['A+ ONLY (conf ≥70)', bt.aplus]].map(([l, s]) => (
               <div key={l} style={{ padding: '8px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
                 <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 3 }}>{l}</div>
                 <StatCell s={s} />
@@ -5507,31 +5530,68 @@ function StatsPanel() {
             ))}
           </div>
 
+          {/* Out-of-sample validation — the honest number */}
+          {bt.edge && bt.edgeOOS && (() => {
+            const held = (bt.edgeOOS.n ?? 0) === 0 ? null : (bt.edgeOOS.expectancy ?? 0) > 0;
+            return (
+              <div style={{ padding: '10px 12px', borderRadius: 9, background: held === false ? 'rgba(239,68,68,0.05)' : held === true ? 'rgba(16,185,129,0.05)' : 'rgba(255,255,255,0.02)', border: `1px solid ${held === false ? 'rgba(239,68,68,0.25)' : held === true ? 'rgba(16,185,129,0.25)' : 'rgba(255,255,255,0.06)'}` }}>
+                <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 6 }}>OUT-OF-SAMPLE VALIDATION — DOES THE EDGE FILTER HOLD UP?</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 8, color: '#a5b4fc', fontWeight: 800 }}>IN-SAMPLE (tunes the filter)</div>
+                    <StatCell s={bt.edge} />
+                    <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>{bt.edge.n ? `PF ${bt.edge.pf ?? '—'} · ${bt.edge.expectancy ?? '—'}R/trade` : 'no trades'}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 8, color: '#fbbf24', fontWeight: 800 }}>OUT-OF-SAMPLE (never seen by the filter)</div>
+                    <StatCell s={bt.edgeOOS} />
+                    <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>{bt.edgeOOS.n ? `PF ${bt.edgeOOS.pf ?? '—'} · ${bt.edgeOOS.expectancy ?? '—'}R/trade` : 'no trades'}</div>
+                  </div>
+                </div>
+                <div style={{ fontSize: 9, marginTop: 6, color: held === false ? '#fca5a5' : held === true ? '#6ee7b7' : '#6b7280', fontWeight: 700 }}>
+                  {held === null ? 'Not enough out-of-sample trades yet to judge — treat the live filter with caution until more data accumulates.'
+                    : held ? '✓ Edge held out-of-sample — the filter is picking up something real, not just fitting noise in this run.'
+                    : '✗ Edge did NOT hold out-of-sample — this filter is likely overfit to the in-sample window. Re-run periodically and don’t trust it blindly.'}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Per-setup */}
           <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
-            <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>BY SETUP</div>
-            {bt.setups.map(s => (
-              <div key={s.setup} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, fontFamily: 'monospace', padding: '2px 0' }}>
-                <span style={{ color: '#9ca3af', fontWeight: 700 }}>{s.setup}</span>
-                <StatCell s={s} />
-              </div>
-            ))}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 4 }}>
+              <span>SETUP</span><span>IN-SAMPLE</span><span>OUT-OF-SAMPLE</span>
+            </div>
+            {bt.setups.map(s => {
+              const oos = (bt.setupsOOS || []).find(x => x.setup === s.setup);
+              return (
+                <div key={s.setup} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', fontSize: 10, fontFamily: 'monospace', padding: '2px 0', alignItems: 'center' }}>
+                  <span style={{ color: '#9ca3af', fontWeight: 700 }}>{s.setup}</span>
+                  <StatCell s={s} />
+                  <StatCell s={oos} />
+                </div>
+              );
+            })}
           </div>
 
           {/* Per-pair */}
           <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 4 }}>
-              <span>PAIR</span><span>INTRADAY (15m)</span>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 4 }}>
+              <span>PAIR</span><span>IN-SAMPLE</span><span>OUT-OF-SAMPLE</span>
             </div>
-            {bt.rows.map(r => (
-              <div key={r.pair} style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', padding: '2px 0', alignItems: 'center' }}>
-                <span style={{ fontSize: 10, fontWeight: 800, color: '#e5e7eb' }}>{r.pair}</span>
-                <StatCell s={r.intra} />
-              </div>
-            ))}
+            {bt.rows.map(r => {
+              const oosRow = (bt.rowsOOS || []).find(x => x.pair === r.pair);
+              return (
+                <div key={r.pair} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', padding: '2px 0', alignItems: 'center' }}>
+                  <span style={{ fontSize: 10, fontWeight: 800, color: '#e5e7eb' }}>{r.pair}</span>
+                  <StatCell s={r.intra} />
+                  <StatCell s={oosRow?.intra} />
+                </div>
+              );
+            })}
           </div>
           <div style={{ fontSize: 9, color: '#374151' }}>
-            Method: walk-forward (no lookahead), entries at bar close. Management: bank half at TP1 (+0.5R), stop to breakeven, run the rest to TP2 — a trade counts as a WIN once TP1 is banked (worst case +0.25R). SL/BE checked before targets on bars touching both (conservative), timeouts marked to market. The edge-filtered row is in-sample (the filter is derived from this same run) — expect live results below it. Excludes spread/slippage. Past performance does not guarantee future results.
+            Method: walk-forward (no lookahead), entries at bar close. Management: bank half at TP1 (+0.5R), stop to breakeven, run the rest to TP2 — a trade counts as a WIN once TP1 is banked (worst case +0.25R). SL/BE checked before targets on bars touching both (conservative), timeouts marked to market. Data is split chronologically {Math.round(OOS_SPLIT * 100)}/{Math.round((1 - OOS_SPLIT) * 100)} — the edge filter that gates live alerts is derived ONLY from the in-sample slice; the out-of-sample slice is held out and never informs the filter, so its numbers are the honest test of whether the edge is real. Excludes spread/slippage. Past performance does not guarantee future results.
           </div>
         </div>
       )}
