@@ -2691,7 +2691,7 @@ function scoreCommoditySignal(d) {
   if (!dir) return null;
 
   const slPct = (atrPct * 1.5) / 100;
-  const tpPct = (atrPct * 3) / 100; // 2:1 reward:risk
+  const tpPct = (atrPct * 2.25) / 100; // 1.5:1 reward:risk
   return {
     dir, type, conf, reason, pos,
     entry: price, chgPct,
@@ -2760,13 +2760,13 @@ function edgeFilterOk(source, name, setup) {
 }
 
 // Alert quality gate — only A-grade setups reach the feed and notifications:
-// confidence >= 70 (liquidity sweeps and OB/OTE confluence), reward:risk >= 2:1,
+// confidence >= 70 (liquidity sweeps and OB/OTE confluence), reward:risk >= 1.5:1,
 // scalps only inside an active ICT killzone (tighter than a broad session check),
 // intraday only during the broader London/NY sessions, and nothing that the
 // latest backtest shows losing money for this pair/timeframe or setup.
 function isHighQualitySignal(source, conf, rr, name, setup) {
   if ((conf ?? 0) < 70) return false;
-  if (rr != null && parseFloat(rr) < 2) return false;
+  if (rr != null && parseFloat(rr) < 1.5) return false;
   if (source === 'SCALP') {
     if (!ictKillzones().length) return false;
   } else if (source === 'INTRADAY') {
@@ -2792,16 +2792,15 @@ function ictHtfBias(a) {
 // closed back out strongly (long wick, close near the far edge of its range)
 // before treating an OB/FVG tap as a valid entry, instead of firing the instant
 // price is merely inside the zone.
-// TP1 distance in R for the scale-out playbook: bank half at +0.5R and move the
-// stop to breakeven, run the rest to TP2. Backtested across TP1 = 1R/0.75R/
-// 0.6R/0.5R — profit factor holds ~1.2-1.27 throughout while win rate climbs
-// from 50% to 64%; 0.5R maximizes win rate without giving up profitability.
-const ICT_TP1_R = 0.5;
+// TP1 distance in R for the scale-out playbook: bank half at +0.75R and move
+// the stop to breakeven, run the rest to TP2. Grid-tested against live data —
+// 0.75R maximizes expectancy now that stops are tight and TP2 floors at 1.5R.
+const ICT_TP1_R = 0.75;
 
 // Points of Interest — unmitigated OB/FVG zones away from current price, in the
 // direction of the prevailing bias. Each is a ready-made limit-entry plan:
-// entry at the zone edge, stop beyond the zone, target at opposite liquidity,
-// minimum 2:1. Returns the best two (OTE-confluent first, then nearest).
+// entry at the zone edge, tight stop beyond the zone, fixed 1.5:1 target.
+// Returns the best two (OTE-confluent first, then nearest).
 function ictComputePOIs({ candles, obs, fvgs, bsl, ssl, atr, hi, lo, price, wantLong, wantShort }) {
   const tol = atr * 0.25;
   const unmit = (z, d) => {
@@ -2813,18 +2812,17 @@ function ictComputePOIs({ candles, obs, fvgs, bsl, ssl, atr, hi, lo, price, want
   const pois = [];
   const add = (z, kind, d) => {
     const entry = d === 'long' ? z.top : z.bottom;
-    let sl = d === 'long' ? z.bottom - atr * 0.3 : z.top + atr * 0.3;
-    // Thin zones produce pip-thin stops — floor the risk at half an ATR and at
-    // 0.12% of price (same floor as live signals, so spread can't eat the stop)
-    const minRisk = Math.max(atr * 0.5, price * 0.0012);
+    let sl = d === 'long' ? z.bottom - atr * 0.2 : z.top + atr * 0.2;
+    // Floor the risk so spread can't eat the stop; cap it so wide zones can't
+    // create oversized stops
+    const minRisk = Math.max(atr * 0.4, price * 0.0008);
+    const maxRisk = atr * 1.2;
     if (Math.abs(entry - sl) < minRisk) sl = d === 'long' ? entry - minRisk : entry + minRisk;
+    if (Math.abs(entry - sl) > maxRisk) sl = d === 'long' ? entry - maxRisk : entry + maxRisk;
     const risk = Math.abs(entry - sl);
     if (!(risk > 0)) return;
-    const target = d === 'long'
-      ? bsl.filter(lv => lv > entry + atr).sort((a, b) => a - b)[0]
-      : ssl.filter(lv => lv < entry - atr).sort((a, b) => b - a)[0];
-    let tp = target ?? (d === 'long' ? entry + atr * 2 : entry - atr * 2);
-    if (Math.abs(tp - entry) < risk * 2) tp = d === 'long' ? entry + risk * 2 : entry - risk * 2;
+    // Fixed 1.5:1 reward:risk
+    const tp = d === 'long' ? entry + risk * 1.5 : entry - risk * 1.5;
     const retr = hi > lo ? (d === 'long' ? (hi - entry) / (hi - lo) : (entry - lo) / (hi - lo)) : 0;
     pois.push({
       dir: d, kind, top: z.top, bottom: z.bottom, idx: z.idx,
@@ -2888,7 +2886,7 @@ function scoreForexSignal(d) {
   if (!dir) return null;
 
   const slPct = (atrPct * 1.5) / 100;
-  const tpPct = (atrPct * 3) / 100; // 2:1 reward:risk
+  const tpPct = (atrPct * 2.25) / 100; // 1.5:1 reward:risk
   return {
     dir, type, conf: Math.round(conf), reason, pos, entry: price, chgPct,
     name: FX_NAMES[d.symbol] || d.symbol,
@@ -2998,11 +2996,11 @@ function ictAnalyze(candles, currentPrice) {
   if (sweptSSL && structure !== 'bearish') {
     signal = 'long';  signalType = 'LIQ_SWEEP';   confidence = 78;
     reason = 'SSL swept — price closed above → institutional reversal long';
-    sl = currentPrice - atr * 1.5; tp = currentPrice + atr * 2.5;
+    sl = currentPrice - atr * 1.0; tp = currentPrice + atr * 1.5;
   } else if (sweptBSL && structure !== 'bullish') {
     signal = 'short'; signalType = 'LIQ_SWEEP';   confidence = 78;
     reason = 'BSL swept — price closed below → distribution / short reversal';
-    sl = currentPrice + atr * 1.5; tp = currentPrice - atr * 2.5;
+    sl = currentPrice + atr * 1.0; tp = currentPrice - atr * 1.5;
   } else if (structure === 'bullish' && priceZone === 'discount') {
     const nearOB  = activeOBs.find(o  => o.type  === 'bullish' && Math.abs(currentPrice - o.top)    / currentPrice < 0.005);
     const nearFVG = activeFVGs.find(f => f.type  === 'bullish' && currentPrice >= f.bottom && currentPrice <= f.top);
@@ -3011,15 +3009,15 @@ function ictAnalyze(candles, currentPrice) {
     if (obConfirmed) {
       signal = 'long'; signalType = 'ORDER_BLOCK'; confidence = 72;
       reason = 'Confirmed rejection at bullish OB in discount zone — institutional demand confluence';
-      sl = nearOB.bottom - atr * 0.5; tp = currentPrice + atr * 3;
+      sl = nearOB.bottom - atr * 0.3; tp = currentPrice + atr * 1.5;
     } else if (fvgConfirmed) {
       signal = 'long'; signalType = 'FAIR_VALUE_GAP'; confidence = 68;
       reason = 'Confirmed rejection filling bullish FVG — imbalance fill with bullish structure';
-      sl = nearFVG.bottom - atr;    tp = currentPrice + atr * 2;
+      sl = nearFVG.bottom - atr * 0.5; tp = currentPrice + atr * 1.5;
     } else {
       signal = 'long'; signalType = 'STRUCTURE'; confidence = 60;
       reason = 'HH/HL market structure in discount zone — trend continuation';
-      sl = currentPrice - atr * 2;  tp = currentPrice + atr * 3;
+      sl = currentPrice - atr * 1.25; tp = currentPrice + atr * 2;
     }
   } else if (structure === 'bearish' && priceZone === 'premium') {
     const nearOB  = activeOBs.find(o  => o.type  === 'bearish' && Math.abs(currentPrice - o.bottom) / currentPrice < 0.005);
@@ -3029,26 +3027,31 @@ function ictAnalyze(candles, currentPrice) {
     if (obConfirmed) {
       signal = 'short'; signalType = 'ORDER_BLOCK'; confidence = 72;
       reason = 'Confirmed rejection at bearish OB in premium zone — institutional supply confluence';
-      sl = nearOB.top + atr * 0.5; tp = currentPrice - atr * 3;
+      sl = nearOB.top + atr * 0.3; tp = currentPrice - atr * 1.5;
     } else if (fvgConfirmed) {
       signal = 'short'; signalType = 'FAIR_VALUE_GAP'; confidence = 68;
       reason = 'Confirmed rejection filling bearish FVG — imbalance fill with bearish structure';
-      sl = nearFVG.top + atr;      tp = currentPrice - atr * 2;
+      sl = nearFVG.top + atr * 0.5; tp = currentPrice - atr * 1.5;
     } else {
       signal = 'short'; signalType = 'STRUCTURE'; confidence = 60;
       reason = 'LH/LL market structure in premium zone — trend continuation';
-      sl = currentPrice + atr * 2; tp = currentPrice - atr * 3;
+      sl = currentPrice + atr * 1.25; tp = currentPrice - atr * 2;
     }
   }
 
-  // Enforce minimum 2:1 reward:risk — extend the target when the raw levels fall short
+  // Cap the stop at 1.5 ATR (wide zones can't create oversized risk); every
+  // trade at least 1.5:1 — the branch target stands when it's further out
   let tp1 = null;
   if (signal && sl) {
-    const risk = Math.abs(currentPrice - sl);
-    if (risk > 0 && Math.abs(tp - currentPrice) < risk * 2) {
-      tp = signal === 'long' ? currentPrice + risk * 2 : currentPrice - risk * 2;
+    let risk = Math.abs(currentPrice - sl);
+    const maxRisk = atr * 1.5;
+    if (risk > maxRisk) { sl = signal === 'long' ? currentPrice - maxRisk : currentPrice + maxRisk; risk = maxRisk; }
+    if (risk > 0) {
+      if (Math.abs(tp - currentPrice) < risk * 1.5) {
+        tp = signal === 'long' ? currentPrice + risk * 1.5 : currentPrice - risk * 1.5;
+      }
+      tp1 = signal === 'long' ? currentPrice + risk * ICT_TP1_R : currentPrice - risk * ICT_TP1_R; // bank half here
     }
-    tp1 = signal === 'long' ? currentPrice + risk * ICT_TP1_R : currentPrice - risk * ICT_TP1_R; // bank half here
   }
 
   let orderFlow = 'neutral';
@@ -3651,31 +3654,27 @@ function ictIntradayAnalyze(candles, price, mode, htfBias = null) {
 
   let sig = null;
   if (dir) {
-    // Stop beyond the OB/FVG that defines the entry; target opposite liquidity pool
-    let sl, tp;
+    // Tight stop just beyond the OB/FVG that defines the entry (1 ATR fallback)
+    let sl;
     if (dir === 'long') {
       const structSL = obLong ? obLong.bottom : fvgLong ? fvgLong.bottom : null;
-      sl = structSL != null ? structSL - atr * 0.3 : price - atr * (isScalp ? 1.5 : 1.5);
-      const target = bsl.filter(lv => lv > price + atr).sort((a, b) => a - b)[0];
-      tp = target ?? price + atr * (isScalp ? 2 : 3);
+      sl = structSL != null ? structSL - atr * 0.25 : price - atr * 1.2;
     } else {
       const structSL = obShort ? obShort.top : fvgShort ? fvgShort.top : null;
-      sl = structSL != null ? structSL + atr * 0.3 : price + atr * (isScalp ? 1.5 : 1.5);
-      const target = ssl.filter(lv => lv < price - atr).sort((a, b) => b - a)[0];
-      tp = target ?? price - atr * (isScalp ? 2 : 3);
+      sl = structSL != null ? structSL + atr * 0.25 : price + atr * 1.2;
     }
-    // Minimum distances — intraday ATR can be a couple of pips, and a stop/target
-    // that tight gets taken out immediately by spread + noise. Floor at a % of price.
-    const minRisk   = price * (isScalp ? 0.0012 : 0.0018); // 12 / 18 pips on a 1.0000 pair
-    const minTarget = price * (isScalp ? 0.0018 : 0.0030);
-    if (Math.abs(price - sl) < minRisk)   sl = dir === 'long' ? price - minRisk   : price + minRisk;
-    if (Math.abs(tp - price) < minTarget) tp = dir === 'long' ? price + minTarget : price - minTarget;
-    // Enforce minimum 2:1 reward:risk
-    const riskDist = Math.abs(price - sl);
-    if (riskDist > 0 && Math.abs(tp - price) < riskDist * 2) {
-      tp = dir === 'long' ? price + riskDist * 2 : price - riskDist * 2;
-    }
+    // Floor at a spread-safe distance, cap so wide zones can't blow up the risk
+    const minRisk = price * (isScalp ? 0.001 : 0.0015); // 10 / 15 pips on a 1.0000 pair
+    const maxRisk = atr * (isScalp ? 1.2 : 1.5);
+    if (Math.abs(price - sl) < minRisk) sl = dir === 'long' ? price - minRisk : price + minRisk;
+    if (Math.abs(price - sl) > maxRisk) sl = dir === 'long' ? price - maxRisk : price + maxRisk;
+    // Every trade at least 1.5:1 — TP2 runs to the opposite liquidity pool when
+    // it sits beyond 1.5R, otherwise exactly 1.5R
     const risk = Math.abs(price - sl);
+    const target = dir === 'long'
+      ? bsl.filter(lv => lv > price + risk * 1.5).sort((a, b) => a - b)[0]
+      : ssl.filter(lv => lv < price - risk * 1.5).sort((a, b) => b - a)[0];
+    const tp = target ?? (dir === 'long' ? price + risk * 1.5 : price - risk * 1.5);
     sig = {
       dir, setup, conf, reason, entry: price, sl, tp,
       tp1: dir === 'long' ? price + risk * ICT_TP1_R : price - risk * ICT_TP1_R, // bank half here, stop to breakeven
@@ -4075,7 +4074,7 @@ function ScalpPanel({ onChart, livePrices }) {
       )}
 
       <div style={{ fontSize: 9, color: '#374151', textAlign: 'center', paddingTop: 4 }}>
-        ICT intraday — rejection-candle confirmation required at every OB/FVG tap · Entries must agree with the daily/15m higher-timeframe bias · Min 2:1 reward:risk · SCALP alerts require an active killzone · Educational use only
+        ICT intraday — rejection-candle confirmation required at every OB/FVG tap · Entries must agree with the daily/15m higher-timeframe bias · Tight stops (capped at ~1 ATR) · Min 1.5:1, winners run to liquidity · SCALP alerts require an active killzone · Educational use only
       </div>
     </div>
   );
@@ -5098,7 +5097,7 @@ function StatsPanel() {
         total: summarizeTrades(allTrades),
         scalpTotal: summarizeTrades(allTrades.filter(t => t.mode === 'SCALP')),
         intraTotal: summarizeTrades(allTrades.filter(t => t.mode === 'INTRADAY')),
-        aplus: summarizeTrades(allTrades.filter(t => t.conf >= 70 && t.rr >= 2)),
+        aplus: summarizeTrades(allTrades.filter(t => t.conf >= 70 && t.rr >= 1.5)),
         edge,
         setups: Object.entries(bySetup).map(([k, v]) => ({ setup: k, ...summarizeTrades(v) })).sort((a, b) => b.n - a.n),
       };
