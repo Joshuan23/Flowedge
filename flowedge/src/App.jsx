@@ -2703,7 +2703,7 @@ function scoreCommoditySignal(d) {
 
 const FX_NAMES = {
   'EURUSD=X': 'EUR/USD', 'GBPUSD=X': 'GBP/USD', 'USDJPY=X': 'USD/JPY',
-  'USDCHF=X': 'USD/CHF', 'AUDUSD=X': 'AUD/USD', 'USDCAD=X': 'USD/CAD', 'NZDUSD=X': 'NZD/USD',
+  'USDCHF=X': 'USD/CHF', 'AUDUSD=X': 'AUD/USD', 'NZDUSD=X': 'NZD/USD',
   'GBPJPY=X': 'GBP/JPY', 'GC=F': 'XAU/USD', 'SI=F': 'XAG/USD',
 };
 
@@ -2904,7 +2904,6 @@ const ICT_PAIRS = [
   { symbol: 'USDJPY=X',  name: 'USD/JPY' },
   { symbol: 'USDCHF=X',  name: 'USD/CHF' },
   { symbol: 'AUDUSD=X',  name: 'AUD/USD' },
-  { symbol: 'USDCAD=X',  name: 'USD/CAD' },
   { symbol: 'NZDUSD=X',  name: 'NZD/USD' },
   { symbol: 'GBPJPY=X',  name: 'GBP/JPY' },
   { symbol: 'XAUUSD',    name: 'XAU/USD' },
@@ -3884,7 +3883,7 @@ function smcAnalyze(candles, price, htfBias = null) {
 // Yahoo symbol → TradingView symbol for the embedded advanced chart
 const TV_SYMBOLS = {
   'EURUSD=X': 'FX:EURUSD', 'GBPUSD=X': 'FX:GBPUSD', 'USDJPY=X': 'FX:USDJPY',
-  'USDCHF=X': 'FX:USDCHF', 'AUDUSD=X': 'FX:AUDUSD', 'USDCAD=X': 'FX:USDCAD',
+  'USDCHF=X': 'FX:USDCHF', 'AUDUSD=X': 'FX:AUDUSD',
   'NZDUSD=X': 'FX:NZDUSD', 'GBPJPY=X': 'FX:GBPJPY',
   'XAUUSD': 'OANDA:XAUUSD', 'XAGUSD': 'OANDA:XAGUSD',
 };
@@ -6116,7 +6115,7 @@ export default function App() {
       const [ctxRes, secRes, fxRes] = await Promise.all([
         fetch('/api/quotes?symbols=SPY,QQQ,IWM,%5EVIX,BZ%3DF,CL%3DF,BTC-USD,%5ETNX,EURUSD%3DX,GBPUSD%3DX,USDJPY%3DX'),
         fetch('/api/quotes?symbols=XLK,XLF,XLV,XLC,XLY,XLP,XLE,XLI,XLB,XLRE,XLU'),
-        fetch('/api/quotes?symbols=EURUSD%3DX,GBPUSD%3DX,USDJPY%3DX,USDCHF%3DX,AUDUSD%3DX,USDCAD%3DX,NZDUSD%3DX,GBPJPY%3DX,GC%3DF,SI%3DF'),
+        fetch('/api/quotes?symbols=EURUSD%3DX,GBPUSD%3DX,USDJPY%3DX,USDCHF%3DX,AUDUSD%3DX,NZDUSD%3DX,GBPJPY%3DX,GC%3DF,SI%3DF'),
       ]);
       const [ctxData, secData, fxData] = await Promise.all([ctxRes.json(), secRes.json(), fxRes.json()]);
       setMarketContext(ctxData?.quoteResponse?.result || []);
