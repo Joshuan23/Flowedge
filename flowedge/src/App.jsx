@@ -2752,11 +2752,9 @@ function edgeFilterOk(source, name, setup) {
     if (bt.validation) {
       if (source === 'INTRADAY'   && bt.validation.intradayOOS   === false) return false;
       if (source === 'CONFLUENCE' && bt.validation.confluenceOOS === false) return false;
+      if (source === 'ICT'        && bt.validation.swingOOS      === false) return false;
     }
-    // Backtest evidence only covers the 15m engine — other sources keep their
-    // own conf/RR/session gates and aren't judged on data that isn't theirs
-    if (source !== 'INTRADAY') return true;
-    if (name) {
+    if (source === 'INTRADAY' && name) {
       const row = (bt.rows || []).find(r => r.pair === name);
       if (row?.intra && row.intra.n >= 10 && row.intra.totalR <= 0) return false;
       if (setup && bt.pairSetups) {
@@ -2764,6 +2762,17 @@ function edgeFilterOk(source, name, setup) {
         if (ps && ps.n >= 8 && ps.totalR <= 0) return false;
       }
     }
+    // ICT source = the daily swing engine, backtested via backtestDailySwing
+    if (source === 'ICT' && name) {
+      const row = (bt.swingRows || []).find(r => r.pair === name);
+      if (row?.swing && row.swing.n >= 5 && row.swing.totalR <= 0) return false;
+      if (setup && bt.swingPairSetups) {
+        const ps = bt.swingPairSetups[`${name}|${setup}`];
+        if (ps && ps.n >= 5 && ps.totalR <= 0) return false;
+      }
+    }
+    // Backtest evidence only covers INTRADAY/CONFLUENCE/ICT — other sources
+    // (ORB, SMC, FOREX) keep their own conf/RR/session gates for now
     return true;
   } catch { return true; }
 }
@@ -5401,6 +5410,56 @@ function backtestConfluenceSeries(candles, htfAt) {
   return trades;
 }
 
+// Walk-forward SWING backtest — the daily ICT engine (structure, FVGs,
+// liquidity sweeps) held for days instead of hours. Same scale-out management
+// as the intraday engines (TP1 bank-half/breakeven, run to TP2), but with a
+// ~1-month max hold since swing entries need room to develop. Larger, cleaner
+// sample than 15m: 5 years of daily bars vs. ~84 days of intraday history.
+function backtestDailySwing(daily) {
+  const warm = 60, maxHold = 20;
+  const trades = [];
+  let open = null;
+  for (let i = warm; i < daily.length; i++) {
+    const c = daily[i];
+    if (open) {
+      const L = open.dir === 'long';
+      if (!open.t1) {
+        const hitSL = L ? c.low <= open.sl : c.high >= open.sl;
+        const hitT1 = L ? c.high >= open.tp1 : c.low <= open.tp1;
+        if (hitSL) { trades.push({ ...open, result: 'loss', r: -1 }); open = null; }
+        else if (hitT1) {
+          open.t1 = true; open.sl = open.entry;
+          const hitT2 = L ? c.high >= open.tp : c.low <= open.tp;
+          if (hitT2) { trades.push({ ...open, result: 'win', r: +(0.5 * ICT_TP1_R + 0.5 * open.rr).toFixed(2) }); open = null; }
+        } else if (i - open.i >= maxHold) {
+          const r = (L ? c.close - open.entry : open.entry - c.close) / open.risk;
+          trades.push({ ...open, result: 'timeout', r: +r.toFixed(2) }); open = null;
+        }
+      } else {
+        const hitBE = L ? c.low <= open.entry : c.high >= open.entry;
+        const hitT2 = L ? c.high >= open.tp : c.low <= open.tp;
+        if (hitBE)      { trades.push({ ...open, result: 'win', r: 0.5 * ICT_TP1_R }); open = null; }
+        else if (hitT2) { trades.push({ ...open, result: 'win', r: +(0.5 * ICT_TP1_R + 0.5 * open.rr).toFixed(2) }); open = null; }
+        else if (i - open.i >= maxHold) {
+          const r = 0.5 * ICT_TP1_R + 0.5 * ((L ? c.close - open.entry : open.entry - c.close) / open.risk);
+          trades.push({ ...open, result: 'win', r: +r.toFixed(2) }); open = null;
+        }
+      }
+      continue;
+    }
+    const a = ictAnalyze(daily.slice(0, i + 1), c.close);
+    if (a?.signal && a.sl != null && a.rr) {
+      const risk = Math.abs(a.entry - a.sl);
+      if (risk > 0) open = {
+        i, time: c.time, dir: a.signal, setup: a.signalType.replace('_', ' '), conf: a.confidence,
+        entry: a.entry, sl: a.sl, tp: a.tp, rr: +a.rr, risk,
+        tp1: a.tp1 ?? (a.signal === 'long' ? a.entry + risk * ICT_TP1_R : a.entry - risk * ICT_TP1_R),
+      };
+    }
+  }
+  return trades;
+}
+
 // Daily bias per point in time, computed walk-forward (no lookahead): the bias
 // applied to an intraday bar only uses daily candles that had already closed.
 function buildDailyBiasAt(daily) {
@@ -5445,13 +5504,13 @@ function StatsPanel() {
   const run = async () => {
     if (running) return;
     setRunning(true);
-    const rowsIS = [], rowsOOS = [], allIS = [], allOOS = [], confIS = [], confOOS = [];
+    const rowsIS = [], rowsOOS = [], allIS = [], allOOS = [], confIS = [], confOOS = [], swingIS = [], swingOOS = [], swingRowsIS = [], swingRowsOOS = [];
     try {
       for (const p of ICT_PAIRS) {
         setProg(`${p.name} — fetching candles…`);
         await new Promise(r => setTimeout(r, 20));
         const [d1, d15] = await Promise.all([
-          fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=1d&range=1y`).then(r => r.json()),
+          fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=1d&range=5y`).then(r => r.json()),
           fetch(`/api/ohlcv?symbol=${encodeURIComponent(p.symbol)}&interval=15m&range=60d`).then(r => r.json()),
         ]);
         const daily = d1.candles || [], c15 = d15.candles || [];
@@ -5470,6 +5529,15 @@ function StatsPanel() {
         const tc = c15.length > 200 ? backtestConfluenceSeries(c15, htfAt) : [];
         confIS.push(...tc.filter(t => t.time < splitTime).map(t => ({ ...t, pair: p.name })));
         confOOS.push(...tc.filter(t => t.time >= splitTime).map(t => ({ ...t, pair: p.name })));
+        setProg(`${p.name} — simulating daily swing…`);
+        await new Promise(r => setTimeout(r, 20));
+        const tswing = daily.length > 200 ? backtestDailySwing(daily) : [];
+        const swingSplitTime = daily.length > 200 ? daily[Math.floor(daily.length * OOS_SPLIT)].time : Infinity;
+        const swIS  = tswing.filter(t => t.time <  swingSplitTime).map(t => ({ ...t, pair: p.name }));
+        const swOOS = tswing.filter(t => t.time >= swingSplitTime).map(t => ({ ...t, pair: p.name }));
+        swingIS.push(...swIS); swingOOS.push(...swOOS);
+        swingRowsIS.push({ pair: p.name, swing: summarizeTrades(swIS) });
+        swingRowsOOS.push({ pair: p.name, swing: summarizeTrades(swOOS) });
       }
       // Filter rules derived from IN-SAMPLE data only.
       // Setups are graded PER PAIR — a setup only gets blocked on pairs where it
@@ -5491,6 +5559,21 @@ function StatsPanel() {
       const conf    = summarizeTrades(confIS);
       const confOOSum = summarizeTrades(confOOS);
 
+      // Swing filter — same per-pair-setup discipline as the intraday engine
+      const swingPairSetupIS = {};
+      swingIS.forEach(t => { (swingPairSetupIS[`${t.pair}|${t.setup}`] = swingPairSetupIS[`${t.pair}|${t.setup}`] || []).push(t); });
+      const swingPairSetups = Object.fromEntries(Object.entries(swingPairSetupIS).map(([k, v]) => [k, summarizeTrades(v)]));
+      const passesSwingFilter = (t) => {
+        if (t.conf < 70) return false; // matches the live gate in isHighQualitySignal
+        const row = swingRowsIS.find(r => r.pair === t.pair);
+        if (row?.swing && row.swing.n >= 5 && row.swing.totalR <= 0) return false;
+        const ps = swingPairSetups[`${t.pair}|${t.setup}`];
+        if (ps && ps.n >= 5 && ps.totalR <= 0) return false;
+        return true;
+      };
+      const swingEdge    = summarizeTrades(swingIS.filter(passesSwingFilter));
+      const swingEdgeOOS = summarizeTrades(swingOOS.filter(passesSwingFilter));
+
       const bySetupIS = {}, bySetupOOS = {};
       allIS.forEach(t => { (bySetupIS[t.setup] = bySetupIS[t.setup] || []).push(t); });
       allOOS.forEach(t => { (bySetupOOS[t.setup] = bySetupOOS[t.setup] || []).push(t); });
@@ -5498,19 +5581,22 @@ function StatsPanel() {
       // Out-of-sample verdicts — these gate live alerts (see edgeFilterOk):
       // held only when expectancy is positive in BOTH windows (a strategy that
       // loses in-sample or on unseen data is not an edge, whatever the other
-      // window says); null = sample too small to judge
-      const verdict = (is, oos) => (oos?.n ?? 0) < 15 ? null
+      // window says); null = sample too small to judge. Swing needs a lower bar
+      // (fewer trades possible even over 5 years of daily bars).
+      const verdict = (is, oos, minN = 15) => (oos?.n ?? 0) < minN ? null
         : ((is?.expectancy ?? 0) > 0 && (oos?.expectancy ?? 0) > 0);
       const validation = {
         intradayOOS:   verdict(edge, edgeOOS),
         confluenceOOS: verdict(conf, confOOSum),
+        swingOOS:      verdict(swingEdge, swingEdgeOOS, 8),
       };
 
       const allTrades = [...allIS, ...allOOS];
       const result = {
         generatedAt: Date.now(),
-        window: `~${Math.round(84 * OOS_SPLIT)}d in-sample / ~${Math.round(84 * (1 - OOS_SPLIT))}d out-of-sample of 15m, daily bias walk-forward from 1y`,
+        window: `~${Math.round(84 * OOS_SPLIT)}d in-sample / ~${Math.round(84 * (1 - OOS_SPLIT))}d out-of-sample of 15m + confluence · ~${Math.round(1826 * OOS_SPLIT)}d in-sample / ~${Math.round(1826 * (1 - OOS_SPLIT))}d out-of-sample of daily swing`,
         rows: rowsIS, rowsOOS, pairSetups, validation,
+        swingRows: swingRowsIS, swingRowsOOS, swingPairSetups, swingEdge, swingEdgeOOS,
         total: summarizeTrades(allTrades),
         intraTotal: summarizeTrades(allTrades.filter(t => t.mode === 'INTRADAY')),
         aplus: summarizeTrades(allTrades.filter(t => t.conf >= 70 && t.rr >= 1.5)),
@@ -5547,7 +5633,7 @@ function StatsPanel() {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
           <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Performance & Backtest</div>
-          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>Historical simulation of the ICT engines + live signal track record</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>Historical simulation of the 15m, confluence, and daily swing engines + live signal track record</div>
         </div>
         <button onClick={run} disabled={running} style={{
           background: running ? 'rgba(255,255,255,0.04)' : 'rgba(99,102,241,0.15)',
@@ -5558,7 +5644,7 @@ function StatsPanel() {
 
       {running && (
         <div style={{ padding: '10px 12px', borderRadius: 8, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.2)', fontSize: 11, color: '#a5b4fc', fontFamily: 'monospace' }}>
-          {prog || 'Starting…'} <span style={{ color: '#4b5563' }}>— simulating ~12 weeks of 15m bars across all pairs, split in/out of sample</span>
+          {prog || 'Starting…'} <span style={{ color: '#4b5563' }}>— simulating 15m, confluence, and 5yr daily swing across all pairs, split in/out of sample</span>
         </div>
       )}
       {!running && prog && <div style={{ fontSize: 10, color: '#ef4444' }}>{prog}</div>}
@@ -5630,14 +5716,15 @@ function StatsPanel() {
           {/* Out-of-sample validation — the honest numbers that gate live alerts */}
           {bt.edge && bt.edgeOOS && (() => {
             const strategies = [
-              ['15M INTRADAY (edge-filtered)', bt.edge, bt.edgeOOS, 'INTRADAY alerts'],
-              ...(bt.conf ? [['★ CONFLUENCE (3+/4 engines agree)', bt.conf, bt.confOOS, 'CONFLUENCE alerts']] : []),
+              ['15M INTRADAY (edge-filtered)', bt.edge, bt.edgeOOS, 'INTRADAY alerts', 15],
+              ...(bt.conf ? [['★ CONFLUENCE (3+/4 engines agree)', bt.conf, bt.confOOS, 'CONFLUENCE alerts', 15]] : []),
+              ...(bt.swingEdge ? [['📈 DAILY SWING (held ~days-weeks, 5yr sample)', bt.swingEdge, bt.swingEdgeOOS, 'ICT (daily) alerts', 8]] : []),
             ];
             return (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                 <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>OUT-OF-SAMPLE VALIDATION — WHAT SURVIVES ON DATA THE FILTER NEVER SAW GATES LIVE ALERTS</div>
-                {strategies.map(([label, is, oos, gates]) => {
-                  const held = (oos?.n ?? 0) < 15 ? null : ((is?.expectancy ?? 0) > 0 && (oos.expectancy ?? 0) > 0);
+                {strategies.map(([label, is, oos, gates, minN]) => {
+                  const held = (oos?.n ?? 0) < minN ? null : ((is?.expectancy ?? 0) > 0 && (oos.expectancy ?? 0) > 0);
                   return (
                     <div key={label} style={{ padding: '10px 12px', borderRadius: 9, background: held === false ? 'rgba(239,68,68,0.05)' : held === true ? 'rgba(16,185,129,0.05)' : 'rgba(255,255,255,0.02)', border: `1px solid ${held === false ? 'rgba(239,68,68,0.25)' : held === true ? 'rgba(16,185,129,0.25)' : 'rgba(255,255,255,0.06)'}` }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5, flexWrap: 'wrap', gap: 4 }}>
@@ -5698,8 +5785,25 @@ function StatsPanel() {
               );
             })}
           </div>
+          {bt.swingRows?.length > 0 && (
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 4 }}>
+                <span>PAIR — DAILY SWING</span><span>IN-SAMPLE</span><span>OUT-OF-SAMPLE</span>
+              </div>
+              {bt.swingRows.map(r => {
+                const oosRow = (bt.swingRowsOOS || []).find(x => x.pair === r.pair);
+                return (
+                  <div key={r.pair} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', padding: '2px 0', alignItems: 'center' }}>
+                    <span style={{ fontSize: 10, fontWeight: 800, color: '#e5e7eb' }}>{r.pair}</span>
+                    <StatCell s={r.swing} />
+                    <StatCell s={oosRow?.swing} />
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div style={{ fontSize: 9, color: '#374151' }}>
-            Method: walk-forward (no lookahead), entries at bar close. Management: bank half at TP1 (+0.5R), stop to breakeven, run the rest to TP2 — a trade counts as a WIN once TP1 is banked (worst case +0.25R). SL/BE checked before targets on bars touching both (conservative), timeouts marked to market. Data is split chronologically {Math.round(OOS_SPLIT * 100)}/{Math.round((1 - OOS_SPLIT) * 100)} — the edge filter that gates live alerts is derived ONLY from the in-sample slice; the out-of-sample slice is held out and never informs the filter, so its numbers are the honest test of whether the edge is real. Excludes spread/slippage. Past performance does not guarantee future results.
+            Method: walk-forward (no lookahead), entries at bar close. Management: bank half at TP1 (+0.5R), stop to breakeven, run the rest to TP2 — a trade counts as a WIN once TP1 is banked (worst case +0.25R). SL/BE checked before targets on bars touching both (conservative), timeouts marked to market. Data is split chronologically {Math.round(OOS_SPLIT * 100)}/{Math.round((1 - OOS_SPLIT) * 100)} — the edge filter that gates live alerts is derived ONLY from the in-sample slice; the out-of-sample slice is held out and never informs the filter, so its numbers are the honest test of whether the edge is real. Daily swing uses 5 years of daily bars (held ~days to a month per trade) instead of the 15m window, for a much larger and less noisy sample. Excludes spread/slippage. Past performance does not guarantee future results.
           </div>
         </div>
       )}
