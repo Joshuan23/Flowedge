@@ -2739,23 +2739,30 @@ function ictKillzones() {
   return zones;
 }
 
-// Data-driven edge filter — once a backtest has been run, suppress alerts for
-// pair/timeframe combos and setups that tested net-negative with a real sample.
-// bt.rows / bt.setups are derived from the IN-SAMPLE slice only (see StatsPanel's
-// out-of-sample split) — the held-out slice never informs this filter, so its
-// results are an honest check of whether the filter generalizes. Re-running the
-// backtest refreshes both the filter and the validation.
+// Data-driven edge filter — once a backtest has been run, suppress alerts the
+// data says lose money. All rules are derived from the IN-SAMPLE slice only
+// (see StatsPanel's out-of-sample split); bt.validation carries the honest
+// out-of-sample verdict per source, and a source whose edge FAILED on held-out
+// data doesn't get to page anyone. Setups are graded per pair, not pooled —
+// a setup only gets blocked on pairs where it actually loses.
 function edgeFilterOk(source, name, setup) {
   try {
     const bt = JSON.parse(localStorage.getItem('fe_backtest') || 'null');
     if (!bt) return true; // no backtest yet — don't block anything
-    if (source === 'INTRADAY' && name) {
+    if (bt.validation) {
+      if (source === 'INTRADAY'   && bt.validation.intradayOOS   === false) return false;
+      if (source === 'CONFLUENCE' && bt.validation.confluenceOOS === false) return false;
+    }
+    // Backtest evidence only covers the 15m engine — other sources keep their
+    // own conf/RR/session gates and aren't judged on data that isn't theirs
+    if (source !== 'INTRADAY') return true;
+    if (name) {
       const row = (bt.rows || []).find(r => r.pair === name);
       if (row?.intra && row.intra.n >= 10 && row.intra.totalR <= 0) return false;
-    }
-    if (setup) {
-      const st = (bt.setups || []).find(x => x.setup === setup);
-      if (st && st.n >= 20 && st.totalR <= 0) return false;
+      if (setup && bt.pairSetups) {
+        const ps = bt.pairSetups[`${name}|${setup}`];
+        if (ps && ps.n >= 8 && ps.totalR <= 0) return false;
+      }
     }
     return true;
   } catch { return true; }
@@ -5326,6 +5333,74 @@ function backtestSeries(candles, mode, htfAt) {
   return trades;
 }
 
+// Walk-forward CONFLUENCE backtest — at each 15m bar, poll the engines the
+// Confluence tab uses (daily bias, 15m ICT, SMC structure, order flow; ORB is
+// omitted since it needs 5m data) and only enter when 3+ of the 4 agree AND an
+// aligned engine has a live entry. Same scale-out management as backtestSeries.
+// This measures the multi-engine-agreement edge itself, not any single engine.
+function backtestConfluenceSeries(candles, htfAt) {
+  const warm = 120, win = 480, maxHold = 96;
+  const trades = [];
+  let open = null;
+  for (let i = warm; i < candles.length; i++) {
+    const c = candles[i];
+    if (open) {
+      const L = open.dir === 'long';
+      if (!open.t1) {
+        const hitSL = L ? c.low <= open.sl : c.high >= open.sl;
+        const hitT1 = L ? c.high >= open.tp1 : c.low <= open.tp1;
+        if (hitSL) { trades.push({ ...open, result: 'loss', r: -1 }); open = null; }
+        else if (hitT1) {
+          open.t1 = true; open.sl = open.entry;
+          const hitT2 = L ? c.high >= open.tp : c.low <= open.tp;
+          if (hitT2) { trades.push({ ...open, result: 'win', r: +(0.5 * ICT_TP1_R + 0.5 * open.rr).toFixed(2) }); open = null; }
+        } else if (i - open.i >= maxHold) {
+          const r = (L ? c.close - open.entry : open.entry - c.close) / open.risk;
+          trades.push({ ...open, result: 'timeout', r: +r.toFixed(2) }); open = null;
+        }
+      } else {
+        const hitBE = L ? c.low <= open.entry : c.high >= open.entry;
+        const hitT2 = L ? c.high >= open.tp : c.low <= open.tp;
+        if (hitBE)      { trades.push({ ...open, result: 'win', r: 0.5 * ICT_TP1_R }); open = null; }
+        else if (hitT2) { trades.push({ ...open, result: 'win', r: +(0.5 * ICT_TP1_R + 0.5 * open.rr).toFixed(2) }); open = null; }
+        else if (i - open.i >= maxHold) {
+          const r = 0.5 * ICT_TP1_R + 0.5 * ((L ? c.close - open.entry : open.entry - c.close) / open.risk);
+          trades.push({ ...open, result: 'win', r: +r.toFixed(2) }); open = null;
+        }
+      }
+      continue;
+    }
+    const slice = candles.slice(Math.max(0, i - win), i + 1);
+    const htf   = htfAt ? htfAt(c.time) : null;
+    const intra = ictIntradayAnalyze(slice, c.close, 'intra', htf);
+    const smc   = smcAnalyze(slice, c.close, htf);
+    const flow  = orderFlowAnalyze(slice);
+    const votes = [
+      htf && htf.verdict !== 'WAIT' ? (htf.verdict === 'BUY' ? 'long' : 'short') : null,
+      intra?.sig?.dir || null,
+      smc?.sig?.dir || (smc?.trend === 'up' ? 'long' : smc?.trend === 'down' ? 'short' : null),
+      flow?.flow === 'buyers' ? 'long' : flow?.flow === 'sellers' ? 'short' : null,
+    ];
+    const longs  = votes.filter(v => v === 'long').length;
+    const shorts = votes.filter(v => v === 'short').length;
+    const dir    = longs > shorts ? 'long' : shorts > longs ? 'short' : null;
+    const agree  = Math.max(longs, shorts);
+    if (dir && agree >= 3) {
+      const sigs = [intra?.sig, smc?.sig].filter(s => s && s.dir === dir && s.rr);
+      if (sigs.length) {
+        const best = sigs.sort((a, b) => (b.conf || 0) - (a.conf || 0))[0];
+        const risk = Math.abs(best.entry - best.sl);
+        if (risk > 0) open = {
+          i, time: c.time, dir, setup: `CONF ${agree}/4`, conf: 60 + agree * 7,
+          entry: best.entry, sl: best.sl, tp: best.tp, rr: +best.rr, risk,
+          tp1: best.tp1 ?? (dir === 'long' ? best.entry + risk * ICT_TP1_R : best.entry - risk * ICT_TP1_R),
+        };
+      }
+    }
+  }
+  return trades;
+}
+
 // Daily bias per point in time, computed walk-forward (no lookahead): the bias
 // applied to an intraday bar only uses daily candles that had already closed.
 function buildDailyBiasAt(daily) {
@@ -5370,7 +5445,7 @@ function StatsPanel() {
   const run = async () => {
     if (running) return;
     setRunning(true);
-    const rowsIS = [], rowsOOS = [], allIS = [], allOOS = [];
+    const rowsIS = [], rowsOOS = [], allIS = [], allOOS = [], confIS = [], confOOS = [];
     try {
       for (const p of ICT_PAIRS) {
         setProg(`${p.name} — fetching candles…`);
@@ -5390,35 +5465,57 @@ function StatsPanel() {
         allIS.push(...tIS); allOOS.push(...tOOS);
         rowsIS.push({ pair: p.name, intra: summarizeTrades(tIS) });
         rowsOOS.push({ pair: p.name, intra: summarizeTrades(tOOS) });
+        setProg(`${p.name} — simulating confluence (multi-engine)…`);
+        await new Promise(r => setTimeout(r, 20));
+        const tc = c15.length > 200 ? backtestConfluenceSeries(c15, htfAt) : [];
+        confIS.push(...tc.filter(t => t.time < splitTime).map(t => ({ ...t, pair: p.name })));
+        confOOS.push(...tc.filter(t => t.time >= splitTime).map(t => ({ ...t, pair: p.name })));
       }
-      // Filter rules derived from IN-SAMPLE data only
-      const bySetupIS = {};
-      allIS.forEach(t => { (bySetupIS[t.setup] = bySetupIS[t.setup] || []).push(t); });
-      const setupsSumIS = Object.fromEntries(Object.entries(bySetupIS).map(([k, v]) => [k, summarizeTrades(v)]));
-      const passesFilter = (t, rows, setupsSum) => {
+      // Filter rules derived from IN-SAMPLE data only.
+      // Setups are graded PER PAIR — a setup only gets blocked on pairs where it
+      // actually loses, not because it loses pooled across unrelated pairs.
+      const pairSetupIS = {};
+      allIS.forEach(t => { (pairSetupIS[`${t.pair}|${t.setup}`] = pairSetupIS[`${t.pair}|${t.setup}`] || []).push(t); });
+      const pairSetups = Object.fromEntries(Object.entries(pairSetupIS).map(([k, v]) => [k, summarizeTrades(v)]));
+      const passesFilter = (t) => {
         if (t.conf < 70) return false;
-        const row = rows.find(r => r.pair === t.pair);
+        const row = rowsIS.find(r => r.pair === t.pair);
         if (row?.intra && row.intra.n >= 10 && row.intra.totalR <= 0) return false;
-        const st = setupsSum[t.setup];
-        if (st && st.n >= 20 && st.totalR <= 0) return false;
+        const ps = pairSetups[`${t.pair}|${t.setup}`];
+        if (ps && ps.n >= 8 && ps.totalR <= 0) return false;
         return true;
       };
-      const edge    = summarizeTrades(allIS.filter(t => passesFilter(t, rowsIS, setupsSumIS)));
+      const edge    = summarizeTrades(allIS.filter(passesFilter));
       // The critical check: apply the IS-derived filter to data it never saw
-      const edgeOOS = summarizeTrades(allOOS.filter(t => passesFilter(t, rowsIS, setupsSumIS)));
+      const edgeOOS = summarizeTrades(allOOS.filter(passesFilter));
+      const conf    = summarizeTrades(confIS);
+      const confOOSum = summarizeTrades(confOOS);
 
-      const bySetupOOS = {};
+      const bySetupIS = {}, bySetupOOS = {};
+      allIS.forEach(t => { (bySetupIS[t.setup] = bySetupIS[t.setup] || []).push(t); });
       allOOS.forEach(t => { (bySetupOOS[t.setup] = bySetupOOS[t.setup] || []).push(t); });
+
+      // Out-of-sample verdicts — these gate live alerts (see edgeFilterOk):
+      // held only when expectancy is positive in BOTH windows (a strategy that
+      // loses in-sample or on unseen data is not an edge, whatever the other
+      // window says); null = sample too small to judge
+      const verdict = (is, oos) => (oos?.n ?? 0) < 15 ? null
+        : ((is?.expectancy ?? 0) > 0 && (oos?.expectancy ?? 0) > 0);
+      const validation = {
+        intradayOOS:   verdict(edge, edgeOOS),
+        confluenceOOS: verdict(conf, confOOSum),
+      };
 
       const allTrades = [...allIS, ...allOOS];
       const result = {
         generatedAt: Date.now(),
         window: `~${Math.round(84 * OOS_SPLIT)}d in-sample / ~${Math.round(84 * (1 - OOS_SPLIT))}d out-of-sample of 15m, daily bias walk-forward from 1y`,
-        rows: rowsIS, rowsOOS,
+        rows: rowsIS, rowsOOS, pairSetups, validation,
         total: summarizeTrades(allTrades),
         intraTotal: summarizeTrades(allTrades.filter(t => t.mode === 'INTRADAY')),
         aplus: summarizeTrades(allTrades.filter(t => t.conf >= 70 && t.rr >= 1.5)),
         edge, edgeOOS,
+        conf, confOOS: confOOSum,
         setups: Object.entries(bySetupIS).map(([k, v]) => ({ setup: k, ...summarizeTrades(v) })).sort((a, b) => b.n - a.n),
         setupsOOS: Object.entries(bySetupOOS).map(([k, v]) => ({ setup: k, ...summarizeTrades(v) })).sort((a, b) => b.n - a.n),
       };
@@ -5530,29 +5627,40 @@ function StatsPanel() {
             ))}
           </div>
 
-          {/* Out-of-sample validation — the honest number */}
+          {/* Out-of-sample validation — the honest numbers that gate live alerts */}
           {bt.edge && bt.edgeOOS && (() => {
-            const held = (bt.edgeOOS.n ?? 0) === 0 ? null : (bt.edgeOOS.expectancy ?? 0) > 0;
+            const strategies = [
+              ['15M INTRADAY (edge-filtered)', bt.edge, bt.edgeOOS, 'INTRADAY alerts'],
+              ...(bt.conf ? [['★ CONFLUENCE (3+/4 engines agree)', bt.conf, bt.confOOS, 'CONFLUENCE alerts']] : []),
+            ];
             return (
-              <div style={{ padding: '10px 12px', borderRadius: 9, background: held === false ? 'rgba(239,68,68,0.05)' : held === true ? 'rgba(16,185,129,0.05)' : 'rgba(255,255,255,0.02)', border: `1px solid ${held === false ? 'rgba(239,68,68,0.25)' : held === true ? 'rgba(16,185,129,0.25)' : 'rgba(255,255,255,0.06)'}` }}>
-                <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 6 }}>OUT-OF-SAMPLE VALIDATION — DOES THE EDGE FILTER HOLD UP?</div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                  <div>
-                    <div style={{ fontSize: 8, color: '#a5b4fc', fontWeight: 800 }}>IN-SAMPLE (tunes the filter)</div>
-                    <StatCell s={bt.edge} />
-                    <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>{bt.edge.n ? `PF ${bt.edge.pf ?? '—'} · ${bt.edge.expectancy ?? '—'}R/trade` : 'no trades'}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 8, color: '#fbbf24', fontWeight: 800 }}>OUT-OF-SAMPLE (never seen by the filter)</div>
-                    <StatCell s={bt.edgeOOS} />
-                    <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>{bt.edgeOOS.n ? `PF ${bt.edgeOOS.pf ?? '—'} · ${bt.edgeOOS.expectancy ?? '—'}R/trade` : 'no trades'}</div>
-                  </div>
-                </div>
-                <div style={{ fontSize: 9, marginTop: 6, color: held === false ? '#fca5a5' : held === true ? '#6ee7b7' : '#6b7280', fontWeight: 700 }}>
-                  {held === null ? 'Not enough out-of-sample trades yet to judge — treat the live filter with caution until more data accumulates.'
-                    : held ? '✓ Edge held out-of-sample — the filter is picking up something real, not just fitting noise in this run.'
-                    : '✗ Edge did NOT hold out-of-sample — this filter is likely overfit to the in-sample window. Re-run periodically and don’t trust it blindly.'}
-                </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>OUT-OF-SAMPLE VALIDATION — WHAT SURVIVES ON DATA THE FILTER NEVER SAW GATES LIVE ALERTS</div>
+                {strategies.map(([label, is, oos, gates]) => {
+                  const held = (oos?.n ?? 0) < 15 ? null : ((is?.expectancy ?? 0) > 0 && (oos.expectancy ?? 0) > 0);
+                  return (
+                    <div key={label} style={{ padding: '10px 12px', borderRadius: 9, background: held === false ? 'rgba(239,68,68,0.05)' : held === true ? 'rgba(16,185,129,0.05)' : 'rgba(255,255,255,0.02)', border: `1px solid ${held === false ? 'rgba(239,68,68,0.25)' : held === true ? 'rgba(16,185,129,0.25)' : 'rgba(255,255,255,0.06)'}` }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5, flexWrap: 'wrap', gap: 4 }}>
+                        <span style={{ fontSize: 9, fontWeight: 900, color: '#e5e7eb' }}>{label}</span>
+                        <span style={{ fontSize: 8, fontWeight: 900, padding: '1px 7px', borderRadius: 3, color: held === true ? '#10b981' : held === false ? '#ef4444' : '#6b7280', background: held === true ? 'rgba(16,185,129,0.14)' : held === false ? 'rgba(239,68,68,0.14)' : 'rgba(255,255,255,0.05)' }}>
+                          {held === true ? '✓ EDGE HELD — alerts on' : held === false ? `✗ FAILED — ${gates} muted` : '? SAMPLE TOO SMALL'}
+                        </span>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                        <div>
+                          <div style={{ fontSize: 8, color: '#a5b4fc', fontWeight: 800 }}>IN-SAMPLE (tunes the filter)</div>
+                          <StatCell s={is} />
+                          <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>{is?.n ? `PF ${is.pf ?? '—'} · ${is.expectancy ?? '—'}R/trade` : 'no trades'}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 8, color: '#fbbf24', fontWeight: 800 }}>OUT-OF-SAMPLE (never seen)</div>
+                          <StatCell s={oos} />
+                          <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>{oos?.n ? `PF ${oos.pf ?? '—'} · ${oos.expectancy ?? '—'}R/trade` : 'no trades'}</div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             );
           })()}
