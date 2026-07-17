@@ -1023,6 +1023,14 @@ function AccountPanel() {
     if (v >= 100) { localStorage.setItem('fe_account_size', String(v)); setAcctSize(v); }
     setEditingAcct(false);
   };
+  const [riskPct, setRiskPct] = useState(() => {
+    try { return parseFloat(localStorage.getItem('fe_risk_pct') || '1') || 1; } catch { return 1; }
+  });
+  const setRisk = (v) => {
+    const clamped = Math.max(0.1, Math.min(5, v));
+    localStorage.setItem('fe_risk_pct', String(clamped));
+    setRiskPct(clamped);
+  };
   const [loadingRef, setLoadingRef] = useState(false);
   const [copied, setCopied] = useState(false);
   const [notifStatus, setNotifStatus] = useState(() =>
@@ -1098,6 +1106,18 @@ function AccountPanel() {
             </button>
           </div>
         )}
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 6 }}>Fixed risk per trade — position sizing on every signal card is based on this</div>
+          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+            {[0.25, 0.5, 1, 2].map(v => (
+              <button key={v} onClick={() => setRisk(v)} style={{
+                padding: '5px 12px', borderRadius: 6, fontSize: 12, fontWeight: 700, border: 'none', cursor: 'pointer',
+                background: riskPct === v ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.05)',
+                color: riskPct === v ? '#a5b4fc' : '#6b7280',
+              }}>{v}%</button>
+            ))}
+          </div>
+        </div>
       </div>
 
       {/* Referral */}
@@ -2739,13 +2759,109 @@ function ictKillzones() {
   return zones;
 }
 
+// News blackout — hard-blocks alerts within a window of major US releases,
+// which move price on liquidity/positioning, not on technical structure, and
+// aren't something the backtest's OHLC-only simulation can price in (no
+// spread widening or slippage modeled). FOMC/CPI/NFP release at fixed times
+// (ET); dates come from FOMC_DATES/CPI_DATES (declared later, but this is
+// only ever called from event handlers, well after module load).
+const NEWS_BLACKOUT_MIN = 20;
+function newsBlackoutActive() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' }).formatToParts(now);
+  const get = t => parseInt(parts.find(p => p.type === t)?.value ?? '0', 10);
+  const todayET = `${get('year')}-${String(get('month')).padStart(2, '0')}-${String(get('day')).padStart(2, '0')}`;
+  const minutesNow = get('hour') * 60 + get('minute');
+
+  const events = [];
+  if (typeof FOMC_DATES !== 'undefined' && FOMC_DATES.includes(todayET)) events.push({ label: 'FOMC', at: 14 * 60 });      // 2:00 PM ET statement
+  if (typeof CPI_DATES  !== 'undefined' && CPI_DATES.includes(todayET))  events.push({ label: 'CPI',  at: 8 * 60 + 30 });  // 8:30 AM ET
+  // NFP: first Friday of the month, 8:30 AM ET
+  const d = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  if (d.getDay() === 5 && d.getDate() <= 7) events.push({ label: 'NFP', at: 8 * 60 + 30 });
+
+  for (const e of events) {
+    const diff = Math.abs(minutesNow - e.at);
+    if (diff <= NEWS_BLACKOUT_MIN) return { active: true, event: e.label, minutesFrom: minutesNow - e.at };
+  }
+  return { active: false, event: null, minutesFrom: null };
+}
+
+// Regime classification — Kaufman-style efficiency ratio: how much of the
+// path traveled over N bars was net directional movement vs back-and-forth
+// noise. High = trending (a clean directional move), low = ranging/choppy.
+function efficiencyRatio(candles, n = 20) {
+  if (!candles || candles.length < n + 1) return null;
+  const recent = candles.slice(-n - 1);
+  const net = Math.abs(recent[recent.length - 1].close - recent[0].close);
+  let path = 0;
+  for (let i = 1; i < recent.length; i++) path += Math.abs(recent[i].close - recent[i - 1].close);
+  return path > 0 ? net / path : 0;
+}
+function regimeOf(candles, n = 20) {
+  const er = efficiencyRatio(candles, n);
+  if (er == null) return null;
+  return er >= 0.35 ? 'trending' : er <= 0.2 ? 'ranging' : 'transitional';
+}
+
+// Volatility state — current range vs its own recent average. Expansion =
+// breakout-friendly (ORB wants this); compression = quiet, reversion-prone.
+function volatilityState(candles, n = 20) {
+  if (!candles || candles.length < n + 1) return null;
+  const recent = candles.slice(-n - 1, -1);
+  const avgRange = recent.reduce((s, c) => s + (c.high - c.low), 0) / recent.length;
+  if (!(avgRange > 0)) return null;
+  const lastRange = candles[candles.length - 1].high - candles[candles.length - 1].low;
+  const ratio = lastRange / avgRange;
+  return ratio >= 1.5 ? 'expansion' : ratio <= 0.6 ? 'compression' : 'normal';
+}
+
+// Which regime each setup type is hypothesized to want — reversal setups favor
+// ranging/exhausted conditions, continuation setups favor a trending tape,
+// breakouts favor volatility expansion. This is a hypothesis until StatsPanel's
+// backtest measures whether matched-regime trades actually outperform
+// mismatched ones (bt.validation.regimeHelps) — only then does it gate live
+// alerts (see edgeFilterOk). Until proven, signals still carry the regime tag.
+const SETUP_REGIME = {
+  'LIQ SWEEP': 'ranging', 'LIQ_SWEEP': 'ranging',
+  'STRUCTURE': 'trending',
+  'FVG': 'trending', 'FVG + OTE': 'trending', 'FAIR VALUE GAP': 'trending', 'FAIR_VALUE_GAP': 'trending',
+  'CHOCH MITIGATION': 'ranging', 'BOS MITIGATION': 'trending',
+};
+function regimeMatches(setup, regime) {
+  const want = SETUP_REGIME[setup];
+  if (!want || !regime) return true; // no hypothesis for this setup (e.g. ORB, CONF n/x) — don't block
+  return want === regime || regime === 'transitional';
+}
+
+// Daily risk circuit breaker — reads today's closed trades from the live
+// tracker (fe_signal_alerts) and halts new alerts once the day's realized
+// loss reaches -2R or 3 losing trades, whichever comes first. Resets at ET
+// midnight since that's the FX day boundary. Protects against a system that's
+// individually well-calibrated but hits a genuinely bad day/correlated move.
+const DAILY_MAX_LOSS_R = -2;
+const DAILY_MAX_LOSSES = 3;
+function dailyRiskHalt() {
+  try {
+    const log = JSON.parse(localStorage.getItem('fe_signal_alerts') || '[]');
+    const now = new Date();
+    const etDate = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+    const todays = log.filter(e => e.closedAt && new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(e.closedAt)) === etDate);
+    const losses = todays.filter(e => e.outcome === 'LOSS').length;
+    const netR = todays.reduce((s, e) => s + (e.rMult ?? 0), 0);
+    if (losses >= DAILY_MAX_LOSSES) return { halted: true, reason: `${losses} losing trades today` };
+    if (netR <= DAILY_MAX_LOSS_R) return { halted: true, reason: `${netR.toFixed(1)}R realized today` };
+    return { halted: false, reason: null, netR: +netR.toFixed(1), losses };
+  } catch { return { halted: false, reason: null }; }
+}
+
 // Data-driven edge filter — once a backtest has been run, suppress alerts the
 // data says lose money. All rules are derived from the IN-SAMPLE slice only
 // (see StatsPanel's out-of-sample split); bt.validation carries the honest
 // out-of-sample verdict per source, and a source whose edge FAILED on held-out
 // data doesn't get to page anyone. Setups are graded per pair, not pooled —
 // a setup only gets blocked on pairs where it actually loses.
-function edgeFilterOk(source, name, setup) {
+function edgeFilterOk(source, name, setup, regime) {
   try {
     const bt = JSON.parse(localStorage.getItem('fe_backtest') || 'null');
     if (!bt) return true; // no backtest yet — don't block anything
@@ -2771,6 +2887,11 @@ function edgeFilterOk(source, name, setup) {
         if (ps && ps.n >= 5 && ps.totalR <= 0) return false;
       }
     }
+    // Regime gate — only enforced once the backtest has shown matched-regime
+    // trades actually outperform mismatched ones (see StatsPanel's regime
+    // check). Until proven, signals still carry the regime tag but aren't
+    // blocked on it — "measure before you gate" applies here too.
+    if (regime && bt.validation?.regimeHelps === true && setup && !regimeMatches(setup, regime)) return false;
     // Backtest evidence only covers INTRADAY/CONFLUENCE/ICT — other sources
     // (ORB, SMC, FOREX) keep their own conf/RR/session gates for now
     return true;
@@ -2778,17 +2899,20 @@ function edgeFilterOk(source, name, setup) {
 }
 
 // Alert quality gate — only A-grade setups reach the feed and notifications:
-// confidence >= 70 (liquidity sweeps and OB/OTE confluence), reward:risk >= 1.5:1,
-// intraday/SMC only during the London/NY sessions, and nothing that the latest
-// backtest shows losing money for this pair/timeframe or setup.
-function isHighQualitySignal(source, conf, rr, name, setup) {
+// confidence >= 70, reward:risk >= 1.5:1, intraday/SMC only during London/NY
+// sessions, nothing within 20min of FOMC/CPI/NFP (unpriceable slippage risk),
+// nothing once the day's risk budget is blown (-2R or 3 losses), nothing the
+// backtest shows losing money for this pair/setup/regime.
+function isHighQualitySignal(source, conf, rr, name, setup, regime) {
   if ((conf ?? 0) < 70) return false;
   if (rr != null && parseFloat(rr) < 1.5) return false;
+  if (newsBlackoutActive().active) return false;
+  if (dailyRiskHalt().halted) return false;
   if (source === 'INTRADAY' || source === 'SMC') {
     const s = fxSessions();
     if (!s.includes('LONDON') && !s.includes('NEW YORK')) return false;
   }
-  if (!edgeFilterOk(source, name, setup)) return false;
+  if (!edgeFilterOk(source, name, setup, regime)) return false;
   return true;
 }
 
@@ -3073,6 +3197,7 @@ function ictAnalyze(candles, currentPrice) {
     signal, signalType, confidence, reason, entry: currentPrice, sl, tp, tp1,
     rr: (sl && tp && sl !== currentPrice) ? Math.abs((tp - currentPrice) / (sl - currentPrice)).toFixed(1) : null,
     atr, rangeHigh, rangeLow, rangeMid,
+    regime: regimeOf(candles, 20), volState: volatilityState(candles, 20),
   };
 }
 
@@ -3206,8 +3331,8 @@ function ICTPanel({ onChart, livePrices }) {
           const key = analysis.signal + analysis.signalType;
           const prev = prevSignalsRef.current[sym];
           const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
-          if (prev !== key && isHighQualitySignal('ICT', analysis.confidence, analysis.rr, name, analysis.signalType.replace('_', ' '))) {
-            const isNew = logSignalAlert({ source: 'ICT', symbol: sym, name, dir: analysis.signal, type: analysis.signalType.replace('_', ' '), conf: analysis.confidence, reason: analysis.reason, price: analysis.entry, sl: analysis.sl, tp: analysis.tp });
+          if (prev !== key && isHighQualitySignal('ICT', analysis.confidence, analysis.rr, name, analysis.signalType.replace('_', ' '), analysis.regime)) {
+            const isNew = logSignalAlert({ source: 'ICT', symbol: sym, name, dir: analysis.signal, type: analysis.signalType.replace('_', ' '), conf: analysis.confidence, reason: analysis.reason, price: analysis.entry, sl: analysis.sl, tp: analysis.tp, regime: analysis.regime, volState: analysis.volState });
             if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
               new Notification(`FlowEdge ICT — ${name}`, {
                 body: `${analysis.signal.toUpperCase()} ${analysis.signalType.replace('_', ' ')} · ${analysis.confidence}%\n${analysis.reason}`,
@@ -3637,12 +3762,14 @@ function ictIntradayAnalyze(candles, price, mode, htfBias = null) {
     wantShort: htfBias && htfBias.verdict !== 'WAIT' ? htfBias.verdict === 'SELL' : structure !== 'bullish',
   });
 
+  const regime = regimeOf(candles, isScalp ? 20 : 20), volState = volatilityState(candles, 20);
+  if (sig) { sig.regime = regime; sig.volState = volState; }
   return {
     structure, zone, eq, hi, lo, bsl, ssl, pois,
     retr: structure === 'bearish' ? retrShort : retrLong,
     inOTE: structure === 'bearish' ? inOTEShort : inOTELong,
     fvgCount: fvgs.length, sweptBSL, sweptSSL, sig,
-    mtfVetoed, mtfAligned,
+    mtfVetoed, mtfAligned, regime, volState,
     vetoedSetup: mtfVetoed ? { dir: rawDir, setup: rawSetup, reason: rawReason } : null,
   };
 }
@@ -3727,13 +3854,14 @@ function orbAnalyze(candles, price, htfBias = null) {
             tp1: sess.dir === 'long' ? price + risk * ICT_TP1_R : price - risk * ICT_TP1_R,
             rr: (Math.abs(tp - price) / risk).toFixed(1),
             session: s.key,
+            regime: regimeOf(candles, 20), volState: volatilityState(candles, 20),
           };
         }
       }
     }
     sessions.push(sess);
   }
-  return { sessions, sig, atr };
+  return { sessions, sig, atr, regime: regimeOf(candles, 20), volState: volatilityState(candles, 20) };
 }
 
 // ─── Smart Money Concepts (SMC) ─────────────────────────────────────────────
@@ -3819,8 +3947,10 @@ function smcAnalyze(candles, price, htfBias = null) {
     }
   }
 
+  const regime = regimeOf(candles, 20), volState = volatilityState(candles, 20);
+  if (sig) { sig.regime = regime; sig.volState = volState; }
   return {
-    trend, events: events.slice(-4), lastEvent, zone, sig, mtfVetoed, mtfAligned,
+    trend, events: events.slice(-4), lastEvent, zone, sig, mtfVetoed, mtfAligned, regime, volState,
     structureHighs: highs.slice(-3).map(h => h.price),
     structureLows:  lows.slice(-3).map(l => l.price),
   };
@@ -4809,8 +4939,13 @@ function NewsPanel({ watchlist }) {
 }
 
 // Shared signal card body used by the ORB and SMC panels
-function StratSigCard({ sig, fp, extraTags = [] }) {
+function StratSigCard({ sig, fp, extraTags = [], sym }) {
   const dc = sig.dir === 'long' ? '#10b981' : '#ef4444';
+  const ps = positionSize(sig.entry, sig.sl, sym);
+  const condTags = [
+    sig.regime && [sig.regime.toUpperCase(), sig.regime === 'trending' ? '#10b981' : sig.regime === 'ranging' ? '#f59e0b' : '#6b7280'],
+    sig.volState && sig.volState !== 'normal' && [sig.volState.toUpperCase(), sig.volState === 'expansion' ? '#a855f7' : '#6b7280'],
+  ].filter(Boolean);
   return (
     <div style={{ padding: '7px 9px', borderRadius: 7, background: `${dc}07`, border: `1px solid ${dc}22`, display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -4818,6 +4953,7 @@ function StratSigCard({ sig, fp, extraTags = [] }) {
           <span style={{ fontSize: 8, fontWeight: 900, color: '#10b981', background: 'rgba(16,185,129,0.14)', padding: '1px 5px', borderRadius: 3 }}>● ACTIVE</span>
           <span style={{ fontSize: 8, fontWeight: 800, color: dc }}>{sig.dir === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
           <span style={{ fontSize: 8, color: '#6b7280', fontWeight: 700 }}>{sig.setup}</span>
+          {condTags.map(([t, c]) => <span key={t} style={{ fontSize: 7, fontWeight: 700, color: c, background: `${c}14`, padding: '1px 5px', borderRadius: 3 }}>{t}</span>)}
           {extraTags.map(([t, c]) => <span key={t} style={{ fontSize: 7, fontWeight: 800, color: c, background: `${c}16`, padding: '1px 5px', borderRadius: 3 }}>{t}</span>)}
         </div>
         <span style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 800, color: sig.conf >= 70 ? '#10b981' : '#f59e0b' }}>{sig.conf}%</span>
@@ -4831,12 +4967,33 @@ function StratSigCard({ sig, fp, extraTags = [] }) {
           </div>
         ))}
       </div>
+      {ps && (
+        <div style={{ fontSize: 8, color: '#6b7280' }}>
+          Risk ${ps.riskDollars.toFixed(0)} ({ps.riskPct}% of ${ps.acctSize.toLocaleString()}) → ~{ps.units < 10 ? ps.units.toFixed(2) : Math.round(ps.units).toLocaleString()} units{!ps.exact ? ' (approx — non-USD quote)' : ''}
+        </div>
+      )}
       <div style={{ fontSize: 8, color: '#4b5563' }}>Bank half at TP1, move stop to breakeven, run the rest to TP2</div>
     </div>
   );
 }
 
 const stratFmtPx = (sym, p) => p == null ? '—' : sym?.startsWith('XAUUSD') ? p.toFixed(2) : sym?.startsWith('XAGUSD') ? p.toFixed(3) : p >= 100 ? p.toFixed(3) : p.toFixed(4);
+
+// Position sizing from the account's fixed risk % (set in Account tab) and a
+// signal's entry/stop distance. riskDollars = acctSize * riskPct is exact;
+// units = riskDollars / |entry-sl| is exact for USD-quoted instruments (metals,
+// XXX/USD pairs) and a reasonable approximation otherwise — flagged as such.
+function positionSize(entry, sl, sym) {
+  if (entry == null || sl == null || entry === sl) return null;
+  let acctSize = 25000, riskPct = 1;
+  try { acctSize = parseInt(localStorage.getItem('fe_account_size') || '25000') || 25000; } catch {}
+  try { riskPct  = parseFloat(localStorage.getItem('fe_risk_pct') || '1') || 1; } catch {}
+  const riskDollars = acctSize * (riskPct / 100);
+  const dist = Math.abs(entry - sl);
+  const units = riskDollars / dist;
+  const usdQuoted = sym?.endsWith('USD=X') || sym?.startsWith('XAUUSD') || sym?.startsWith('XAGUSD');
+  return { riskDollars, units, riskPct, acctSize, exact: !!usdQuoted };
+}
 
 function ORBPanel({ onChart, livePrices }) {
   const [pairData, setPairData] = useState({});
@@ -4867,8 +5024,8 @@ function ORBPanel({ onChart, livePrices }) {
       const key = sig ? `${sig.dir}|${sig.setup}` : null;
       const prev = prevAlertRef.current[refKey];
       const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
-      if (key && prev !== key && isHighQualitySignal('ORB', sig.conf, sig.rr, name, sig.setup)) {
-        const isNew = logSignalAlert({ source: 'ORB', symbol: sym, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp });
+      if (key && prev !== key && isHighQualitySignal('ORB', sig.conf, sig.rr, name, sig.setup, sig.regime)) {
+        const isNew = logSignalAlert({ source: 'ORB', symbol: sym, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp, regime: sig.regime, volState: sig.volState });
         if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
           new Notification(`FlowEdge ORB — ${name}`, { body: `${sig.dir.toUpperCase()} ${sig.setup} · ${sig.conf}%\n${sig.reason}`, icon: '/favicon.ico' });
         }
@@ -4927,7 +5084,7 @@ function ORBPanel({ onChart, livePrices }) {
                   })}
                   {!a?.sessions?.length && <span style={{ fontSize: 9, color: '#374151' }}>No session range in the current data window</span>}
                 </div>
-                {a?.sig && <StratSigCard sig={a.sig} fp={fp} />}
+                {a?.sig && <StratSigCard sig={a.sig} fp={fp} sym={pair.symbol} />}
               </>
             ) : <div style={{ fontSize: 9, color: '#374151' }}>Loading 5m candles…</div>}
           </div>
@@ -4969,8 +5126,8 @@ function SMCPanel({ onChart, livePrices }) {
       const key = sig ? `${sig.dir}|${sig.setup}` : null;
       const prev = prevAlertRef.current[refKey];
       const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
-      if (key && prev !== key && isHighQualitySignal('SMC', sig.conf, sig.rr, name, sig.setup)) {
-        const isNew = logSignalAlert({ source: 'SMC', symbol: sym, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp });
+      if (key && prev !== key && isHighQualitySignal('SMC', sig.conf, sig.rr, name, sig.setup, sig.regime)) {
+        const isNew = logSignalAlert({ source: 'SMC', symbol: sym, name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp, regime: sig.regime, volState: sig.volState });
         if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
           new Notification(`FlowEdge SMC — ${name}`, { body: `${sig.dir.toUpperCase()} ${sig.setup} · ${sig.conf}%\n${sig.reason}`, icon: '/favicon.ico' });
         }
@@ -5022,7 +5179,7 @@ function SMCPanel({ onChart, livePrices }) {
                   bsl={a?.structureHighs || []} ssl={a?.structureLows || []}
                   sig={a?.sig || null} />
                 {a?.sig ? (
-                  <StratSigCard sig={a.sig} fp={fp} extraTags={a.mtfAligned ? [['✓ MTF ALIGNED', '#a5b4fc']] : []} />
+                  <StratSigCard sig={a.sig} fp={fp} sym={pair.symbol} extraTags={a.mtfAligned ? [['✓ MTF ALIGNED', '#a5b4fc']] : []} />
                 ) : (
                   <div style={{ fontSize: 9, color: '#374151', fontWeight: 700 }}>
                     {a?.mtfVetoed ? 'WAITING — mitigation setup found but it fights the daily bias (MTF veto)'
@@ -5102,6 +5259,34 @@ function CumDeltaSpark({ series }) {
 
 // ─── Confluence — every engine on one page ──────────────────────────────────
 
+// Live status of the conditions that gate alerts — makes the "blocked, not
+// downgraded" filtering visible instead of silent. Refreshes every 10s (news
+// blackout and session state only change at minute granularity).
+function TradingConditionsBar() {
+  const [tick, setTick] = useState(0);
+  useEffect(() => { const t = setInterval(() => setTick(x => x + 1), 10000); return () => clearInterval(t); }, []);
+  const news = newsBlackoutActive();
+  const risk = dailyRiskHalt();
+  const sessions = fxSessions();
+  const kz = ictKillzones();
+  const sessionOk = sessions.includes('LONDON') || sessions.includes('NEW YORK');
+
+  const Chip = ({ label, ok, detail }) => (
+    <span style={{ fontSize: 9, fontWeight: 800, padding: '2px 8px', borderRadius: 4, color: ok ? '#10b981' : '#ef4444', background: ok ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)' }}>
+      {ok ? '✓' : '✗'} {label}{detail ? ` — ${detail}` : ''}
+    </span>
+  );
+  return (
+    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', padding: '7px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+      <span style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em' }}>CONDITIONS</span>
+      <Chip label="NEWS" ok={!news.active} detail={news.active ? `${news.event} blackout` : null} />
+      <Chip label="DAILY RISK" ok={!risk.halted} detail={risk.halted ? risk.reason : risk.netR != null ? `${risk.netR >= 0 ? '+' : ''}${risk.netR}R today` : null} />
+      <Chip label="SESSION" ok={sessionOk} detail={sessions.join('/') || 'closed'} />
+      {kz.length > 0 && <span style={{ fontSize: 9, fontWeight: 800, color: '#f59e0b', background: 'rgba(245,158,11,0.12)', padding: '2px 8px', borderRadius: 4 }}>⚡ {kz.join(', ')}</span>}
+    </div>
+  );
+}
+
 function ConfluencePanel({ onChart, livePrices }) {
   const [pairData, setPairData] = useState({});
   const inflightRef  = useRef({});
@@ -5127,7 +5312,7 @@ function ConfluencePanel({ onChart, livePrices }) {
       const smc   = smcAnalyze(c15, price, dailyHtf);
       const flow  = orderFlowAnalyze(c5);
 
-      const dailySig = daily?.signal ? { dir: daily.signal, setup: daily.signalType.replace('_', ' '), conf: daily.confidence, reason: daily.reason, entry: daily.entry, sl: daily.sl, tp: daily.tp, tp1: daily.tp1, rr: daily.rr } : null;
+      const dailySig = daily?.signal ? { dir: daily.signal, setup: daily.signalType.replace('_', ' '), conf: daily.confidence, reason: daily.reason, entry: daily.entry, sl: daily.sl, tp: daily.tp, tp1: daily.tp1, rr: daily.rr, regime: daily.regime, volState: daily.volState } : null;
       const reads = [
         { key: 'DAILY ICT', dir: daily?.bias?.verdict === 'BUY' ? 'long' : daily?.bias?.verdict === 'SELL' ? 'short' : null, sig: dailySig },
         { key: '15M ICT',   dir: intra?.sig?.dir || null, sig: intra?.sig || null },
@@ -5163,8 +5348,8 @@ function ConfluencePanel({ onChart, livePrices }) {
       const key = combo && grade === 'IMPECCABLE' ? `${combo.dir}|${grade}` : null;
       const prev = prevAlertRef.current[refKey];
       const name = ICT_PAIRS.find(p => p.symbol === sym)?.name || sym;
-      if (key && prev !== key && isHighQualitySignal('CONFLUENCE', combo.conf, combo.rr, name, combo.setup)) {
-        const isNew = logSignalAlert({ source: 'CONFLUENCE', symbol: sym, name, dir: combo.dir, type: combo.setup, conf: combo.conf, reason: combo.reason, price: combo.entry, sl: combo.sl, tp: combo.tp });
+      if (key && prev !== key && isHighQualitySignal('CONFLUENCE', combo.conf, combo.rr, name, combo.setup, combo.regime)) {
+        const isNew = logSignalAlert({ source: 'CONFLUENCE', symbol: sym, name, dir: combo.dir, type: combo.setup, conf: combo.conf, reason: combo.reason, price: combo.entry, sl: combo.sl, tp: combo.tp, regime: combo.regime, volState: combo.volState });
         if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
           new Notification(`FlowEdge ★ CONFLUENCE — ${name}`, { body: `${combo.dir.toUpperCase()} ${combo.setup} · ${combo.conf}%\n${combo.reason}`, icon: '/favicon.ico' });
         }
@@ -5201,6 +5386,8 @@ function ConfluencePanel({ onChart, livePrices }) {
         </div>
         <div style={{ fontSize: 9, fontFamily: 'monospace', color: '#4b5563' }}>{loaded}/{ICT_PAIRS.length} pairs</div>
       </div>
+
+      <TradingConditionsBar />
 
       {rows.map(({ p: pair, d }) => {
         const fp = px => stratFmtPx(pair.symbol, px);
@@ -5247,7 +5434,7 @@ function ConfluencePanel({ onChart, livePrices }) {
                 )}
                 {/* Combined trade when engines stack */}
                 {d.combo ? (
-                  <StratSigCard sig={d.combo} fp={fp} extraTags={d.grade === 'IMPECCABLE' ? [['★ ALL SYSTEMS ALIGNED', '#fbbf24']] : []} />
+                  <StratSigCard sig={d.combo} fp={fp} sym={pair.symbol} extraTags={d.grade === 'IMPECCABLE' ? [['★ ALL SYSTEMS ALIGNED', '#fbbf24']] : []} />
                 ) : (
                   <div style={{ fontSize: 9, color: '#374151', fontWeight: 700 }}>
                     {d.grade === 'LEANING' ? `Leaning ${d.dir} (${d.agree}/6) — no live entry from an aligned engine yet` : 'Engines disagree — no confluence trade'}
@@ -5336,6 +5523,7 @@ function backtestSeries(candles, mode, htfAt) {
         i, time: c.time, dir: sig.dir, setup: sig.setup, conf: sig.conf,
         entry: sig.entry, sl: sig.sl, tp: sig.tp, rr: +sig.rr, risk,
         tp1: sig.tp1 ?? (sig.dir === 'long' ? sig.entry + risk * ICT_TP1_R : sig.entry - risk * ICT_TP1_R),
+        regime: sig.regime,
       };
     }
   }
@@ -5454,6 +5642,7 @@ function backtestDailySwing(daily) {
         i, time: c.time, dir: a.signal, setup: a.signalType.replace('_', ' '), conf: a.confidence,
         entry: a.entry, sl: a.sl, tp: a.tp, rr: +a.rr, risk,
         tp1: a.tp1 ?? (a.signal === 'long' ? a.entry + risk * ICT_TP1_R : a.entry - risk * ICT_TP1_R),
+        regime: a.regime,
       };
     }
   }
@@ -5585,10 +5774,23 @@ function StatsPanel() {
       // (fewer trades possible even over 5 years of daily bars).
       const verdict = (is, oos, minN = 15) => (oos?.n ?? 0) < minN ? null
         : ((is?.expectancy ?? 0) > 0 && (oos?.expectancy ?? 0) > 0);
+
+      // Regime hypothesis check — do trades taken in their hypothesized regime
+      // (SETUP_REGIME) actually outperform trades taken outside it, on the
+      // IN-SAMPLE data only? Pooled across INTRADAY + SWING since both engines
+      // share the same setup vocabulary (LIQ SWEEP, STRUCTURE, FVG, etc).
+      const regimeable = [...allIS, ...swingIS].filter(t => t.regime && SETUP_REGIME[t.setup]);
+      const regimeMatched    = summarizeTrades(regimeable.filter(t => regimeMatches(t.setup, t.regime)));
+      const regimeMismatched = summarizeTrades(regimeable.filter(t => !regimeMatches(t.setup, t.regime)));
+      const regimeHelps = regimeMatched.n >= 20 && regimeMismatched.n >= 10
+        ? (regimeMatched.expectancy ?? -Infinity) > (regimeMismatched.expectancy ?? Infinity) && (regimeMatched.expectancy ?? 0) > 0
+        : null;
+
       const validation = {
         intradayOOS:   verdict(edge, edgeOOS),
         confluenceOOS: verdict(conf, confOOSum),
         swingOOS:      verdict(swingEdge, swingEdgeOOS, 8),
+        regimeHelps,
       };
 
       const allTrades = [...allIS, ...allOOS];
@@ -5596,6 +5798,7 @@ function StatsPanel() {
         generatedAt: Date.now(),
         window: `~${Math.round(84 * OOS_SPLIT)}d in-sample / ~${Math.round(84 * (1 - OOS_SPLIT))}d out-of-sample of 15m + confluence · ~${Math.round(1826 * OOS_SPLIT)}d in-sample / ~${Math.round(1826 * (1 - OOS_SPLIT))}d out-of-sample of daily swing`,
         rows: rowsIS, rowsOOS, pairSetups, validation,
+        regimeMatched, regimeMismatched,
         swingRows: swingRowsIS, swingRowsOOS, swingPairSetups, swingEdge, swingEdgeOOS,
         total: summarizeTrades(allTrades),
         intraTotal: summarizeTrades(allTrades.filter(t => t.mode === 'INTRADAY')),
@@ -5752,6 +5955,37 @@ function StatsPanel() {
             );
           })()}
 
+          {/* Regime hypothesis check — do trend-setups-in-trends / reversal-
+              setups-in-ranges actually outperform mismatched trades? */}
+          {bt.regimeMatched && (() => {
+            const helps = bt.validation?.regimeHelps;
+            return (
+              <div style={{ padding: '10px 12px', borderRadius: 9, background: helps === true ? 'rgba(16,185,129,0.05)' : helps === false ? 'rgba(239,68,68,0.05)' : 'rgba(255,255,255,0.02)', border: `1px solid ${helps === true ? 'rgba(16,185,129,0.25)' : helps === false ? 'rgba(239,68,68,0.25)' : 'rgba(255,255,255,0.06)'}` }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5, flexWrap: 'wrap', gap: 4 }}>
+                  <span style={{ fontSize: 9, fontWeight: 900, color: '#e5e7eb' }}>REGIME HYPOTHESIS — reversal setups in ranges, trend setups in trends</span>
+                  <span style={{ fontSize: 8, fontWeight: 900, padding: '1px 7px', borderRadius: 3, color: helps === true ? '#10b981' : helps === false ? '#ef4444' : '#6b7280', background: helps === true ? 'rgba(16,185,129,0.14)' : helps === false ? 'rgba(239,68,68,0.14)' : 'rgba(255,255,255,0.05)' }}>
+                    {helps === true ? '✓ CONFIRMED — gating live' : helps === false ? '✗ NOT CONFIRMED — tag only' : '? SAMPLE TOO SMALL'}
+                  </span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 8, color: '#10b981', fontWeight: 800 }}>REGIME-MATCHED</div>
+                    <StatCell s={bt.regimeMatched} />
+                    <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>{bt.regimeMatched.n ? `${bt.regimeMatched.expectancy ?? '—'}R/trade` : 'no trades'}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 8, color: '#ef4444', fontWeight: 800 }}>MISMATCHED</div>
+                    <StatCell s={bt.regimeMismatched} />
+                    <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>{bt.regimeMismatched?.n ? `${bt.regimeMismatched.expectancy ?? '—'}R/trade` : 'no trades'}</div>
+                  </div>
+                </div>
+                <div style={{ fontSize: 8, color: '#374151', marginTop: 5 }}>
+                  In-sample only. Only blocks live signals once matched-regime trades demonstrably beat mismatched ones with enough samples — until then every signal still carries its regime/volatility tag for your own read.
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Per-setup */}
           <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 4 }}>
@@ -5768,6 +6002,34 @@ function StatsPanel() {
               );
             })}
           </div>
+
+          {/* Setup Rankings — every pair+setup combo (15m + daily swing) sorted
+              by in-sample expectancy, bottom 20% flagged as weekly-review cut
+              candidates, matching the "cut the worst 20% of setups" review habit */}
+          {(() => {
+            const combos = [
+              ...Object.entries(bt.pairSetups || {}).map(([k, v]) => ({ combo: k, tf: '15m', ...v })),
+              ...Object.entries(bt.swingPairSetups || {}).map(([k, v]) => ({ combo: k, tf: 'daily', ...v })),
+            ].filter(c => c.n >= 5).sort((a, b) => (b.expectancy ?? -99) - (a.expectancy ?? -99));
+            if (!combos.length) return null;
+            const cutoff = Math.max(1, Math.ceil(combos.length * 0.2));
+            return (
+              <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>SETUP RANKINGS — PAIR × SETUP, BY EXPECTANCY (n≥5) · BOTTOM 20% = WEEKLY CUT CANDIDATES</div>
+                {combos.map((c, i) => {
+                  const isBottom = i >= combos.length - cutoff;
+                  return (
+                    <div key={c.combo} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 9, fontFamily: 'monospace', padding: '2px 4px', borderRadius: 3, background: isBottom ? 'rgba(239,68,68,0.06)' : 'transparent' }}>
+                      <span style={{ color: isBottom ? '#fca5a5' : '#9ca3af', fontWeight: 700 }}>
+                        {isBottom && '✂ '}{c.combo} <span style={{ color: '#4b5563' }}>[{c.tf}]</span>
+                      </span>
+                      <span style={{ color: '#e5e7eb' }}>{c.n}t <span style={{ color: (c.wr ?? 0) >= 50 ? '#10b981' : '#f59e0b' }}>{c.wr}%</span> <span style={{ color: (c.expectancy ?? 0) >= 0 ? '#10b981' : '#ef4444' }}>{(c.expectancy ?? 0) >= 0 ? '+' : ''}{c.expectancy}R</span></span>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
 
           {/* Per-pair */}
           <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
@@ -6159,7 +6421,7 @@ export default function App() {
           // Daily ICT buy/sell entries alert here too, not only while the ICT tab is open
           const dailyPrice = d1d.meta?.regularMarketPrice || c1d[c1d.length - 1]?.close;
           const an = dailyPrice ? ictAnalyze(c1d, dailyPrice) : null;
-          const ictSig = an?.signal ? { dir: an.signal, setup: an.signalType.replace('_', ' '), conf: an.confidence, reason: an.reason, entry: an.entry, rr: an.rr, sl: an.sl, tp: an.tp } : null;
+          const ictSig = an?.signal ? { dir: an.signal, setup: an.signalType.replace('_', ' '), conf: an.confidence, reason: an.reason, entry: an.entry, rr: an.rr, sl: an.sl, tp: an.tp, regime: an.regime, volState: an.volState } : null;
           // Higher timeframe sets direction: daily → 15m intraday
           const dailyHtf = ictHtfBias(an);
           const intra = ictIntradayAnalyze(c15, price, 'intra', dailyHtf);
@@ -6169,8 +6431,8 @@ export default function App() {
             const refKey = `${p.symbol}|${mode}`;
             const key = sig ? `${sig.dir}|${sig.setup}` : null;
             const prev = scalpWatchRef.current[refKey];
-            if (key && prev !== key && isHighQualitySignal(mode, sig.conf, sig.rr, p.name, sig.setup)) {
-              const isNew = logSignalAlert({ source: mode, symbol: p.symbol, name: p.name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp });
+            if (key && prev !== key && isHighQualitySignal(mode, sig.conf, sig.rr, p.name, sig.setup, sig.regime)) {
+              const isNew = logSignalAlert({ source: mode, symbol: p.symbol, name: p.name, dir: sig.dir, type: sig.setup, conf: sig.conf, reason: sig.reason, price: sig.entry, sl: sig.sl, tp: sig.tp, regime: sig.regime, volState: sig.volState });
               if (isNew && prev !== undefined && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
                 new Notification(`FlowEdge ${mode} — ${p.name}`, {
                   body: `${sig.dir.toUpperCase()} ${sig.setup} · ${sig.conf}%\n${sig.reason}`,
