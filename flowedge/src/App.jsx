@@ -2610,7 +2610,12 @@ const dpFmtWeek = w => { const [, m, d] = w.split('-'); return `${+m}/${+d}`; };
 // demand. Mirrors the classic "DP levels on the chart" layout.
 function DarkPoolChart({ candles, levels, price, scale = 1, fmtPx }) {
   if (!candles?.length || candles.length < 5) return null;
-  const data = candles.slice(-90);
+  // Candles must ride the same scale as the levels and price line — in SPX
+  // view everything is ×10, otherwise the y-axis is built from SPY-scale
+  // candles and every level falls outside it
+  const data = candles.slice(-90).map(c => scale === 1 ? c : ({
+    ...c, open: c.open * scale, high: c.high * scale, low: c.low * scale, close: c.close * scale,
+  }));
 
   const W = 340, H = 240, labelW = 108;
   const plotW = W - labelW;
@@ -2685,7 +2690,7 @@ function DarkPoolChart({ candles, levels, price, scale = 1, fmtPx }) {
   );
 }
 
-function DarkPoolPanel() {
+function DarkPoolPanel({ onChart }) {
   const [symbol, setSymbol] = useState('SPY');
   const [data, setData] = useState(null);
   const [candles, setCandles] = useState([]);
@@ -2739,6 +2744,12 @@ function DarkPoolPanel() {
               background: spxView ? 'rgba(168,139,250,0.22)' : 'rgba(255,255,255,0.05)',
               color: spxView ? '#c4b5fd' : '#6b7280',
             }}>×10 → SPX</button>
+          )}
+          {onChart && (
+            <button onClick={() => onChart(spxView && symbol === 'SPY' ? 'SP:SPX' : symbol)} title="Open full TradingView chart" style={{
+              background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 5,
+              padding: '4px 9px', color: '#a5b4fc', fontSize: 9, fontWeight: 700, cursor: 'pointer',
+            }}>📈 TV</button>
           )}
           <button onClick={() => load(symbol)} disabled={loading} style={{
             background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: 6,
@@ -6822,7 +6833,7 @@ export default function App() {
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "SMC" && <SMCPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
-                {tab === "Dark Pool" && <DarkPoolPanel />}
+                {tab === "Dark Pool" && <DarkPoolPanel onChart={sym => setChartSymbol(sym)} />}
                 {tab === "Stats" && <StatsPanel />}
                 {tab === "News" && <NewsPanel watchlist={watchlist} />}
                 {tab === "Journal" && <JournalPanel />}
@@ -6938,7 +6949,7 @@ export default function App() {
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "SMC" && <SMCPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
-                  {tab === "Dark Pool" && <DarkPoolPanel />}
+                  {tab === "Dark Pool" && <DarkPoolPanel onChart={sym => setChartSymbol(sym)} />}
                   {tab === "Stats" && <StatsPanel />}
                   {tab === "News" && <NewsPanel watchlist={watchlist} />}
                   {tab === "Journal" && <JournalPanel />}
