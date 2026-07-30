@@ -2595,92 +2595,267 @@ function JournalPanel() {
   );
 }
 
-function DarkPoolPanel({ stocks }) {
-  const [dpFilter, setDpFilter] = useState('all');
-  const now = new Date();
-  const marketOpen = new Date(); marketOpen.setHours(9, 30, 0, 0);
-  const marketClose = new Date(); marketClose.setHours(16, 0, 0, 0);
-  const elapsed = Math.max((now - marketOpen) / (marketClose - marketOpen), 0.05);
-  const isMarketHours = now >= marketOpen && now <= marketClose;
+// ─── Dark Pool Levels ───────────────────────────────────────────────────────
 
-  const scored = stocks
-    .filter(s => s.regularMarketVolume && (s.averageDailyVolume3Month || s.averageDailyVolume10Day))
-    .map(s => {
-      const avgVol = s.averageDailyVolume3Month || s.averageDailyVolume10Day || 1;
-      const projectedVol = isMarketHours ? s.regularMarketVolume / elapsed : s.regularMarketVolume;
-      const volRatio = projectedVol / avgVol;
-      const priceImpact = Math.abs(s.regularMarketChangePercent || 0.01);
-      const score = (volRatio * 10) / Math.max(priceImpact, 0.1);
-      return { ...s, volRatio, priceImpact, score };
-    })
-    .sort((a, b) => b.score - a.score);
+const DP_SYMBOLS = ['SPY', 'QQQ', 'IWM', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'META', 'AMZN', 'GOOGL', 'AMD', 'GLD'];
+const dpFmtNotional = n =>
+  n >= 1e12 ? `$${(n / 1e12).toFixed(2)}T` :
+  n >= 1e9  ? `$${(n / 1e9).toFixed(2)}B` :
+  n >= 1e6  ? `$${(n / 1e6).toFixed(0)}M` : `$${(n / 1e3).toFixed(0)}K`;
+const dpFmtWeek = w => { const [, m, d] = w.split('-'); return `${+m}/${+d}`; };
 
-  const getSignal = (score) => {
-    if (score > 80) return { label: "STRONG", color: "#ef4444" };
-    if (score > 40) return { label: "MODERATE", color: "#f59e0b" };
-    if (score > 15) return { label: "WEAK", color: "#10b981" };
-    return { label: "NORMAL", color: "#374151" };
-  };
+// Candles with dark pool levels drawn as labeled horizontal lines — level
+// thickness/opacity scales with notional, so the heaviest institutional
+// price levels read at a glance. Levels above spot act as supply, below as
+// demand. Mirrors the classic "DP levels on the chart" layout.
+function DarkPoolChart({ candles, levels, price, scale = 1, fmtPx }) {
+  if (!candles?.length || candles.length < 5) return null;
+  const data = candles.slice(-90);
 
-  const filteredScored = dpFilter === 'strong' ? scored.filter(s => s.score > 80)
-    : dpFilter === 'moderate' ? scored.filter(s => s.score > 40)
-    : scored;
+  const W = 340, H = 240, labelW = 108;
+  const plotW = W - labelW;
+  const maxNotional = Math.max(...levels.map(l => l.notional), 1);
+
+  let lo = Math.min(...data.map(c => c.low));
+  let hi = Math.max(...data.map(c => c.high));
+  // Include any level that sits within a sane distance of price so the chart
+  // doesn't get crushed by a far-away outlier level
+  levels.forEach(l => {
+    const p = l.price * scale;
+    if (p > lo * 0.9 && p < hi * 1.1) { lo = Math.min(lo, p); hi = Math.max(hi, p); }
+  });
+  const pad = (hi - lo) * 0.06 || hi * 0.01;
+  lo -= pad; hi += pad;
+
+  const y = v => ((hi - v) / (hi - lo)) * (H - 12) + 6;
+  const x = i => 2 + (i / data.length) * (plotW - 4);
+  const cw = Math.max(1.2, ((plotW - 4) / data.length) * 0.62);
+  const inRange = v => v != null && v >= lo && v <= hi;
+
+  const visible = levels
+    .map(l => ({ ...l, px: l.price * scale }))
+    .filter(l => inRange(l.px))
+    .sort((a, b) => b.notional - a.notional)
+    .slice(0, 7);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ padding: "8px 10px", borderRadius: 8, background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.15)", fontSize: 10, color: "#6b7280", lineHeight: 1.7 }}>
-        <strong style={{ color: "#a5b4fc" }}>Dark Pool Score</strong> — Volume anomaly ÷ price impact. High score = large volume with minimal price movement, the hallmark of institutional dark pool activity.
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block', background: 'rgba(8,8,20,0.55)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
+      {/* dark pool levels */}
+      {visible.map((l, i) => {
+        const w = 0.5 + (l.notional / maxNotional) * 1.8;
+        const op = 0.35 + (l.notional / maxNotional) * 0.55;
+        const above = l.px > price;
+        const col = above ? '#a78bfa' : '#8b5cf6';
+        const ly = y(l.px);
+        return (
+          <g key={i}>
+            <line x1={0} x2={plotW} y1={ly} y2={ly} stroke={col} strokeWidth={w} strokeDasharray="5 3" opacity={op} />
+            <rect x={plotW + 1} y={ly - 5.5} width={labelW - 3} height={11} rx={2} fill={col} opacity={0.9} />
+            <text x={plotW + 4} y={ly + 3} fontSize="7.5" fontWeight="800" fill="#0b0616">
+              DP {dpFmtNotional(l.notional)} · {dpFmtWeek(l.week)}
+            </text>
+          </g>
+        );
+      })}
+
+      {/* candles */}
+      {data.map((c, i) => {
+        const up = c.close >= c.open;
+        const col = up ? '#d1d5db' : '#6b7280';
+        const cx = x(i) + cw / 2;
+        return (
+          <g key={i}>
+            <line x1={cx} x2={cx} y1={y(c.high)} y2={y(c.low)} stroke={col} strokeWidth="0.6" />
+            <rect x={x(i)} y={y(Math.max(c.open, c.close))} width={cw}
+              height={Math.max(0.8, Math.abs(y(c.open) - y(c.close)))}
+              fill={up ? 'none' : col} stroke={col} strokeWidth="0.5" />
+          </g>
+        );
+      })}
+
+      {/* current price */}
+      {inRange(price) && (
+        <g>
+          <line x1={0} x2={plotW} y1={y(price)} y2={y(price)} stroke="#f9fafb" strokeWidth="0.8" strokeDasharray="2 2" />
+          <rect x={plotW + 1} y={y(price) - 5.5} width={labelW - 3} height={11} rx={2} fill="#f9fafb" />
+          <text x={plotW + 4} y={y(price) + 3} fontSize="7.5" fontWeight="900" fill="#0b0616">{fmtPx(price)}</text>
+        </g>
+      )}
+    </svg>
+  );
+}
+
+function DarkPoolPanel() {
+  const [symbol, setSymbol] = useState('SPY');
+  const [data, setData] = useState(null);
+  const [candles, setCandles] = useState([]);
+  const [price, setPrice] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+  // The SPX view mirrors how desks read SPY dark pool levels against the index
+  const [spxView, setSpxView] = useState(false);
+
+  const load = useCallback(async (sym) => {
+    setLoading(true); setErr('');
+    try {
+      const [dp, ohlc] = await Promise.all([
+        fetch(`/api/darkpool?symbol=${encodeURIComponent(sym)}&weeks=26`).then(r => r.json()),
+        fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&interval=1d&range=6mo`).then(r => r.json()),
+      ]);
+      if (dp.error) setErr(dp.error);
+      setData(dp);
+      setCandles(ohlc.candles || []);
+      setPrice(ohlc.meta?.regularMarketPrice || ohlc.candles?.[ohlc.candles.length - 1]?.close || null);
+    } catch (e) { setErr(e.message); }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(symbol); }, [symbol, load]);
+
+  const scale = spxView && symbol === 'SPY' ? 10 : 1;
+  const fmtPx = p => p == null ? '—' : `$${p.toFixed(2)}`;
+  const levels = data?.levels || [];
+  const dispPrice = price != null ? price * scale : null;
+
+  // Nearest levels either side of spot — the actionable read
+  const sorted = [...levels].map(l => ({ ...l, px: l.price * scale }));
+  const above = sorted.filter(l => dispPrice != null && l.px > dispPrice).sort((a, b) => a.px - b.px);
+  const below = sorted.filter(l => dispPrice != null && l.px <= dispPrice).sort((a, b) => b.px - a.px);
+  const heaviest = [...sorted].sort((a, b) => b.notional - a.notional).slice(0, 8);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Dark Pool Levels</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>
+            Off-exchange price levels from FINRA ATS transparency data — where institutional size actually printed
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+          {symbol === 'SPY' && (
+            <button onClick={() => setSpxView(v => !v)} style={{
+              padding: '4px 9px', borderRadius: 5, fontSize: 9, fontWeight: 800, border: 'none', cursor: 'pointer',
+              background: spxView ? 'rgba(168,139,250,0.22)' : 'rgba(255,255,255,0.05)',
+              color: spxView ? '#c4b5fd' : '#6b7280',
+            }}>×10 → SPX</button>
+          )}
+          <button onClick={() => load(symbol)} disabled={loading} style={{
+            background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: 6,
+            padding: '4px 10px', color: loading ? '#4b5563' : '#a5b4fc', fontSize: 10, fontWeight: 700, cursor: loading ? 'default' : 'pointer',
+          }}>{loading ? '…' : '↻'}</button>
+        </div>
       </div>
-      <div style={{ display: 'flex', gap: 5 }}>
-        {[['all','All'], ['strong','Strong (>80)'], ['moderate','Active (>40)']].map(([key, label]) => (
-          <button key={key} onClick={() => setDpFilter(key)} style={{
-            padding: '3px 9px', borderRadius: 4, fontSize: 9, fontWeight: 700, border: 'none', cursor: 'pointer',
-            background: dpFilter === key ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
-            color: dpFilter === key ? '#a5b4fc' : '#4b5563',
-          }}>{label}</button>
+
+      {/* Symbol picker */}
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {DP_SYMBOLS.map(s => (
+          <button key={s} onClick={() => setSymbol(s)} style={{
+            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: symbol === s ? 'rgba(139,92,246,0.25)' : 'rgba(255,255,255,0.04)',
+            color: symbol === s ? '#c4b5fd' : '#4b5563',
+          }}>{s}</button>
         ))}
       </div>
-      {filteredScored.length === 0 && (
-        <div style={{ fontSize: 12, color: "#4b5563", textAlign: "center", padding: 20 }}>No signals match this filter.</div>
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
+
+      {loading && !levels.length && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Loading FINRA off-exchange data…</div>}
+
+      {!loading && !levels.length && !err && (
+        <div style={{ padding: 20, textAlign: 'center', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ fontSize: 12, color: '#6b7280' }}>No off-exchange data published for {symbol}</div>
+        </div>
       )}
-      {filteredScored.map(s => {
-        const { label, color } = getSignal(s.score);
-        const barW = Math.min(s.score / 100, 1) * 100;
-        const up = s.regularMarketChangePercent >= 0;
-        return (
-          <div key={s.symbol} style={{
-            padding: "10px 12px", borderRadius: 8,
-            background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)",
-          }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
-              <div>
-                <span style={{ fontWeight: 800, fontSize: 13, color: "#f9fafb" }}>{s.symbol}</span>
-                <span style={{ fontSize: 10, color: "#4b5563", marginLeft: 6 }}>{(s.shortName || "").slice(0, 20)}</span>
+
+      {levels.length > 0 && (
+        <>
+          <DarkPoolChart candles={candles} levels={levels} price={dispPrice} scale={scale} fmtPx={fmtPx} />
+
+          {/* Nearest levels — the actionable read */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+            {[['NEAREST ABOVE — supply', above.slice(0, 3), '#a78bfa'], ['NEAREST BELOW — demand', below.slice(0, 3), '#8b5cf6']].map(([label, list, col]) => (
+              <div key={label} style={{ padding: '8px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 5 }}>{label}</div>
+                {list.length ? list.map((l, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 10, fontFamily: 'monospace', padding: '1px 0' }}>
+                    <span style={{ color: col, fontWeight: 800 }}>{fmtPx(l.px)}</span>
+                    <span style={{ color: '#6b7280' }}>
+                      {dpFmtNotional(l.notional)} · {dispPrice ? `${(Math.abs(l.px - dispPrice) / dispPrice * 100).toFixed(1)}%` : ''}
+                    </span>
+                  </div>
+                )) : <div style={{ fontSize: 9, color: '#374151' }}>none in range</div>}
               </div>
-              <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 9, color, fontWeight: 800, letterSpacing: "0.06em", marginBottom: 2 }}>{label}</div>
-                <div style={{ fontSize: 17, fontFamily: "monospace", fontWeight: 700, color: "#f9fafb" }}>{s.score.toFixed(0)}</div>
+            ))}
+          </div>
+
+          {/* Heaviest levels */}
+          <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>HEAVIEST DARK POOL LEVELS — LAST {data.weeksCovered} WEEKS</div>
+            {heaviest.map((l, i) => {
+              const isAbove = dispPrice != null && l.px > dispPrice;
+              const col = isAbove ? '#a78bfa' : '#8b5cf6';
+              const pct = Math.max(6, (l.notional / heaviest[0].notional) * 100);
+              return (
+                <div key={i} style={{ marginBottom: 4 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 9.5, fontFamily: 'monospace', marginBottom: 1 }}>
+                    <span style={{ color: '#e5e7eb', fontWeight: 800 }}>
+                      {fmtPx(l.px)} <span style={{ color: '#4b5563', fontWeight: 600 }}>· wk {dpFmtWeek(l.week)} · {l.venues} venues</span>
+                    </span>
+                    <span style={{ color: col, fontWeight: 800 }}>{dpFmtNotional(l.notional)}</span>
+                  </div>
+                  <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.05)' }}>
+                    <div style={{ width: `${pct}%`, height: '100%', borderRadius: 2, background: col, opacity: 0.75 }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Latest week flow split — dark pool vs wholesaler internalization */}
+          {(() => {
+            const last = levels[levels.length - 1];
+            if (!last?.otcNotional) return null;
+            const total = last.notional + last.otcNotional;
+            const atsPct = (last.notional / total) * 100;
+            return (
+              <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 6 }}>
+                  OFF-EXCHANGE FLOW SPLIT — WEEK OF {dpFmtWeek(last.week)}
+                </div>
+                <div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', marginBottom: 5 }}>
+                  <div style={{ width: `${atsPct}%`, background: '#8b5cf6' }} />
+                  <div style={{ width: `${100 - atsPct}%`, background: '#3b82f6' }} />
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace' }}>
+                  <span style={{ color: '#c4b5fd' }}>■ Dark pools (ATS) {dpFmtNotional(last.notional)} · {atsPct.toFixed(0)}%</span>
+                  <span style={{ color: '#93c5fd' }}>■ Wholesalers {dpFmtNotional(last.otcNotional)}</span>
+                </div>
+                <div style={{ fontSize: 8, color: '#374151', marginTop: 4 }}>
+                  Dark pools are institutional block venues. Wholesalers (Citadel, Virtu, Jane Street) internalize mostly retail flow — off-exchange too, but a different signal.
+                </div>
               </div>
-            </div>
-            <div style={{ height: 3, background: "rgba(255,255,255,0.06)", borderRadius: 2, marginBottom: 8 }}>
-              <div style={{ width: `${barW}%`, height: "100%", borderRadius: 2, background: `linear-gradient(90deg, ${color}44, ${color})` }} />
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
-              {[
-                ["VOL RATIO", `${s.volRatio.toFixed(2)}×`, s.volRatio > 1.5 ? "#fbbf24" : "#9ca3af"],
-                ["PRICE ΔIMPACT", `${s.priceImpact.toFixed(2)}%`, up ? "#10b981" : "#ef4444"],
-                ["TODAY VOL", fmt(s.regularMarketVolume), "#9ca3af"],
-                ["AVG VOL", fmt(s.averageDailyVolume3Month || s.averageDailyVolume10Day), "#4b5563"],
-              ].map(([lbl, val, c]) => (
-                <div key={lbl}>
-                  <div style={{ fontSize: 8, color: "#374151", marginBottom: 2 }}>{lbl}</div>
-                  <div style={{ fontSize: 10, fontFamily: "monospace", color: c }}>{val}</div>
+            );
+          })()}
+
+          {/* Top venues */}
+          {data.venues?.length > 0 && (
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>TOP ATS VENUES — WHERE THE SIZE ROUTED</div>
+              {data.venues.slice(0, 6).map((v, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9.5, fontFamily: 'monospace', padding: '1px 0' }}>
+                  <span style={{ color: '#9ca3af' }}>{v.name}</span>
+                  <span style={{ color: '#c4b5fd', fontWeight: 700 }}>{dpFmtNotional(v.notional)}</span>
                 </div>
               ))}
             </div>
+          )}
+
+          <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+            Each level is one week's volume-weighted average execution price across all reporting ATS (dark pool) venues, sized by that week's total dark pool notional — real regulator-reported off-exchange activity, not a volume proxy. Wholesaler/internalizer flow is tracked separately and excluded from the levels. Source: FINRA OTC Transparency, published weekly with a 2–4 week lag{data.latestWeek ? ` (latest week ${dpFmtWeek(data.latestWeek)}, ${data.lagDays}d ago)` : ''} — so these are structural levels institutions accumulated around, not same-day prints. Use as context, not entry triggers.
           </div>
-        );
-      })}
+        </>
+      )}
     </div>
   );
 }
@@ -6080,7 +6255,7 @@ function StatsPanel() {
   );
 }
 
-const TABS = ["Signals", "Confluence", "ICT", "ORB", "SMC", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
+const TABS = ["Signals", "Confluence", "ICT", "ORB", "SMC", "Dark Pool", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -6647,6 +6822,7 @@ export default function App() {
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "SMC" && <SMCPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                {tab === "Dark Pool" && <DarkPoolPanel />}
                 {tab === "Stats" && <StatsPanel />}
                 {tab === "News" && <NewsPanel watchlist={watchlist} />}
                 {tab === "Journal" && <JournalPanel />}
@@ -6762,6 +6938,7 @@ export default function App() {
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "SMC" && <SMCPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                  {tab === "Dark Pool" && <DarkPoolPanel />}
                   {tab === "Stats" && <StatsPanel />}
                   {tab === "News" && <NewsPanel watchlist={watchlist} />}
                   {tab === "Journal" && <JournalPanel />}
