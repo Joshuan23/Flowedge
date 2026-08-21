@@ -1680,6 +1680,53 @@ function scoreGammaData(d) {
   };
 }
 
+// Copies the gamma levels in the exact order the FlowEdge Pine indicator
+// (pine/gamma-walls.pine) asks for them, plus the GEX-by-strike profile
+// string. Pine has no HTTP access, so paste is the only way in.
+function PineCopyButton({ data }) {
+  const [copied, setCopied] = useState(false);
+  if (!data) return null;
+
+  const build = () => {
+    const profile = (data.gexByStrike || [])
+      .filter(x => x.gex)
+      .map(x => `${x.strike}:${(x.gex / 1e9).toFixed(2)}`)
+      .join(',');
+    return [
+      `FlowEdge gamma levels — ${data.symbol} @ ${data.spot?.toFixed(2)} · ${new Date().toLocaleString()}`,
+      ``,
+      `Gamma Wall : ${data.gammaWall ?? 0}`,
+      `Call Wall  : ${data.callWall ?? 0}`,
+      `Put Wall   : ${data.putWall ?? 0}`,
+      `Gamma Flip : ${data.flipLevel ?? 0}`,
+      `Net GEX $B : ${((data.netGex || 0) / 1e9).toFixed(2)}`,
+      ``,
+      `GEX profile (paste into "GEX data"):`,
+      profile,
+    ].join('\n');
+  };
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(build());
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2200);
+    } catch {}
+  };
+
+  return (
+    <button onClick={copy} title="Copy these levels for the FlowEdge TradingView indicator"
+      style={{
+        marginLeft: 'auto', background: copied ? 'rgba(16,185,129,0.18)' : 'rgba(99,102,241,0.14)',
+        border: `1px solid ${copied ? 'rgba(16,185,129,0.4)' : 'rgba(99,102,241,0.3)'}`,
+        borderRadius: 5, padding: '3px 9px', color: copied ? '#6ee7b7' : '#a5b4fc',
+        fontSize: 9, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit',
+      }}>
+      {copied ? '✓ Copied' : '📋 Pine inputs'}
+    </button>
+  );
+}
+
 function GammaPanel({ stocks }) {
   const [symbol, setSymbol] = useState("SPY");
   const [expiry, setExpiry] = useState(null);
@@ -1864,6 +1911,7 @@ function GammaPanel({ stocks }) {
                 P/C {data.pcVolumeRatio}
               </span>
             )}
+            <PineCopyButton data={data} />
           </div>
 
           {/* Setup card — shows edge when signals agree, else warns to stay out */}
