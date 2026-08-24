@@ -1,160 +1,124 @@
-// © FlowEdge — Gamma Wall Levels
+// FlowEdge - Gamma Wall Levels
 //
 // Plots dealer-positioning levels (gamma wall, call/put walls, gamma flip)
-// with a GEX-by-strike profile and regime shading.
+// with regime shading and alerts.
 //
 // WHY THE LEVELS ARE INPUTS, NOT FETCHED:
-// Pine Script has no HTTP access — an indicator cannot call an options API.
-// So FlowEdge computes the levels from the live options chain and you paste
-// them in. The Gamma tab has a "Pine inputs" button that puts every value
-// below on your clipboard in order.
+// Pine Script has no HTTP access, so an indicator cannot call an options API.
+// FlowEdge computes the levels from the live options chain and you paste them
+// in. The Gamma tab has a "Pine inputs" button that copies them in this order.
 //
-// Refresh whenever the chain moves materially — GEX shifts intraday, and
-// hardest around OpEx and after big moves.
+// Refresh when the chain moves materially. GEX shifts intraday and hardest
+// around OpEx.
 
 //@version=6
-indicator("FlowEdge — Gamma Wall Levels", "FE Gamma", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+indicator("FlowEdge Gamma Walls", "FE Gamma", overlay = true)
 
-// ── Levels ──────────────────────────────────────────────────────────────────
-g_lvl = "Levels (from FlowEdge Gamma tab)"
-gammaWall = input.float(0.0, "Gamma Wall  (magnet)",     group = g_lvl, tooltip = "Strike with the largest positive net GEX. Dealers hedge against price here, so it acts as a magnet/pin.")
-callWall  = input.float(0.0, "Call Wall   (resistance)", group = g_lvl, tooltip = "Heaviest call open interest above spot. Dealer hedging tends to cap rallies into it.")
-putWall   = input.float(0.0, "Put Wall    (support)",    group = g_lvl, tooltip = "Heaviest put open interest below spot. Often where downside hedging flow slows a selloff.")
-flipLevel = input.float(0.0, "Gamma Flip  (regime line)", group = g_lvl, tooltip = "Zero-gamma level. Above it dealers are long gamma (moves dampened); below it they are short gamma (moves amplified).")
-netGex    = input.float(0.0, "Net GEX ($B)",             group = g_lvl, tooltip = "Total net gamma exposure in billions. Positive = suppressive tape, negative = accelerative.")
-scaleMult = input.float(1.0, "Scale multiplier", minval = 0.0001, group = g_lvl, tooltip = "Use 10 when the levels come from SPY but you are charting SPX. Leave 1 when chart and chain are the same instrument.")
+// ---- Levels (from the FlowEdge Gamma tab) ----------------------------------
+gammaWall = input.float(0.0, "Gamma Wall (magnet)",    group = "Levels")
+callWall  = input.float(0.0, "Call Wall (resistance)", group = "Levels")
+putWall   = input.float(0.0, "Put Wall (support)",     group = "Levels")
+flipLevel = input.float(0.0, "Gamma Flip (regime)",    group = "Levels")
+netGex    = input.float(0.0, "Net GEX ($B)",           group = "Levels")
+scaleMult = input.float(1.0, "Scale multiplier", minval = 0.0001, group = "Levels", tooltip = "Use 10 when levels come from SPY but you are charting SPX.")
 
-// ── GEX profile ─────────────────────────────────────────────────────────────
-g_prof = "GEX profile"
-showProfile = input.bool(true, "Show GEX-by-strike profile", group = g_prof)
-profileStr  = input.string("", "GEX data  strike:gex,...", group = g_prof, tooltip = "Paste from FlowEdge: 7300:1.2,7350:-0.8,7400:2.4 — strike:netGEX in $B. Positive bars green, negative red.")
-profileW    = input.int(60, "Profile width (bars)", minval = 10, maxval = 300, group = g_prof)
+// ---- Display ---------------------------------------------------------------
+showLabels  = input.bool(true, "Show labels",         group = "Display")
+showTable   = input.bool(true, "Show info table",     group = "Display")
+shadeRegime = input.bool(true, "Shade gamma regime",  group = "Display")
 
-// ── Display ─────────────────────────────────────────────────────────────────
-g_disp = "Display"
-lookback    = input.int(120, "Line start (bars back)", minval = 10, group = g_disp)
-showLabels  = input.bool(true, "Show level labels",  group = g_disp)
-showTable   = input.bool(true, "Show info table",    group = g_disp)
-shadeRegime = input.bool(true, "Shade gamma regime", group = g_disp)
+cGamma = input.color(color.purple, "Gamma wall", group = "Display")
+cCall  = input.color(color.teal,   "Call wall",  group = "Display")
+cPut   = input.color(color.red,    "Put wall",   group = "Display")
+cFlip  = input.color(color.orange, "Flip",       group = "Display")
 
-cGamma = input.color(#a855f7, "Gamma wall", group = g_disp, inline = "c1")
-cCall  = input.color(#10b981, "Call wall",  group = g_disp, inline = "c1")
-cPut   = input.color(#ef4444, "Put wall",   group = g_disp, inline = "c2")
-cFlip  = input.color(#f59e0b, "Flip",       group = g_disp, inline = "c2")
-
-// ── Scaled levels ───────────────────────────────────────────────────────────
+// ---- Scaled levels ---------------------------------------------------------
 gw = gammaWall * scaleMult
 cw = callWall  * scaleMult
 pw = putWall   * scaleMult
 fl = flipLevel * scaleMult
 
-// Positive gamma when price sits above the flip — dealers dampen moves.
-// Below it they amplify, which is the regime that produces trend days.
+// Above the flip dealers are long gamma and dampen moves. Below it they are
+// short gamma and amplify them, which is the regime that trends.
 posGamma = fl > 0 and close > fl
 
-// ── Drawing state ───────────────────────────────────────────────────────────
-// Everything is wiped and redrawn on the last bar only, which keeps the logic
-// trivial and avoids stale objects when inputs change.
-var array<line>  drawnLines  = array.new<line>()
-var array<label> drawnLabels = array.new<label>()
-var array<box>   drawnBoxes  = array.new<box>()
-var table info = na
+// ---- Level lines -----------------------------------------------------------
+// plot() keeps this simple and reliable: a constant series renders as a
+// horizontal line across the chart, and each gets its own price-scale label.
+plot(gw > 0 ? gw : na, "Gamma Wall", color = cGamma, linewidth = 2)
+plot(cw > 0 ? cw : na, "Call Wall",  color = cCall,  linewidth = 2)
+plot(pw > 0 ? pw : na, "Put Wall",   color = cPut,   linewidth = 2)
+plot(fl > 0 ? fl : na, "Gamma Flip", color = cFlip,  linewidth = 2)
 
-addLevel(float px, color col, string txt, string sty) =>
-    if px > 0
-        array.push(drawnLines, line.new(bar_index - lookback, px, bar_index, px, xloc = xloc.bar_index, extend = extend.right, color = col, width = 2, style = sty))
-        if showLabels
-            float dist = close > 0 ? (px - close) / close * 100 : 0.0
-            string s = txt + "  " + str.tostring(px, format.mintick) + "  (" + (dist >= 0 ? "+" : "") + str.tostring(dist, "#.##") + "%)"
-            array.push(drawnLabels, label.new(bar_index + 12, px, s, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(col, 82), textcolor = col, size = size.small))
+// ---- Regime shading --------------------------------------------------------
+regimeTint = shadeRegime and fl > 0 ? (posGamma ? color.new(color.teal, 92) : color.new(color.red, 92)) : na
+bgcolor(regimeTint, title = "Gamma regime")
 
-if barstate.islast
-    // Clear previous drawings. The size guard matters: `for i = 0 to size - 1`
-    // on an empty array counts 0 down to -1 and would read out of bounds.
-    if array.size(drawnLines) > 0
-        for i = 0 to array.size(drawnLines) - 1
-            line.delete(array.get(drawnLines, i))
-        array.clear(drawnLines)
-    if array.size(drawnLabels) > 0
-        for i = 0 to array.size(drawnLabels) - 1
-            label.delete(array.get(drawnLabels, i))
-        array.clear(drawnLabels)
-    if array.size(drawnBoxes) > 0
-        for i = 0 to array.size(drawnBoxes) - 1
-            box.delete(array.get(drawnBoxes, i))
-        array.clear(drawnBoxes)
+// ---- Labels ----------------------------------------------------------------
+var label lbGamma = na
+var label lbCall  = na
+var label lbPut   = na
+var label lbFlip  = na
 
-    addLevel(gw, cGamma, "GAMMA WALL", line.style_solid)
-    addLevel(cw, cCall,  "CALL WALL",  line.style_dashed)
-    addLevel(pw, cPut,   "PUT WALL",   line.style_dashed)
-    addLevel(fl, cFlip,  "GAMMA FLIP", line.style_dotted)
+if barstate.islast and showLabels
+    label.delete(lbGamma)
+    label.delete(lbCall)
+    label.delete(lbPut)
+    label.delete(lbFlip)
 
-    // Regime shading — tint the band between price and the flip level
-    if shadeRegime and fl > 0
-        float top = math.max(close, fl)
-        float bot = math.min(close, fl)
-        color rc = posGamma ? color.new(#10b981, 92) : color.new(#ef4444, 92)
-        array.push(drawnBoxes, box.new(bar_index - lookback, top, bar_index, bot, border_color = color.new(color.gray, 100), bgcolor = rc, extend = extend.right))
+    if gw > 0
+        pctG = close > 0 ? (gw - close) / close * 100 : 0.0
+        txtG = "GAMMA WALL " + str.tostring(gw, format.mintick) + " (" + str.tostring(pctG, "#.##") + "%)"
+        lbGamma := label.new(bar_index + 8, gw, txtG, style = label.style_label_left, color = color.new(cGamma, 80), textcolor = cGamma, size = size.small)
+    if cw > 0
+        pctC = close > 0 ? (cw - close) / close * 100 : 0.0
+        txtC = "CALL WALL " + str.tostring(cw, format.mintick) + " (" + str.tostring(pctC, "#.##") + "%)"
+        lbCall := label.new(bar_index + 8, cw, txtC, style = label.style_label_left, color = color.new(cCall, 80), textcolor = cCall, size = size.small)
+    if pw > 0
+        pctP = close > 0 ? (pw - close) / close * 100 : 0.0
+        txtP = "PUT WALL " + str.tostring(pw, format.mintick) + " (" + str.tostring(pctP, "#.##") + "%)"
+        lbPut := label.new(bar_index + 8, pw, txtP, style = label.style_label_left, color = color.new(cPut, 80), textcolor = cPut, size = size.small)
+    if fl > 0
+        pctF = close > 0 ? (fl - close) / close * 100 : 0.0
+        txtF = "GAMMA FLIP " + str.tostring(fl, format.mintick) + " (" + str.tostring(pctF, "#.##") + "%)"
+        lbFlip := label.new(bar_index + 8, fl, txtF, style = label.style_label_left, color = color.new(cFlip, 80), textcolor = cFlip, size = size.small)
 
-    // GEX-by-strike profile — horizontal bars anchored to the right edge
-    if showProfile and str.length(profileStr) > 0
-        string clean = str.replace_all(profileStr, " ", "")
-        array<string> parts = str.split(clean, ",")
-        float maxAbs = 0.0
-        if array.size(parts) > 0
-            // First pass: largest absolute GEX, so bars can be scaled to it
-            for i = 0 to array.size(parts) - 1
-                array<string> kv = str.split(array.get(parts, i), ":")
-                if array.size(kv) == 2
-                    maxAbs := math.max(maxAbs, math.abs(nz(str.tonumber(array.get(kv, 1)))))
-            if maxAbs > 0
-                for i = 0 to array.size(parts) - 1
-                    array<string> kv2 = str.split(array.get(parts, i), ":")
-                    if array.size(kv2) == 2
-                        float strike = nz(str.tonumber(array.get(kv2, 0))) * scaleMult
-                        float gexV   = nz(str.tonumber(array.get(kv2, 1)))
-                        if strike > 0 and gexV != 0
-                            int   w  = int(math.abs(gexV) / maxAbs * profileW)
-                            float h  = syminfo.mintick * 20
-                            color bc = gexV >= 0 ? color.new(#10b981, 55) : color.new(#ef4444, 55)
-                            array.push(drawnBoxes, box.new(bar_index + 2, strike + h, bar_index + 2 + math.max(w, 1), strike - h, border_color = color.new(bc, 100), bgcolor = bc))
+// ---- Info table ------------------------------------------------------------
+var table info = table.new(position.top_right, 2, 6, border_width = 1)
 
-    // Info table
-    if showTable
-        if na(info)
-            info := table.new(position.top_right, 2, 6, border_width = 1)
-        string regimeTxt = fl <= 0 ? "—" : posGamma ? "POSITIVE GAMMA" : "NEGATIVE GAMMA"
-        color  regimeCol = fl <= 0 ? color.gray : posGamma ? color.new(#10b981, 0) : color.new(#ef4444, 0)
-        color  gexCol    = netGex >= 0 ? color.new(#10b981, 0) : color.new(#ef4444, 0)
-        string note      = fl <= 0 ? "set flip level" : posGamma ? "moves dampened - fade extremes" : "moves amplified - trend follows"
+if barstate.islast and showTable
+    regimeTxt = fl <= 0 ? "set flip level" : posGamma ? "POSITIVE GAMMA" : "NEGATIVE GAMMA"
+    regimeCol = fl <= 0 ? color.gray : posGamma ? color.teal : color.red
+    noteTxt   = fl <= 0 ? "-" : posGamma ? "moves dampened, fade extremes" : "moves amplified, trend follows"
+    gexCol    = netGex >= 0 ? color.teal : color.red
 
-        table.cell(info, 0, 0, "FlowEdge Gamma", text_color = color.white, text_size = size.small, bgcolor = color.new(#6366f1, 20))
-        table.cell(info, 1, 0, regimeTxt, text_color = regimeCol, text_size = size.small, bgcolor = color.new(#6366f1, 20))
-        table.cell(info, 0, 1, "Net GEX", text_color = color.gray, text_size = size.tiny)
-        table.cell(info, 1, 1, (netGex >= 0 ? "+" : "") + str.tostring(netGex, "#.##") + "B", text_color = gexCol, text_size = size.tiny)
-        table.cell(info, 0, 2, "Gamma wall", text_color = color.gray, text_size = size.tiny)
-        table.cell(info, 1, 2, gw > 0 ? str.tostring(gw, format.mintick) : "—", text_color = cGamma, text_size = size.tiny)
-        table.cell(info, 0, 3, "Call wall", text_color = color.gray, text_size = size.tiny)
-        table.cell(info, 1, 3, cw > 0 ? str.tostring(cw, format.mintick) : "—", text_color = cCall, text_size = size.tiny)
-        table.cell(info, 0, 4, "Put wall", text_color = color.gray, text_size = size.tiny)
-        table.cell(info, 1, 4, pw > 0 ? str.tostring(pw, format.mintick) : "—", text_color = cPut, text_size = size.tiny)
-        table.cell(info, 0, 5, "Regime", text_color = color.gray, text_size = size.tiny)
-        table.cell(info, 1, 5, note, text_color = regimeCol, text_size = size.tiny)
+    table.cell(info, 0, 0, "FlowEdge Gamma", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 0, regimeTxt,        text_color = regimeCol,   text_size = size.small)
+    table.cell(info, 0, 1, "Net GEX",    text_color = color.gray, text_size = size.tiny)
+    table.cell(info, 1, 1, str.tostring(netGex, "#.##") + "B", text_color = gexCol, text_size = size.tiny)
+    table.cell(info, 0, 2, "Gamma wall", text_color = color.gray, text_size = size.tiny)
+    table.cell(info, 1, 2, gw > 0 ? str.tostring(gw, format.mintick) : "-", text_color = cGamma, text_size = size.tiny)
+    table.cell(info, 0, 3, "Call wall",  text_color = color.gray, text_size = size.tiny)
+    table.cell(info, 1, 3, cw > 0 ? str.tostring(cw, format.mintick) : "-", text_color = cCall, text_size = size.tiny)
+    table.cell(info, 0, 4, "Put wall",   text_color = color.gray, text_size = size.tiny)
+    table.cell(info, 1, 4, pw > 0 ? str.tostring(pw, format.mintick) : "-", text_color = cPut, text_size = size.tiny)
+    table.cell(info, 0, 5, "Regime",     text_color = color.gray, text_size = size.tiny)
+    table.cell(info, 1, 5, noteTxt,      text_color = regimeCol,  text_size = size.tiny)
 
-// ── Alerts ──────────────────────────────────────────────────────────────────
-// The flip cross is the one that matters most — it changes how the tape
-// behaves, not just where it is.
+// ---- Alerts ----------------------------------------------------------------
+// The flip cross matters most: it changes how the tape behaves, not just where
+// price is.
 flipUp   = fl > 0 and ta.crossover(close, fl)
 flipDown = fl > 0 and ta.crossunder(close, fl)
 atCall   = cw > 0 and high >= cw and low <= cw
 atPut    = pw > 0 and high >= pw and low <= pw
 atGamma  = gw > 0 and high >= gw and low <= gw
 
-alertcondition(flipUp,   "Gamma flip — crossed UP",   "Price crossed above the gamma flip: dealers now long gamma, expect moves to be dampened.")
-alertcondition(flipDown, "Gamma flip — crossed DOWN", "Price crossed below the gamma flip: dealers now short gamma, expect moves to be amplified.")
-alertcondition(atCall,   "Touched call wall",         "Price is testing the call wall — heaviest call OI above spot.")
-alertcondition(atPut,    "Touched put wall",          "Price is testing the put wall — heaviest put OI below spot.")
-alertcondition(atGamma,  "Touched gamma wall",        "Price is at the gamma wall — the largest positive GEX strike, a pin/magnet.")
+alertcondition(flipUp,   "Gamma flip crossed UP",   "Price crossed above the gamma flip: dealers long gamma, moves get dampened.")
+alertcondition(flipDown, "Gamma flip crossed DOWN", "Price crossed below the gamma flip: dealers short gamma, moves get amplified.")
+alertcondition(atCall,   "Touched call wall",       "Price is testing the call wall.")
+alertcondition(atPut,    "Touched put wall",        "Price is testing the put wall.")
+alertcondition(atGamma,  "Touched gamma wall",      "Price is at the gamma wall, the largest positive GEX strike.")
 
-plotshape(flipUp,   "flip up",   shape.triangleup,   location.belowbar, cFlip, size = size.tiny)
-plotshape(flipDown, "flip down", shape.triangledown, location.abovebar, cFlip, size = size.tiny)
+plotshape(flipUp,   "Flip up",   shape.triangleup,   location.belowbar, cFlip, size = size.tiny)
+plotshape(flipDown, "Flip down", shape.triangledown, location.abovebar, cFlip, size = size.tiny)
