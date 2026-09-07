@@ -99,6 +99,9 @@ export default async function handler(req) {
     )];
 
     const strikeMap = {};
+    // Per-contract terms, kept so net GEX can be re-evaluated at hypothetical
+    // spot prices — that is what locating the true gamma flip requires
+    const book = [];
     let totalCallVol = 0, totalPutVol = 0;
 
     for (const row of rows) {
@@ -117,6 +120,8 @@ export default async function handler(req) {
 
       totalCallVol += cVol;
       totalPutVol += pVol;
+      if (cOI > 0) book.push({ K: k, T, oi: cOI, isCall: true,  w: dteWeight });
+      if (pOI > 0) book.push({ K: k, T, oi: pOI, isCall: false, w: dteWeight });
 
       if (!strikeMap[k]) strikeMap[k] = { strike: k, callOI: 0, putOI: 0, callVol: 0, putVol: 0, gex: 0, callGex: 0, putGex: 0, expiryDate: row.expiryDate, dte };
       strikeMap[k].callOI += cOI;
@@ -139,8 +144,38 @@ export default async function handler(req) {
     const callWall = gexByStrike
       .filter(x => x.strike >= spot && x.callOI > 0)
       .reduce((max, x) => x.callOI > max.callOI ? x : max, { callOI: 0, strike: null }).strike;
-    const flipCandidate = gexByStrike.find(x => x.gex > 0 && x.strike >= spot * 0.92);
-    const flipLevel = flipCandidate?.strike ?? null;
+    // Gamma flip — the SPOT price at which dealer net gamma changes sign. This
+    // means re-pricing the whole book at candidate spots and bisecting the zero
+    // crossing. Scanning strikes for the first positive-GEX strike (the common
+    // shortcut, and what this used to do) answers a different question and
+    // routinely lands nowhere near the real flip.
+    const netGexAt = (S) => {
+      let t = 0;
+      for (const c of book) {
+        const g = bsGamma(S, c.K, c.T, sigma) * 100 * S * c.w * c.oi;
+        t += c.isCall ? g : -g;
+      }
+      return t;
+    };
+    let flipLevel = null;
+    {
+      const lo = spot * 0.90, hi = spot * 1.10, steps = 40;
+      let prevS = lo, prevV = netGexAt(lo);
+      for (let i = 1; i <= steps; i++) {
+        const S = lo + (hi - lo) * (i / steps);
+        const v = netGexAt(S);
+        if ((prevV < 0 && v >= 0) || (prevV > 0 && v <= 0)) {
+          let a = prevS, b = S, fa = prevV;
+          for (let k = 0; k < 40; k++) {
+            const m = (a + b) / 2, fm = netGexAt(m);
+            if ((fa < 0 && fm >= 0) || (fa > 0 && fm <= 0)) b = m; else { a = m; fa = fm; }
+          }
+          flipLevel = +((a + b) / 2).toFixed(2);
+          break;
+        }
+        prevS = S; prevV = v;
+      }
+    }
     const pcVolumeRatio = totalCallVol > 0 ? (totalPutVol / totalCallVol).toFixed(2) : null;
 
     // Directional king nodes — one buy target (above spot), one sell target (below spot)

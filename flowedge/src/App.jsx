@@ -6314,7 +6314,423 @@ function StatsPanel() {
   );
 }
 
-const TABS = ["Signals", "Confluence", "ICT", "ORB", "SMC", "Dark Pool", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
+// ─── Order Book ─────────────────────────────────────────────────────────────
+
+const OB_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'SUI', 'HYPE', 'ARB'];
+const obFmtSz  = n => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n >= 1 ? n.toFixed(2) : n.toFixed(4);
+const obFmtUsd = n => n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `$${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `$${(n / 1e3).toFixed(0)}K` : `$${n.toFixed(0)}`;
+
+function OrderBookPanel() {
+  const [coin, setCoin] = useState('BTC');
+  const [book, setBook] = useState(null);
+  const [err, setErr]   = useState('');
+  const inflight = useRef(false);
+
+  const load = useCallback(async (c) => {
+    if (inflight.current) return;
+    inflight.current = true;
+    try {
+      const d = await fetch(`/api/orderbook?coin=${encodeURIComponent(c)}`).then(r => r.json());
+      if (d.error) setErr(d.error); else { setErr(''); setBook(d); }
+    } catch (e) { setErr(e.message); }
+    inflight.current = false;
+  }, []);
+
+  useEffect(() => {
+    setBook(null);
+    load(coin);
+    const t = setInterval(() => load(coin), 1000);
+    return () => clearInterval(t);
+  }, [coin, load]);
+
+  const fmtPx = p => p == null ? '—' : p >= 1000 ? p.toLocaleString('en-US', { maximumFractionDigits: 1 })
+    : p >= 1 ? p.toFixed(3) : p.toFixed(5);
+
+  // Ladder rows are scaled against the single largest resting size on either
+  // side, so bid and ask depth bars stay directly comparable
+  const maxSz = book ? Math.max(...book.bids.map(b => b.sz), ...book.asks.map(a => a.sz), 1) : 1;
+  const imb = book?.imbalance ?? 0;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Order Book</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>Live L2 depth from Hyperliquid · updates every second</div>
+        </div>
+        {book && (
+          <div style={{ display: 'flex', gap: 10, alignItems: 'baseline' }}>
+            <span style={{ fontSize: 15, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: '#f9fafb' }}>{fmtPx(book.mid)}</span>
+            <span style={{ fontSize: 9, color: '#6b7280', fontFamily: 'monospace' }}>spread {book.spreadBps.toFixed(2)}bps</span>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {OB_COINS.map(c => (
+          <button key={c} onClick={() => setCoin(c)} style={{
+            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: coin === c ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: coin === c ? '#a5b4fc' : '#4b5563',
+          }}>{c}</button>
+        ))}
+      </div>
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
+      {!book && !err && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Loading book…</div>}
+
+      {book && (
+        <>
+          {/* Depth imbalance */}
+          <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 8, fontWeight: 800, letterSpacing: '0.06em', marginBottom: 5 }}>
+              <span style={{ color: '#10b981' }}>BIDS {obFmtUsd(book.bidNotional)}</span>
+              <span style={{ color: '#4b5563' }}>DEPTH IMBALANCE {imb >= 0 ? '+' : ''}{imb.toFixed(1)}%</span>
+              <span style={{ color: '#ef4444' }}>{obFmtUsd(book.askNotional)} ASKS</span>
+            </div>
+            <div style={{ display: 'flex', height: 7, borderRadius: 4, overflow: 'hidden', background: 'rgba(255,255,255,0.05)' }}>
+              <div style={{ width: `${50 + imb / 2}%`, background: '#10b981' }} />
+              <div style={{ width: `${50 - imb / 2}%`, background: '#ef4444' }} />
+            </div>
+            <div style={{ fontSize: 8, color: '#374151', marginTop: 4 }}>
+              {Math.abs(imb) < 10 ? 'Balanced book — no resting-size edge either way'
+                : imb > 0 ? 'More size resting on the bid — sellers must absorb it to push price down'
+                : 'More size resting on the offer — buyers must absorb it to push price up'}
+            </div>
+          </div>
+
+          {/* Ladder */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+            {[['BIDS', book.bids, '#10b981', true], ['ASKS', book.asks, '#ef4444', false]].map(([label, rows, col, isBid]) => (
+              <div key={label} style={{ padding: '7px 9px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1fr 0.5fr', fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 3 }}>
+                  <span>{label}</span><span style={{ textAlign: 'right' }}>SIZE</span><span style={{ textAlign: 'right' }}>ORD</span>
+                </div>
+                {rows.slice(0, 14).map((l, i) => (
+                  <div key={i} style={{ position: 'relative', display: 'grid', gridTemplateColumns: '1.1fr 1fr 0.5fr', fontSize: 9, fontFamily: 'monospace', padding: '1.5px 0' }}>
+                    {/* depth bar behind the row, anchored to the price side */}
+                    <div style={{
+                      position: 'absolute', top: 0, bottom: 0, [isBid ? 'left' : 'right']: 0,
+                      width: `${(l.sz / maxSz) * 100}%`, background: col, opacity: 0.14, borderRadius: 2,
+                    }} />
+                    <span style={{ color: col, fontWeight: 700, zIndex: 1 }}>{fmtPx(l.px)}</span>
+                    <span style={{ color: '#9ca3af', textAlign: 'right', zIndex: 1 }}>{obFmtSz(l.sz)}</span>
+                    <span style={{ color: '#4b5563', textAlign: 'right', zIndex: 1 }}>{l.orders}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          {/* Walls */}
+          {(book.bidWalls.length > 0 || book.askWalls.length > 0) && (
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>
+                WALLS — SINGLE LEVELS HOLDING 12%+ OF THEIR SIDE'S DEPTH
+              </div>
+              {[...book.bidWalls.map(w => ({ ...w, side: 'BID' })), ...book.askWalls.map(w => ({ ...w, side: 'ASK' }))]
+                .sort((a, b) => b.sz - a.sz).map((w, i) => {
+                  const c = w.side === 'BID' ? '#10b981' : '#ef4444';
+                  return (
+                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9.5, fontFamily: 'monospace', padding: '1px 0' }}>
+                      <span style={{ color: c, fontWeight: 800 }}>{w.side} {fmtPx(w.px)}<span style={{ color: '#4b5563', fontWeight: 600 }}> · {w.distPct >= 0 ? '+' : ''}{w.distPct.toFixed(2)}%</span></span>
+                      <span style={{ color: '#9ca3af' }}>{obFmtSz(w.sz)} · {obFmtUsd(w.notional)} · {w.share.toFixed(0)}%</span>
+                    </div>
+                  );
+                })}
+            </div>
+          )}
+
+          <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+            Real Level-2 depth, not a proxy. Crypto perps are the one asset class here where a live book is obtainable without a paid feed — equity depth needs a Level 2 subscription and FX has no central book at all, which is why this tab is perps-only. Resting orders can be pulled at any moment, so treat walls as intent, not commitment.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Options Flow ───────────────────────────────────────────────────────────
+
+const OF_SYMBOLS = ['SPY', 'QQQ', 'IWM', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMD', 'META', 'AMZN'];
+
+function OptionsFlowPanel() {
+  const [symbol, setSymbol] = useState('SPY');
+  const [data, setData] = useState(null);
+  const [view, setView] = useState('unusual');
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+
+  const load = useCallback(async (s) => {
+    setLoading(true); setErr('');
+    try {
+      const d = await fetch(`/api/optionsflow?symbol=${encodeURIComponent(s)}`).then(r => r.json());
+      if (d.error) setErr(d.error); else setData(d);
+    } catch (e) { setErr(e.message); }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    load(symbol);
+    const t = setInterval(() => load(symbol), 60000);
+    return () => clearInterval(t);
+  }, [symbol, load]);
+
+  const t = data?.totals;
+  const rows = view === 'unusual' ? (data?.unusual || []) : (data?.flows || []);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Options Flow</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>Volume vs open interest — where today's contracts are NEW positioning</div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {data?.spot && <span style={{ fontSize: 12, fontFamily: 'monospace', fontWeight: 800, color: '#e5e7eb' }}>${data.spot.toFixed(2)}</span>}
+          <button onClick={() => load(symbol)} disabled={loading} style={{
+            background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: 6,
+            padding: '4px 10px', color: loading ? '#4b5563' : '#a5b4fc', fontSize: 10, fontWeight: 700, cursor: loading ? 'default' : 'pointer',
+          }}>{loading ? '…' : '↻'}</button>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {OF_SYMBOLS.map(s => (
+          <button key={s} onClick={() => setSymbol(s)} style={{
+            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: symbol === s ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: symbol === s ? '#a5b4fc' : '#4b5563',
+          }}>{s}</button>
+        ))}
+      </div>
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
+
+      {t && (
+        <>
+          {/* Premium split — the directional read that contract counts miss */}
+          <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 6 }}>PREMIUM COMMITTED TODAY</div>
+            <div style={{ display: 'flex', height: 7, borderRadius: 4, overflow: 'hidden', marginBottom: 5 }}>
+              <div style={{ width: `${t.callPremiumShare ?? 50}%`, background: '#10b981' }} />
+              <div style={{ width: `${100 - (t.callPremiumShare ?? 50)}%`, background: '#ef4444' }} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace' }}>
+              <span style={{ color: '#6ee7b7' }}>CALLS {obFmtUsd(t.callNotional)} · {t.callPremiumShare}%</span>
+              <span style={{ color: '#fca5a5' }}>PUTS {obFmtUsd(t.putNotional)}</span>
+            </div>
+            <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 9, fontFamily: 'monospace', color: '#6b7280', flexWrap: 'wrap' }}>
+              <span>P/C volume <span style={{ color: (t.pcVolume ?? 1) > 1 ? '#ef4444' : '#10b981', fontWeight: 700 }}>{t.pcVolume ?? '—'}</span></span>
+              <span>P/C OI <span style={{ color: (t.pcOI ?? 1) > 1 ? '#ef4444' : '#10b981', fontWeight: 700 }}>{t.pcOI ?? '—'}</span></span>
+              <span>{data.contractsScanned} contracts</span>
+            </div>
+            {/* Puts leading by contract count while calls lead by dollars (or the
+                reverse) means the size is not where the count says it is */}
+            {t.pcVolume != null && t.callPremiumShare != null && (t.pcVolume > 1) === (t.callPremiumShare > 50) && (
+              <div style={{ fontSize: 8, color: '#fbbf24', marginTop: 4 }}>
+                Contract count and premium disagree — more {t.pcVolume > 1 ? 'puts' : 'calls'} by count but more {t.callPremiumShare > 50 ? 'call' : 'put'} dollars. Size sits on the smaller count.
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', gap: 4 }}>
+            {[['unusual', `★ Unusual (${data.unusual.length})`], ['all', `Top by premium (${data.flows.length})`]].map(([k, label]) => (
+              <button key={k} onClick={() => setView(k)} style={{
+                padding: '4px 10px', borderRadius: 5, fontSize: 9, fontWeight: 800, border: 'none', cursor: 'pointer',
+                background: view === k ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+                color: view === k ? '#a5b4fc' : '#4b5563',
+              }}>{label}</button>
+            ))}
+          </div>
+
+          <div style={{ padding: '8px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '0.7fr 0.8fr 0.7fr 0.8fr 0.6fr 0.8fr', fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.05em', marginBottom: 4 }}>
+              <span>TYPE</span><span>STRIKE</span><span>EXP</span><span style={{ textAlign: 'right' }}>VOL</span><span style={{ textAlign: 'right' }}>V/OI</span><span style={{ textAlign: 'right' }}>PREMIUM</span>
+            </div>
+            {rows.length === 0 && <div style={{ fontSize: 9, color: '#374151', padding: '6px 0' }}>No contracts match</div>}
+            {rows.slice(0, 22).map((f, i) => {
+              const c = f.type === 'CALL' ? '#10b981' : '#ef4444';
+              return (
+                <div key={i} style={{ display: 'grid', gridTemplateColumns: '0.7fr 0.8fr 0.7fr 0.8fr 0.6fr 0.8fr', fontSize: 9, fontFamily: 'monospace', padding: '2px 0', alignItems: 'center', borderTop: i ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
+                  <span style={{ color: c, fontWeight: 800 }}>{f.type}</span>
+                  <span style={{ color: '#e5e7eb' }}>{f.strike}{f.moneyness != null && <span style={{ color: '#4b5563', fontSize: 7.5 }}> {f.moneyness >= 0 ? '+' : ''}{f.moneyness.toFixed(1)}%</span>}</span>
+                  <span style={{ color: '#6b7280' }}>{f.expiry}</span>
+                  <span style={{ color: '#9ca3af', textAlign: 'right' }}>{f.volume.toLocaleString()}</span>
+                  <span style={{ color: f.newPositioning ? '#fbbf24' : '#4b5563', textAlign: 'right', fontWeight: f.newPositioning ? 800 : 400 }}>{f.volOI == null ? '∞' : f.volOI}</span>
+                  <span style={{ color: '#c4b5fd', textAlign: 'right', fontWeight: 700 }}>{obFmtUsd(f.notional)}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+            Volume above open interest (V/OI ≥ 1, highlighted) means today's trading exceeds every contract already outstanding — the activity is new positioning, not inventory being shuffled. Honest scope: this is a chain snapshot, not the options tape. Classifying each print as a sweep or block, or as hitting the bid vs the ask, needs a paid OPRA feed — so direction here is inferred from strike and type, not from an aggressor flag.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Independent GEX ────────────────────────────────────────────────────────
+
+function GexIndependentPanel() {
+  const [symbol, setSymbol] = useState('SPY');
+  const [yh, setYh] = useState(null);   // Yahoo-derived
+  const [nq, setNq] = useState(null);   // NASDAQ-derived (existing engine)
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+
+  const load = useCallback(async (s) => {
+    setLoading(true); setErr('');
+    try {
+      const [a, b] = await Promise.all([
+        fetch(`/api/gex2?symbol=${encodeURIComponent(s)}&expiries=4`).then(r => r.json()).catch(() => null),
+        fetch(`/api/gamma?symbol=${encodeURIComponent(s)}`).then(r => r.json()).catch(() => null),
+      ]);
+      if (a?.error && b?.error) setErr(a.error);
+      setYh(a?.error ? null : a);
+      setNq(b?.error ? null : b);
+    } catch (e) { setErr(e.message); }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(symbol); }, [symbol, load]);
+
+  const fmtB = n => n == null ? '—' : `${n >= 0 ? '+' : ''}${(n / 1e9).toFixed(2)}B`;
+  const fmtL = v => v == null ? '—' : Number(v).toFixed(2);
+
+  // Two independent estimates only mean something when compared. Agreement
+  // within ~0.5% of spot is treated as confirming the level.
+  const spot = yh?.spot || nq?.spot;
+  const agree = (a, b) => {
+    if (a == null || b == null || !spot) return null;
+    return Math.abs(a - b) / spot <= 0.005;
+  };
+
+  const levels = [
+    ['Gamma wall', yh?.gammaWall, nq?.gammaWall],
+    ['Call wall',  yh?.callWall,  nq?.callWall],
+    ['Put wall',   yh?.putWall,   nq?.putWall],
+    ['Gamma flip', yh?.flipLevel, nq?.flipLevel],
+  ];
+  const confirmed = levels.filter(([, a, b]) => agree(a, b) === true).length;
+  const comparable = levels.filter(([, a, b]) => agree(a, b) !== null).length;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Independent GEX</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>Yahoo chain vs NASDAQ chain — two separate sources, same gamma math</div>
+        </div>
+        <button onClick={() => load(symbol)} disabled={loading} style={{
+          background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: 6,
+          padding: '4px 10px', color: loading ? '#4b5563' : '#a5b4fc', fontSize: 10, fontWeight: 700, cursor: loading ? 'default' : 'pointer',
+        }}>{loading ? '…' : '↻'}</button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {OF_SYMBOLS.map(s => (
+          <button key={s} onClick={() => setSymbol(s)} style={{
+            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: symbol === s ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: symbol === s ? '#a5b4fc' : '#4b5563',
+          }}>{s}</button>
+        ))}
+      </div>
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
+      {loading && !yh && !nq && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Pulling both chains…</div>}
+
+      {(yh || nq) && (
+        <>
+          {/* Cross-source verdict */}
+          {comparable > 0 && (
+            <div style={{
+              padding: '10px 12px', borderRadius: 9,
+              background: confirmed === comparable ? 'rgba(16,185,129,0.05)' : confirmed === 0 ? 'rgba(239,68,68,0.05)' : 'rgba(245,158,11,0.05)',
+              border: `1px solid ${confirmed === comparable ? 'rgba(16,185,129,0.25)' : confirmed === 0 ? 'rgba(239,68,68,0.25)' : 'rgba(245,158,11,0.25)'}`,
+            }}>
+              <div style={{ fontSize: 9, fontWeight: 900, color: confirmed === comparable ? '#6ee7b7' : confirmed === 0 ? '#fca5a5' : '#fbbf24' }}>
+                {confirmed}/{comparable} LEVELS CONFIRMED BY BOTH SOURCES
+              </div>
+              <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 3 }}>
+                {confirmed === comparable ? 'Both chains independently land on the same levels — the strongest read you can get from this data.'
+                  : confirmed === 0 ? 'The two sources disagree on every level. Treat all of them as soft until they converge.'
+                  : 'Partial agreement. Lean on the confirmed levels; treat the rest as provisional.'}
+              </div>
+            </div>
+          )}
+
+          {/* Side-by-side levels */}
+          <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 0.9fr 0.9fr 0.5fr', fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.05em', marginBottom: 4 }}>
+              <span>LEVEL</span><span style={{ textAlign: 'right' }}>YAHOO</span><span style={{ textAlign: 'right' }}>NASDAQ</span><span style={{ textAlign: 'right' }}>AGREE</span>
+            </div>
+            {levels.map(([name, a, b], i) => {
+              const ok = agree(a, b);
+              return (
+                <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 0.9fr 0.9fr 0.5fr', fontSize: 9.5, fontFamily: 'monospace', padding: '2px 0', alignItems: 'center' }}>
+                  <span style={{ color: '#9ca3af', fontWeight: 700 }}>{name}</span>
+                  <span style={{ color: '#c4b5fd', textAlign: 'right' }}>{fmtL(a)}</span>
+                  <span style={{ color: '#93c5fd', textAlign: 'right' }}>{fmtL(b)}</span>
+                  <span style={{ textAlign: 'right', color: ok == null ? '#374151' : ok ? '#10b981' : '#ef4444', fontWeight: 800 }}>
+                    {ok == null ? '—' : ok ? '✓' : '✗'}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Source detail */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+            {[['YAHOO CHAIN', yh, '#c4b5fd', 'per-contract IV'], ['NASDAQ CHAIN', nq, '#93c5fd', 'historical-vol sigma']].map(([label, d, col, note]) => (
+              <div key={label} style={{ padding: '8px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ fontSize: 8, color: col, fontWeight: 800, letterSpacing: '0.06em', marginBottom: 3 }}>{label}</div>
+                {d ? (
+                  <>
+                    <div style={{ fontSize: 13, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: (d.netGex ?? 0) >= 0 ? '#10b981' : '#ef4444' }}>{fmtB(d.netGex)}</div>
+                    <div style={{ fontSize: 8, color: '#4b5563', marginTop: 2 }}>net GEX · {note}</div>
+                    <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>
+                      {d.contracts ? `${d.contracts} contracts` : ''}{d.expiriesUsed ? ` · ${d.expiriesUsed} expiries` : ''}
+                      {d.impliedVol ? ` · IV ${d.impliedVol}%` : ''}
+                    </div>
+                  </>
+                ) : <div style={{ fontSize: 9, color: '#374151' }}>unavailable</div>}
+              </div>
+            ))}
+          </div>
+
+          {/* Regime agreement */}
+          {yh && nq && (
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 4 }}>GAMMA REGIME</div>
+              {(() => {
+                const sy = Math.sign(yh.netGex || 0), sn = Math.sign(nq.netGex || 0);
+                const same = sy === sn && sy !== 0;
+                const txt = sy > 0 ? 'POSITIVE — dealers dampen moves' : 'NEGATIVE — dealers amplify moves';
+                return (
+                  <div style={{ fontSize: 10, fontWeight: 800, color: !same ? '#fbbf24' : sy > 0 ? '#10b981' : '#ef4444' }}>
+                    {same ? `Both sources agree: ${txt}`
+                      : `Sources disagree on sign — Yahoo ${fmtB(yh.netGex)}, NASDAQ ${fmtB(nq.netGex)}. Net GEX is near zero, so the regime call is unreliable right now.`}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+            Both estimates use identical Black-Scholes gamma math, so any divergence comes from the option data itself, not the model. Yahoo supplies per-contract implied volatility — each strike prices with its own IV, which handles skew better than applying one historical-vol estimate across the chain. Neither is a paid dealer-positioning feed: open interest shows contracts outstanding, not which side dealers hold, so the long/short-gamma read is the standard assumption that dealers are short customer options, not observed fact.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+const TABS = ["Signals", "Confluence", "ICT", "ORB", "SMC", "Order Book", "Options Flow", "GEX", "Dark Pool", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -6881,6 +7297,9 @@ export default function App() {
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "SMC" && <SMCPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                {tab === "Order Book" && <OrderBookPanel />}
+                {tab === "Options Flow" && <OptionsFlowPanel />}
+                {tab === "GEX" && <ProGate><GexIndependentPanel /></ProGate>}
                 {tab === "Dark Pool" && <DarkPoolPanel onChart={sym => setChartSymbol(sym)} />}
                 {tab === "Stats" && <StatsPanel />}
                 {tab === "News" && <NewsPanel watchlist={watchlist} />}
@@ -6997,6 +7416,9 @@ export default function App() {
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "SMC" && <SMCPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
+                  {tab === "Order Book" && <OrderBookPanel />}
+                  {tab === "Options Flow" && <OptionsFlowPanel />}
+                  {tab === "GEX" && <ProGate><GexIndependentPanel /></ProGate>}
                   {tab === "Dark Pool" && <DarkPoolPanel onChart={sym => setChartSymbol(sym)} />}
                   {tab === "Stats" && <StatsPanel />}
                   {tab === "News" && <NewsPanel watchlist={watchlist} />}
