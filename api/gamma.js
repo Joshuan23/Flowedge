@@ -67,20 +67,29 @@ export default async function handler(req) {
   const { searchParams } = new URL(req.url);
   const symbol = (searchParams.get('symbol') || 'SPY').toUpperCase();
   const filterExpiry = searchParams.get('expiry') || null;
-  const assetclass = ETF_SET.has(symbol) ? 'etf' : 'stocks';
+  // NASDAQ rejects the wrong assetclass, so the hint list above is only a first
+  // guess — fall back to the other class rather than returning an empty chain
+  // for any symbol the list has not been updated for.
+  const fetchChain = async () => {
+    const opts = { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json', 'Referer': 'https://www.nasdaq.com/' } };
+    for (const cls of ETF_SET.has(symbol) ? ['etf', 'stocks'] : ['stocks', 'etf']) {
+      const res = await fetch(`https://api.nasdaq.com/api/quote/${symbol}/option-chain?assetclass=${cls}&limit=200&expiryoption=allWeeks&callput=callput`, opts);
+      if (!res.ok) continue;
+      const data = await res.json();
+      if ((data?.data?.table?.rows || []).length) return data;
+    }
+    return null;
+  };
 
   try {
-    const [priceRes, optRes] = await Promise.all([
+    const [priceRes, optData] = await Promise.all([
       fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1mo`, {
         headers: { 'User-Agent': 'Mozilla/5.0' }
       }),
-      fetch(`https://api.nasdaq.com/api/quote/${symbol}/option-chain?assetclass=${assetclass}&limit=200&expiryoption=allWeeks&callput=callput`, {
-        headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json', 'Referer': 'https://www.nasdaq.com/' }
-      }),
+      fetchChain(),
     ]);
 
     const priceData = await priceRes.json();
-    const optData = await optRes.json();
 
     const chartResult = priceData?.chart?.result?.[0];
     const spot = chartResult?.meta?.regularMarketPrice;

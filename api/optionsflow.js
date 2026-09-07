@@ -12,7 +12,28 @@ export const config = { runtime: 'edge' };
 // today's activity is NEW positioning rather than shuffling old inventory.
 // A vol/OI above ~1 is the classic unusual-activity screen.
 
-const ETF_SET = new Set(['SPY','QQQ','IWM','DIA','GLD','SLV','TLT','XLF','XLE','XLK','HYG','EEM','ARKK','SMH','USO']);
+// NASDAQ needs assetclass=etf vs stocks and rejects the wrong one. Rather than
+// maintain a hand-written ETF list that silently breaks the moment a new symbol
+// is added to the app, guess from the common names and fall back to the other
+// class when the guess comes back empty.
+const ETF_HINT = new Set(['SPY','QQQ','IWM','DIA','GLD','SLV','TLT','XLF','XLE','XLK','HYG','EEM','ARKK','SMH','USO']);
+
+async function fetchChain(symbol) {
+  const url = cls => `https://api.nasdaq.com/api/quote/${symbol}/option-chain?assetclass=${cls}&limit=800&expiryoption=allWeeks&callput=callput`;
+  const headers = { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json', 'Referer': 'https://www.nasdaq.com/' };
+  const order = ETF_HINT.has(symbol) ? ['etf', 'stocks'] : ['stocks', 'etf'];
+  // Preserve the first response so a genuine failure still reports its status
+  let firstRes = null;
+  for (const cls of order) {
+    const res = await fetch(url(cls), { headers });
+    if (!firstRes) firstRes = res;
+    if (!res.ok) continue;
+    const data = await res.json();
+    if ((data?.data?.table?.rows || []).length) return { data, assetclass: cls, res };
+  }
+  return { data: null, assetclass: null, res: firstRes };
+}
+
 const num = s => {
   if (s == null) return 0;
   const n = parseFloat(String(s).replace(/[,$]/g, ''));
@@ -22,18 +43,18 @@ const num = s => {
 export default async function handler(req) {
   const url    = new URL(req.url);
   const symbol = (url.searchParams.get('symbol') || 'SPY').toUpperCase();
-  const assetclass = ETF_SET.has(symbol) ? 'etf' : 'stocks';
 
   try {
-    const [optRes, spotRes] = await Promise.all([
-      fetch(`https://api.nasdaq.com/api/quote/${symbol}/option-chain?assetclass=${assetclass}&limit=800&expiryoption=allWeeks&callput=callput`, {
-        headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json', 'Referer': 'https://www.nasdaq.com/' },
-      }),
+    const [chain, spotRes] = await Promise.all([
+      fetchChain(symbol),
       fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d`, { headers: { 'User-Agent': 'Mozilla/5.0' } }),
     ]);
 
-    if (!optRes.ok) return json({ error: `NASDAQ HTTP ${optRes.status}`, symbol, flows: [] }, optRes.status);
-    const optData = await optRes.json();
+    if (!chain.data) {
+      const status = chain.res && !chain.res.ok ? chain.res.status : 404;
+      return json({ error: chain.res && !chain.res.ok ? `NASDAQ HTTP ${status}` : `No option chain for ${symbol}`, symbol, flows: [] }, status);
+    }
+    const optData = chain.data;
     const spotData = spotRes.ok ? await spotRes.json() : null;
     const spot = spotData?.chart?.result?.[0]?.meta?.regularMarketPrice || null;
 

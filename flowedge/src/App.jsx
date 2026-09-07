@@ -6316,15 +6316,28 @@ function StatsPanel() {
 
 // ─── Order Book ─────────────────────────────────────────────────────────────
 
+// Quick chips only — the full listed-perp universe is fetched live from
+// Hyperliquid, since coins are added and delisted constantly
 const OB_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'SUI', 'HYPE', 'ARB'];
 const obFmtSz  = n => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n >= 1 ? n.toFixed(2) : n.toFixed(4);
 const obFmtUsd = n => n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `$${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `$${(n / 1e3).toFixed(0)}K` : `$${n.toFixed(0)}`;
 
 function OrderBookPanel() {
   const [coin, setCoin] = useState('BTC');
+  const [coins, setCoins] = useState(OB_COINS);
   const [book, setBook] = useState(null);
   const [err, setErr]   = useState('');
   const inflight = useRef(false);
+
+  // Every currently listed perp, so the picker matches what is actually tradable
+  useEffect(() => {
+    let live = true;
+    fetch('/api/orderbook?universe=1')
+      .then(r => r.json())
+      .then(d => { if (live && d.coins?.length) setCoins(d.coins); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, []);
 
   const load = useCallback(async (c) => {
     if (inflight.current) return;
@@ -6365,6 +6378,18 @@ function OrderBookPanel() {
           </div>
         )}
       </div>
+
+      <select
+        value={coin}
+        onChange={e => setCoin(e.target.value)}
+        style={{
+          background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+          borderRadius: 6, padding: '7px 10px', color: '#f9fafb', fontSize: 12,
+          fontFamily: 'monospace', outline: 'none', cursor: 'pointer', width: '100%',
+        }}
+      >
+        {coins.map(c => <option key={c} value={c}>{c}</option>)}
+      </select>
 
       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
         {OB_COINS.map(c => (
@@ -6452,7 +6477,42 @@ function OrderBookPanel() {
 
 // ─── Options Flow ───────────────────────────────────────────────────────────
 
+// Quick chips for the handful of names that actually get watched all day; the
+// full TICKER_GROUPS universe sits behind the dropdown next to them, so these
+// tabs cover exactly what the Gamma tab covers.
 const OF_SYMBOLS = ['SPY', 'QQQ', 'IWM', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMD', 'META', 'AMZN'];
+
+// Grouped ticker dropdown shared by the options-driven tabs, matching Gamma
+function TickerPicker({ value, onChange, quick = OF_SYMBOLS }) {
+  return (
+    <>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={{
+          background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+          borderRadius: 6, padding: '7px 10px', color: '#f9fafb', fontSize: 12,
+          fontFamily: 'monospace', outline: 'none', cursor: 'pointer', width: '100%',
+        }}
+      >
+        {TICKER_GROUPS.map(g => (
+          <optgroup key={g.label} label={g.label}>
+            {g.tickers.map(t => <option key={t} value={t}>{t}</option>)}
+          </optgroup>
+        ))}
+      </select>
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {quick.map(s => (
+          <button key={s} onClick={() => onChange(s)} style={{
+            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: value === s ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: value === s ? '#a5b4fc' : '#4b5563',
+          }}>{s}</button>
+        ))}
+      </div>
+    </>
+  );
+}
 
 function OptionsFlowPanel() {
   const [symbol, setSymbol] = useState('SPY');
@@ -6495,15 +6555,7 @@ function OptionsFlowPanel() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-        {OF_SYMBOLS.map(s => (
-          <button key={s} onClick={() => setSymbol(s)} style={{
-            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
-            background: symbol === s ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
-            color: symbol === s ? '#a5b4fc' : '#4b5563',
-          }}>{s}</button>
-        ))}
-      </div>
+      <TickerPicker value={symbol} onChange={setSymbol} />
 
       {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
 
@@ -6631,15 +6683,7 @@ function GexIndependentPanel() {
         }}>{loading ? '…' : '↻'}</button>
       </div>
 
-      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-        {OF_SYMBOLS.map(s => (
-          <button key={s} onClick={() => setSymbol(s)} style={{
-            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
-            background: symbol === s ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
-            color: symbol === s ? '#a5b4fc' : '#4b5563',
-          }}>{s}</button>
-        ))}
-      </div>
+      <TickerPicker value={symbol} onChange={setSymbol} />
 
       {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
       {loading && !yh && !nq && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Pulling both chains…</div>}

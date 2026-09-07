@@ -11,7 +11,31 @@ const HL = 'https://api.hyperliquid.xyz/info';
 
 export default async function handler(req) {
   const url  = new URL(req.url);
-  const coin = (url.searchParams.get('coin') || 'BTC').toUpperCase();
+  // Hyperliquid coin names are case-SENSITIVE — the meme-basket perps are named
+  // kPEPE, kBONK, kSHIB and so on, so uppercasing the parameter would break
+  // every one of them. Pass it through verbatim.
+  const coin = url.searchParams.get('coin') || 'BTC';
+
+  // ?universe=1 lists every perp currently listed, so the UI never has to carry
+  // a hardcoded coin list that goes stale as Hyperliquid adds and delists
+  if (url.searchParams.get('universe')) {
+    try {
+      const [metaRes, midsRes] = await Promise.all([
+        fetch(HL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'meta' }) }),
+        fetch(HL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'allMids' }) }),
+      ]);
+      const meta = await metaRes.json();
+      const mids = midsRes.ok ? await midsRes.json() : {};
+      // Delisted markets stay in the universe but have no live book
+      const coins = (meta?.universe || [])
+        .filter(u => u?.name && !u.isDelisted && mids[u.name] != null)
+        .map(u => u.name)
+        .sort();
+      return json({ coins, count: coins.length, ts: Date.now() });
+    } catch (e) {
+      return json({ error: e.message, coins: [] }, 500);
+    }
+  }
 
   try {
     const [bookRes, midsRes] = await Promise.all([
