@@ -6950,15 +6950,7 @@ function CryptoFlowPanel() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-        {OB_COINS.map(c => (
-          <button key={c} onClick={() => setCoin(c)} style={{
-            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
-            background: coin === c ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
-            color: coin === c ? '#a5b4fc' : '#4b5563',
-          }}>{c}</button>
-        ))}
-      </div>
+      <CryptoCoinPicker value={coin} onChange={setCoin} quick={OB_COINS} />
 
       {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
 
@@ -7098,15 +7090,7 @@ function CryptoContextPanel() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-        {CE_COINS.map(c => (
-          <button key={c} onClick={() => setCoin(c)} style={{
-            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
-            background: coin === c ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
-            color: coin === c ? '#a5b4fc' : '#4b5563',
-          }}>{c}</button>
-        ))}
-      </div>
+      <CryptoCoinPicker value={coin} onChange={setCoin} />
 
       {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
       {!d && !err && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Loading context…</div>}
@@ -7215,6 +7199,233 @@ function CryptoContextPanel() {
   );
 }
 
+// ─── Full perp universe picker, shared by the crypto views ──────────────────
+
+function CryptoCoinPicker({ value, onChange, quick = CE_COINS }) {
+  const [coins, setCoins] = useState(quick);
+
+  useEffect(() => {
+    let live = true;
+    fetch('/api/orderbook?universe=1')
+      .then(r => r.json())
+      .then(d => { if (live && d.coins?.length) setCoins(d.coins); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, []);
+
+  return (
+    <>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={{
+          background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+          borderRadius: 6, padding: '7px 10px', color: '#f9fafb', fontSize: 12,
+          fontFamily: 'monospace', outline: 'none', cursor: 'pointer', width: '100%',
+        }}
+      >
+        {!coins.includes(value) && <option value={value}>{value}</option>}
+        {coins.map(c => <option key={c} value={c}>{c}</option>)}
+      </select>
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {quick.map(c => (
+          <button key={c} onClick={() => onChange(c)} style={{
+            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: value === c ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: value === c ? '#a5b4fc' : '#4b5563',
+          }}>{c}</button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+// ─── Forward tracking: auto-log signals and resolve them into the Journal ────
+
+const SIGNAL_KEY = 'fe_crypto_signals';
+
+const loadSignals = () => { try { return JSON.parse(localStorage.getItem(SIGNAL_KEY) || '[]'); } catch { return []; } };
+
+// The Journal stores pnl directly and derives nothing on read, so the exit
+// price written here is the price that makes (exit - entry) * shares equal the
+// realised R. The true exit is kept in the notes, because scale-out management
+// means no single price describes the whole trade.
+function appendJournal(sig, r) {
+  try {
+    const isLong = sig.direction === 'LONG';
+    const effExit = isLong ? sig.entry + r.rMultiple * sig.riskPerUnit
+                           : sig.entry - r.rMultiple * sig.riskPerUnit;
+    const pnl = r.rMultiple * sig.riskDollars;
+    const journal = JSON.parse(localStorage.getItem('fe_journal') || '[]');
+    journal.unshift({
+      id: Date.now() + Math.floor(Math.random() * 1000),
+      symbol: sig.coin,
+      direction: isLong ? 'long' : 'short',
+      entry: sig.entry,
+      exit: +effExit.toFixed(8),
+      shares: +sig.units.toFixed(8),
+      pnl: +pnl.toFixed(2),
+      date: new Date(sig.openedAt).toISOString().split('T')[0],
+      notes: `Auto-logged crypto signal · ${r.outcome} · ${r.rMultiple >= 0 ? '+' : ''}${r.rMultiple}R · ${sig.confidence}% confluence · actual exit ${r.exitPrice} after ${r.elapsedHours}h · scale-out at TP1 means the logged exit is the R-equivalent price, not a single fill · UNVALIDATED rules engine`,
+    });
+    localStorage.setItem('fe_journal', JSON.stringify(journal));
+    return true;
+  } catch { return false; }
+}
+
+function CryptoSignalTracker({ current, units, riskDollars }) {
+  const [signals, setSignals] = useState(loadSignals);
+  const [autoLog, setAutoLog] = useState(() => {
+    try { return localStorage.getItem('fe_crypto_autolog') !== '0'; } catch { return true; }
+  });
+  const signalsRef = useRef(signals);
+  const journaled = useRef(new Set());
+
+  useEffect(() => { signalsRef.current = signals; }, [signals]);
+  useEffect(() => { try { localStorage.setItem(SIGNAL_KEY, JSON.stringify(signals)); } catch {} }, [signals]);
+  useEffect(() => { try { localStorage.setItem('fe_crypto_autolog', autoLog ? '1' : '0'); } catch {} }, [autoLog]);
+
+  // Open a tracked signal when one appears. One open signal per coin at a time,
+  // so a setup that persists across polls is recorded once rather than every 45s.
+  useEffect(() => {
+    const s = current?.setup;
+    if (!autoLog || !s || !units) return;
+    setSignals(prev => {
+      if (prev.some(x => x.coin === current.coin && x.status === 'open')) return prev;
+      return [{
+        id: Date.now(), coin: current.coin, direction: s.direction,
+        entry: s.entry, stop: s.stop, tp1: s.tp1.price, tp2: s.tp2?.price ?? null,
+        rr1: s.tp1.rr, rr2: s.tp2?.rr ?? null,
+        riskPerUnit: s.riskPerUnit, units, riskDollars,
+        confidence: current.confidence, openedAt: Date.now(), status: 'open',
+      }, ...prev].slice(0, 200);
+    });
+  }, [current, autoLog, units, riskDollars]);
+
+  // Resolve open signals by replaying candles. Reads through a ref so the
+  // interval never works from a stale snapshot of the list.
+  useEffect(() => {
+    let live = true;
+    const resolve = async () => {
+      const open = signalsRef.current.filter(s => s.status === 'open');
+      for (const sig of open) {
+        const q = new URLSearchParams({
+          coin: sig.coin, dir: sig.direction, entry: String(sig.entry),
+          stop: String(sig.stop), tp1: String(sig.tp1), since: String(sig.openedAt),
+        });
+        if (sig.tp2) q.set('tp2', String(sig.tp2));
+        try {
+          const r = await fetch(`/api/cryptoresolve?${q}`).then(res => res.json());
+          if (!live || r.error) continue;
+          if (r.status === 'closed') {
+            if (!journaled.current.has(sig.id)) {
+              journaled.current.add(sig.id);
+              appendJournal(sig, r);
+            }
+            setSignals(prev => prev.map(x => x.id === sig.id
+              ? { ...x, status: 'closed', outcome: r.outcome, rMultiple: r.rMultiple, exitPrice: r.exitPrice, closedAt: Date.now() }
+              : x));
+          } else {
+            setSignals(prev => prev.map(x => x.id === sig.id
+              ? { ...x, unrealisedR: r.unrealisedR, tp1Hit: r.tp1Hit, lockedR: r.lockedR }
+              : x));
+          }
+        } catch {}
+      }
+    };
+    resolve();
+    const iv = setInterval(resolve, 60000);
+    return () => { live = false; clearInterval(iv); };
+  }, []);
+
+  const open   = signals.filter(s => s.status === 'open');
+  const closed = signals.filter(s => s.status === 'closed');
+  const totalR = closed.reduce((a, s) => a + (s.rMultiple ?? 0), 0);
+  const wins   = closed.filter(s => (s.rMultiple ?? 0) > 0);
+  const winRate = closed.length ? Math.round(wins.length / closed.length * 100) : null;
+  const expectancy = closed.length ? totalR / closed.length : null;
+
+  const fmtP = v => v == null ? '—' : Math.abs(v) >= 1000 ? v.toLocaleString('en-US', { maximumFractionDigits: 1 })
+    : Math.abs(v) >= 1 ? v.toFixed(4) : v.toPrecision(4);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+        <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>
+          FORWARD RECORD · AUTO-LOGGED TO JOURNAL
+        </div>
+        <button onClick={() => setAutoLog(v => !v)} style={{
+          padding: '3px 9px', borderRadius: 5, fontSize: 9, fontWeight: 800, border: 'none', cursor: 'pointer',
+          background: autoLog ? 'rgba(16,185,129,0.18)' : 'rgba(255,255,255,0.05)',
+          color: autoLog ? '#6ee7b7' : '#6b7280',
+        }}>{autoLog ? '● AUTO-LOG ON' : '○ AUTO-LOG OFF'}</button>
+      </div>
+
+      {closed.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 5 }}>
+          {[['CLOSED', closed.length, '#e5e7eb'],
+            ['WIN RATE', `${winRate}%`, winRate >= 50 ? '#10b981' : '#ef4444'],
+            ['TOTAL R', `${totalR >= 0 ? '+' : ''}${totalR.toFixed(2)}`, totalR >= 0 ? '#10b981' : '#ef4444'],
+            ['EXPECTANCY', `${expectancy >= 0 ? '+' : ''}${expectancy.toFixed(3)}R`, expectancy >= 0 ? '#10b981' : '#ef4444']].map(([l, v, c]) => (
+            <div key={l} style={{ padding: '6px 8px', borderRadius: 7, background: 'rgba(255,255,255,0.03)', textAlign: 'center' }}>
+              <div style={{ fontSize: 7, color: '#4b5563', letterSpacing: '0.06em' }}>{l}</div>
+              <div style={{ fontSize: 12, fontFamily: 'monospace', fontWeight: 800, color: c }}>{v}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {closed.length > 0 && closed.length < 30 && (
+        <div style={{ fontSize: 8.5, color: '#f59e0b', lineHeight: 1.5 }}>
+          {closed.length} closed {closed.length === 1 ? 'trade' : 'trades'} — far too few to judge anything. A win rate does not stabilise until roughly 30-50 trades, and this engine is unvalidated to begin with. Let it run before drawing conclusions.
+        </div>
+      )}
+
+      {open.length > 0 && (
+        <div>
+          <div style={{ fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 3 }}>OPEN ({open.length})</div>
+          {open.map(s => (
+            <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace', padding: '2px 0' }}>
+              <span style={{ color: s.direction === 'LONG' ? '#6ee7b7' : '#fca5a5', fontWeight: 700 }}>
+                {s.direction} {s.coin} <span style={{ color: '#4b5563' }}>@ {fmtP(s.entry)}</span>
+              </span>
+              <span style={{ color: s.tp1Hit ? '#10b981' : (s.unrealisedR ?? 0) >= 0 ? '#9ca3af' : '#fca5a5' }}>
+                {s.tp1Hit ? `TP1 banked +${s.lockedR}R` : `${(s.unrealisedR ?? 0) >= 0 ? '+' : ''}${s.unrealisedR ?? 0}R`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {closed.length > 0 && (
+        <div>
+          <div style={{ fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 3 }}>RESOLVED</div>
+          {closed.slice(0, 10).map(s => (
+            <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace', padding: '2px 0' }}>
+              <span style={{ color: '#9ca3af' }}>
+                {s.direction} {s.coin} <span style={{ color: '#4b5563' }}>{s.outcome}</span>
+              </span>
+              <span style={{ color: (s.rMultiple ?? 0) > 0 ? '#6ee7b7' : '#fca5a5', fontWeight: 800 }}>
+                {(s.rMultiple ?? 0) >= 0 ? '+' : ''}{s.rMultiple}R
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {signals.length === 0 && (
+        <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+          Nothing tracked yet. Whenever a setup passes the confluence and 1.5:1 checks it is recorded automatically, then resolved by replaying candles from the moment it opened — so the record stays complete even if you close the browser for a week. Resolved trades are written straight into the Journal.
+        </div>
+      )}
+
+      <div style={{ fontSize: 8.5, color: '#374151', lineHeight: 1.5 }}>
+        Outcomes replay 15m candles with the app's standard management: half banked at TP1, stop to breakeven, remainder to TP2. When one bar touches both the stop and a target the stop is taken first — intrabar order is unknowable from OHLC, and assuming the good fill would flatter every result.
+      </div>
+    </div>
+  );
+}
+
 // ─── Crypto trade setups: entry, stop, targets from every other crypto tab ───
 
 function CryptoTradePanel() {
@@ -7275,15 +7486,7 @@ function CryptoTradePanel() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-        {CE_COINS.map(c => (
-          <button key={c} onClick={() => setCoin(c)} style={{
-            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
-            background: coin === c ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
-            color: coin === c ? '#a5b4fc' : '#4b5563',
-          }}>{c}</button>
-        ))}
-      </div>
+      <CryptoCoinPicker value={coin} onChange={setCoin} />
 
       {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
       {!d && !err && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Scanning confluence…</div>}
@@ -7387,6 +7590,17 @@ function CryptoTradePanel() {
           )}
         </div>
       )}
+
+      {/* Coverage note — a missing input quietly lowering confluence would mislead */}
+      {d?.coverage?.note && (
+        <div style={{ fontSize: 9, color: '#f59e0b', padding: '7px 10px', borderRadius: 7, background: 'rgba(245,158,11,0.05)', border: '1px solid rgba(245,158,11,0.18)', lineHeight: 1.5 }}>
+          {d.coverage.note}
+        </div>
+      )}
+
+      <div style={{ padding: '10px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+        <CryptoSignalTracker current={d} units={units} riskDollars={riskDollars} />
+      </div>
     </div>
   );
 }

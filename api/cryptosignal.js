@@ -23,28 +23,55 @@ export const config = { runtime: 'edge' };
 
 const OKX = 'https://www.okx.com/api/v5';
 
+// Crypto prices span eight orders of magnitude (BTC ~79,000, kBONK ~0.003).
+// A fixed decimal count silently destroys the small ones — rounding kBONK's ATR
+// to 2dp reported it as 0. Scale the precision to the price.
+function prec(v, ref) {
+  if (v == null || !Number.isFinite(v)) return null;
+  const r = Math.abs(ref ?? v);
+  const dp = r >= 1000 ? 1 : r >= 100 ? 2 : r >= 1 ? 4 : r >= 0.01 ? 6 : 8;
+  return +v.toFixed(dp);
+}
+
 const jget = async (u) => {
   try { const r = await fetch(u); return r.ok ? await r.json() : null; } catch { return null; }
+};
+
+const hlPost = async (body) => {
+  try {
+    const r = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
 };
 
 export default async function handler(req) {
   const url    = new URL(req.url);
   const origin = url.origin;
-  const coin   = (url.searchParams.get('coin') || 'BTC').toUpperCase();
-  const hasOptions = coin === 'BTC' || coin === 'ETH';
+  // Hyperliquid names are case-SENSITIVE (kBONK, kPEPE, kFLOKI), so the coin is
+  // passed through verbatim; only the venues that expect uppercase get it
+  // uppercased.
+  const coin   = url.searchParams.get('coin') || 'BTC';
+  const CCY    = coin.toUpperCase();
+  const hasOptions = CCY === 'BTC' || CCY === 'ETH';
 
   try {
     const [edge, opts, book, flow, candleRes] = await Promise.all([
-      jget(`${origin}/api/cryptoedge?coin=${coin}`),
-      hasOptions ? jget(`${origin}/api/cryptooptions?currency=${coin}`) : Promise.resolve(null),
-      jget(`${origin}/api/orderbook?coin=${coin}`),
-      jget(`${origin}/api/cryptoflow?coin=${coin}`),
-      jget(`${OKX}/market/candles?instId=${coin}-USDT-SWAP&bar=1H&limit=100`),
+      jget(`${origin}/api/cryptoedge?coin=${CCY}`),
+      hasOptions ? jget(`${origin}/api/cryptooptions?currency=${CCY}`) : Promise.resolve(null),
+      jget(`${origin}/api/orderbook?coin=${encodeURIComponent(coin)}`),
+      jget(`${origin}/api/cryptoflow?coin=${encodeURIComponent(coin)}`),
+      // Hyperliquid candles rather than OKX: they cover every listed perp,
+      // including names OKX does not carry (kBONK, FARTCOIN, GRASS...), so the
+      // structure half of this engine works across the whole universe even when
+      // the OKX positioning half does not.
+      hlPost({ type: 'candleSnapshot', req: { coin, interval: '1h', startTime: Date.now() - 100 * 3600000, endTime: Date.now() } }),
     ]);
 
-    const candles = ((candleRes?.data) || []).map(r => ({
-      t: +r[0], o: +r[1], h: +r[2], l: +r[3], c: +r[4],
-    })).filter(r => r.c > 0).reverse();
+    const candles = (Array.isArray(candleRes) ? candleRes : []).map(r => ({
+      t: +r.t, o: +r.o, h: +r.h, l: +r.l, c: +r.c,
+    })).filter(r => r.c > 0).sort((a, b) => a.t - b.t);
     if (candles.length < 30) return json({ error: `No price history for ${coin}`, coin }, 404);
 
     const spot = book?.mid || edge?.openInterest?.priceNow || candles[candles.length - 1].c;
@@ -210,14 +237,14 @@ export default async function handler(req) {
           const rr2 = tp2 ? Math.abs(tp2.price - spot) / risk : null;
           setup = {
             direction: dir,
-            entry: +spot.toFixed(spot > 1000 ? 1 : 4),
-            stop: +sl.toFixed(spot > 1000 ? 1 : 4),
-            riskPerUnit: +risk.toFixed(spot > 1000 ? 1 : 4),
+            entry: prec(spot, spot),
+            stop: prec(sl, spot),
+            riskPerUnit: prec(risk, spot),
             riskPct: +riskPct.toFixed(2),
             stopBasis: slBasis,
-            tp1: { price: +tp1.price.toFixed(spot > 1000 ? 1 : 4), rr: +rr1.toFixed(2), basis: tp1.label },
-            tp2: tp2 ? { price: +tp2.price.toFixed(spot > 1000 ? 1 : 4), rr: +rr2.toFixed(2), basis: tp2.label } : null,
-            atr: +atr.toFixed(spot > 1000 ? 1 : 4),
+            tp1: { price: prec(tp1.price, spot), rr: +rr1.toFixed(2), basis: tp1.label },
+            tp2: tp2 ? { price: prec(tp2.price, spot), rr: +rr2.toFixed(2), basis: tp2.label } : null,
+            atr: prec(atr, spot),
             // Matches the management used everywhere else in the app
             management: 'Bank half at TP1 and move the stop to breakeven. Run the rest to TP2 — worst case from there is a scratch, not a loss.',
           };
@@ -228,7 +255,7 @@ export default async function handler(req) {
     return json({
       coin, spot, confidence, direction: dir, rawScore: +rawScore.toFixed(2),
       factors, setup, noTrade,
-      levels: { above: above.slice(0, 5), below: below.slice(0, 5), bookWalls, atr: +atr.toFixed(2), swingHigh, swingLow },
+      levels: { above: above.slice(0, 5), below: below.slice(0, 5), bookWalls, atr: prec(atr, spot), swingHigh: prec(swingHigh, spot), swingLow: prec(swingLow, spot) },
       context: {
         regime: oiR?.regime ?? null,
         longShortRatio: lsRatio,
@@ -238,6 +265,16 @@ export default async function handler(req) {
         fundingApr,
         gammaFlip: opts?.flipLevel ?? null,
         maxPain: opts?.maxPain ?? null,
+      },
+      coverage: {
+        // Not every source covers every coin, and a missing input silently
+        // lowering confluence would be misleading
+        positioning: edge?.openInterest?.regime != null,
+        options: !!opts,
+        book: !!book,
+        note: edge?.openInterest?.regime == null
+          ? `OKX does not publish open-interest history for ${coin}, so the strongest input is missing and confluence is capped well below what a major would score.`
+          : !opts ? `${coin} has no listed options, so there are no GEX levels — stops and targets come from price structure alone.` : null,
       },
       validated: false,
       disclaimer: 'Rules engine, not a backtested edge. Free historical open-interest, funding and GEX series do not exist, so this could not be walk-forward tested the way the FX strategies in this app were. Track it forward before sizing up.',
