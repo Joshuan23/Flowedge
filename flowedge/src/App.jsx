@@ -6322,7 +6322,7 @@ const OB_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'SUI', 'HY
 const obFmtSz  = n => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n >= 1 ? n.toFixed(2) : n.toFixed(4);
 const obFmtUsd = n => n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `$${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `$${(n / 1e3).toFixed(0)}K` : `$${n.toFixed(0)}`;
 
-function OrderBookPanel() {
+function CryptoBookPanel() {
   const [coin, setCoin] = useState('BTC');
   const [coins, setCoins] = useState(OB_COINS);
   const [book, setBook] = useState(null);
@@ -6467,10 +6467,196 @@ function OrderBookPanel() {
           )}
 
           <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
-            Real Level-2 depth, not a proxy. Crypto perps are the one asset class here where a live book is obtainable without a paid feed — equity depth needs a Level 2 subscription and FX has no central book at all, which is why this tab is perps-only. Resting orders can be pulled at any moment, so treat walls as intent, not commitment.
+            Real Level-2 depth, not a proxy — every resting order, twenty levels a side. Crypto perps are the one asset class here where that is obtainable free: equity depth is a paid Level 2 subscription (see the Stocks view, which is one level deep for exactly that reason) and FX has no central book at all. Resting orders can be pulled at any moment, so treat walls as intent, not commitment.
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+// ─── Stocks: NBBO + trade tape ──────────────────────────────────────────────
+
+function StockBookPanel() {
+  const [symbol, setSymbol] = useState('SPY');
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+  const inflight = useRef(false);
+
+  const load = useCallback(async (s) => {
+    if (inflight.current) return;
+    inflight.current = true;
+    try {
+      const r = await fetch(`/api/stockbook?symbol=${encodeURIComponent(s)}`).then(r => r.json());
+      if (r.error) setErr(r.error); else { setErr(''); setD(r); }
+    } catch (e) { setErr(e.message); }
+    inflight.current = false;
+  }, []);
+
+  useEffect(() => {
+    setD(null); setErr('');
+    load(symbol);
+    // Equities move slower than perps and the quote is one level deep, so a
+    // 3s cadence is plenty — no reason to hammer it once a second
+    const t = setInterval(() => load(symbol), 3000);
+    return () => clearInterval(t);
+  }, [symbol, load]);
+
+  const fmtPx = p => p == null ? '—' : p.toFixed(2);
+  const tape = d?.tape;
+  const buyShare = tape?.buyShare;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Stocks — NBBO &amp; Tape</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>
+            Best bid/offer with size, plus prints classified against the quote
+          </div>
+        </div>
+        {d && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+            <span style={{ fontSize: 15, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: '#f9fafb' }}>{fmtPx(d.last)}</span>
+            <span style={{
+              fontSize: 8, fontWeight: 800, padding: '2px 6px', borderRadius: 4, letterSpacing: '0.05em',
+              background: d.marketState === 'REGULAR' ? 'rgba(16,185,129,0.15)' : 'rgba(107,114,128,0.15)',
+              color: d.marketState === 'REGULAR' ? '#6ee7b7' : '#9ca3af',
+            }}>{d.marketState}</span>
+          </div>
+        )}
+      </div>
+
+      <TickerPicker value={symbol} onChange={setSymbol} />
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
+      {!d && !err && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Loading quote…</div>}
+
+      {d && (
+        <>
+          {/* A stale quote is worse than no quote — say so loudly rather than
+              letting a one-lot overnight spread read as a live market */}
+          {d.quoteStale && (
+            <div style={{ padding: '8px 11px', borderRadius: 7, background: 'rgba(245,158,11,0.07)', border: '1px solid rgba(245,158,11,0.25)' }}>
+              <div style={{ fontSize: 9.5, color: '#fbbf24', fontWeight: 800 }}>QUOTE NOT LIVE</div>
+              <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 2 }}>
+                {d.marketState === 'REGULAR'
+                  ? `Spread is ${d.spreadBps?.toFixed(0)}bps — abnormally wide, treat these sizes as unreliable.`
+                  : 'Market is closed. Exchanges leave stale one-lot quotes resting overnight, so the bid/ask below is a leftover, not a tradable market.'}
+              </div>
+            </div>
+          )}
+
+          {/* Top of book */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+            {[['BID', d.bid, d.bidLots, d.bidShares, d.bidNotional, '#10b981'],
+              ['ASK', d.ask, d.askLots, d.askShares, d.askNotional, '#ef4444']].map(([label, px, lots, sh, notional, col]) => (
+              <div key={label} style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ fontSize: 8, color: col, fontWeight: 800, letterSpacing: '0.08em' }}>{label}</div>
+                <div style={{ fontSize: 17, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: col, marginTop: 2 }}>{fmtPx(px)}</div>
+                <div style={{ fontSize: 9, color: '#9ca3af', fontFamily: 'monospace', marginTop: 3 }}>
+                  {lots ? `${lots.toLocaleString()} lots · ${sh.toLocaleString()} sh` : '—'}
+                </div>
+                <div style={{ fontSize: 8, color: '#4b5563', fontFamily: 'monospace' }}>{notional ? obFmtUsd(notional) : ''}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: 'flex', gap: 12, fontSize: 9, fontFamily: 'monospace', color: '#6b7280', flexWrap: 'wrap' }}>
+            <span>spread <span style={{ color: '#e5e7eb', fontWeight: 700 }}>{d.spread == null ? '—' : d.spread.toFixed(2)}</span>{d.spreadBps != null && ` (${d.spreadBps.toFixed(1)}bps)`}</span>
+            {d.volume != null && <span>vol {d.volume.toLocaleString()}</span>}
+            {d.exchange && <span>{d.exchange}</span>}
+            {d.delayedBy === 0 && <span style={{ color: '#6ee7b7' }}>real-time</span>}
+          </div>
+
+          {/* Size imbalance at the touch */}
+          <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 8, fontWeight: 800, letterSpacing: '0.06em', marginBottom: 5 }}>
+              <span style={{ color: '#10b981' }}>BID {d.bidShares.toLocaleString()} SH</span>
+              <span style={{ color: '#4b5563' }}>TOUCH IMBALANCE {d.imbalance >= 0 ? '+' : ''}{d.imbalance.toFixed(1)}%</span>
+              <span style={{ color: '#ef4444' }}>{d.askShares.toLocaleString()} SH ASK</span>
+            </div>
+            <div style={{ display: 'flex', height: 7, borderRadius: 4, overflow: 'hidden', background: 'rgba(255,255,255,0.05)' }}>
+              <div style={{ width: `${50 + d.imbalance / 2}%`, background: '#10b981' }} />
+              <div style={{ width: `${50 - d.imbalance / 2}%`, background: '#ef4444' }} />
+            </div>
+            <div style={{ fontSize: 8, color: '#374151', marginTop: 4 }}>
+              One level deep only. A large size at the touch is far weaker evidence than it looks — it can be pulled instantly, and it says nothing about what rests behind it.
+            </div>
+          </div>
+
+          {/* Tape */}
+          <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 6 }}>
+              TRADE TAPE — PRINTS CLASSIFIED VS THE QUOTE
+            </div>
+
+            {tape?.count > 0 ? (
+              <>
+                {buyShare != null && (
+                  <>
+                    <div style={{ display: 'flex', height: 7, borderRadius: 4, overflow: 'hidden', marginBottom: 5 }}>
+                      <div style={{ width: `${buyShare}%`, background: '#10b981' }} />
+                      <div style={{ width: `${100 - buyShare}%`, background: '#ef4444' }} />
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace', marginBottom: 6 }}>
+                      <span style={{ color: '#6ee7b7' }}>LIFTED OFFER {tape.buyVol.toLocaleString()} · {buyShare}%</span>
+                      <span style={{ color: '#fca5a5' }}>{tape.sellVol.toLocaleString()} HIT BID</span>
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: 'monospace', color: tape.delta >= 0 ? '#6ee7b7' : '#fca5a5', fontWeight: 700, marginBottom: 6 }}>
+                      delta {tape.delta >= 0 ? '+' : ''}{tape.delta.toLocaleString()} sh
+                      {tape.midVol > 0 && <span style={{ color: '#4b5563', fontWeight: 400 }}> · {tape.midVol.toLocaleString()} sh between the quotes, unclassified</span>}
+                    </div>
+                  </>
+                )}
+                <div style={{ display: 'grid', gridTemplateColumns: '0.9fr 0.8fr 0.8fr 0.7fr', fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.05em', marginBottom: 3 }}>
+                  <span>TIME</span><span style={{ textAlign: 'right' }}>PRICE</span><span style={{ textAlign: 'right' }}>SIZE</span><span style={{ textAlign: 'right' }}>SIDE</span>
+                </div>
+                {d.prints.map((p, i) => {
+                  const c = p.side === 'BUY' ? '#10b981' : p.side === 'SELL' ? '#ef4444' : '#6b7280';
+                  return (
+                    <div key={i} style={{ display: 'grid', gridTemplateColumns: '0.9fr 0.8fr 0.8fr 0.7fr', fontSize: 9, fontFamily: 'monospace', padding: '1.5px 0' }}>
+                      <span style={{ color: '#4b5563' }}>{p.time}</span>
+                      <span style={{ color: '#e5e7eb', textAlign: 'right' }}>{p.price.toFixed(2)}</span>
+                      <span style={{ color: '#9ca3af', textAlign: 'right' }}>{p.size.toLocaleString()}</span>
+                      <span style={{ color: c, textAlign: 'right', fontWeight: 800 }}>{p.side}</span>
+                    </div>
+                  );
+                })}
+              </>
+            ) : (
+              <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+                No prints. Nasdaq's Last Sale feed only publishes during the regular session, so the tape fills between 9:30am and 4:00pm ET and is empty the rest of the time.
+              </div>
+            )}
+          </div>
+
+          <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+            This is <strong style={{ color: '#6b7280' }}>one level deep, not a depth ladder</strong>. Real equity Level-2 (every resting order, like the crypto tab shows) is Nasdaq TotalView or the ARCA Book — a paid, per-user licensed subscription that no free endpoint exposes. What you get here instead is the NBBO plus the actual tape, and for equities the tape is the more honest signal anyway: resting size can be cancelled in an instant, whereas a print is money that already changed hands. Side is inferred by comparing each print to the prevailing quote, so prints between the bid and ask stay unclassified rather than being guessed.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Container: the two markets are genuinely different instruments with different
+// data available, so they get separate views rather than one fake-unified book.
+function OrderBookPanel() {
+  const [market, setMarket] = useState('crypto');
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', gap: 4 }}>
+        {[['crypto', 'Crypto — full L2 depth'], ['stocks', 'Stocks — NBBO + tape']].map(([k, label]) => (
+          <button key={k} onClick={() => setMarket(k)} style={{
+            padding: '5px 12px', borderRadius: 6, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: market === k ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: market === k ? '#a5b4fc' : '#4b5563',
+          }}>{label}</button>
+        ))}
+      </div>
+      {market === 'crypto' ? <CryptoBookPanel /> : <StockBookPanel />}
     </div>
   );
 }
