@@ -7215,12 +7215,188 @@ function CryptoContextPanel() {
   );
 }
 
+// ─── Crypto trade setups: entry, stop, targets from every other crypto tab ───
+
+function CryptoTradePanel() {
+  const [coin, setCoin] = useState('BTC');
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const acctSize = (() => { try { return parseInt(localStorage.getItem('fe_account_size') || '25000') || 25000; } catch { return 25000; } })();
+  const riskPct  = (() => { try { return parseFloat(localStorage.getItem('fe_risk_pct') || '1') || 1; } catch { return 1; } })();
+
+  const load = useCallback(async (c) => {
+    setLoading(true);
+    try {
+      const r = await fetch(`/api/cryptosignal?coin=${encodeURIComponent(c)}`).then(r => r.json());
+      if (r.error) { setErr(r.error); setD(null); } else { setErr(''); setD(r); }
+    } catch (e) { setErr(e.message); }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    setD(null); setErr('');
+    load(coin);
+    const t = setInterval(() => load(coin), 45000);
+    return () => clearInterval(t);
+  }, [coin, load]);
+
+  const s = d?.setup;
+  const isLong = s?.direction === 'LONG';
+  const dirCol = isLong ? '#10b981' : '#ef4444';
+  const fmt = v => v == null ? '—' : v >= 1000 ? v.toLocaleString('en-US', { maximumFractionDigits: 1 }) : v >= 1 ? v.toFixed(3) : v.toFixed(5);
+
+  // Size the position off risk, never off account percentage of notional
+  const riskDollars = acctSize * (riskPct / 100);
+  const units = s?.riskPerUnit > 0 ? riskDollars / s.riskPerUnit : null;
+  const notional = units != null && s ? units * s.entry : null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Trade Setup</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>
+            Entry, stop and targets built from open interest, funding, positioning, GEX and structure
+          </div>
+        </div>
+        <button onClick={() => load(coin)} disabled={loading} style={{
+          background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: 6,
+          padding: '4px 10px', color: loading ? '#4b5563' : '#a5b4fc', fontSize: 10, fontWeight: 700, cursor: loading ? 'default' : 'pointer',
+        }}>{loading ? '…' : '↻'}</button>
+      </div>
+
+      {/* Not a validated edge — say it before the numbers, not after */}
+      <div style={{ padding: '8px 11px', borderRadius: 7, background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.22)' }}>
+        <div style={{ fontSize: 9, color: '#fbbf24', fontWeight: 800 }}>RULES ENGINE — NOT BACKTESTED</div>
+        <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 2, lineHeight: 1.5 }}>
+          Every other strategy in this app had to survive walk-forward out-of-sample testing, and several were rejected on it. This one could not be tested that way — free historical open-interest, funding and GEX series do not exist. The individual reads are well founded, but the combination is unproven. Track it forward before sizing up.
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {CE_COINS.map(c => (
+          <button key={c} onClick={() => setCoin(c)} style={{
+            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: coin === c ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: coin === c ? '#a5b4fc' : '#4b5563',
+          }}>{c}</button>
+        ))}
+      </div>
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
+      {!d && !err && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Scanning confluence…</div>}
+
+      {/* No trade is a real answer, presented as one */}
+      {d && !s && (
+        <div style={{ padding: '14px 13px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)' }}>
+          <div style={{ fontSize: 12, fontWeight: 900, color: '#6b7280', letterSpacing: '0.04em' }}>NO TRADE</div>
+          <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 5, lineHeight: 1.55 }}>{d.noTrade}</div>
+          <div style={{ fontSize: 9, color: '#374151', marginTop: 6 }}>
+            Lean {d.direction.toLowerCase()} at {d.confidence}% confluence — below the 45% threshold, or without room for {`1.5:1`}. Waiting is the position.
+          </div>
+        </div>
+      )}
+
+      {d && s && (
+        <>
+          <div style={{ padding: '12px 13px', borderRadius: 9, background: `${dirCol}0d`, border: `1px solid ${dirCol}44` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 6 }}>
+              <span style={{ fontSize: 15, fontWeight: 900, color: dirCol, letterSpacing: '0.04em' }}>{s.direction} {coin}</span>
+              <span style={{ fontSize: 10, fontWeight: 800, color: '#9ca3af' }}>{d.confidence}% confluence</span>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 5, marginTop: 9 }}>
+              {[['ENTRY', s.entry, '#e5e7eb', 'at market'],
+                ['STOP', s.stop, '#ef4444', `${s.riskPct}% risk`],
+                ['TP1', s.tp1.price, '#10b981', `${s.tp1.rr}R`],
+                ['TP2', s.tp2?.price, '#6ee7b7', s.tp2 ? `${s.tp2.rr}R` : 'none in range']].map(([label, v, col, sub]) => (
+                <div key={label} style={{ padding: '7px 9px', borderRadius: 7, background: 'rgba(0,0,0,0.25)' }}>
+                  <div style={{ fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>{label}</div>
+                  <div style={{ fontSize: 15, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: col }}>{fmt(v)}</div>
+                  <div style={{ fontSize: 8, color: '#4b5563', fontFamily: 'monospace' }}>{sub}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Sizing from risk, using the account settings */}
+            {units != null && (
+              <div style={{ marginTop: 8, padding: '7px 9px', borderRadius: 7, background: 'rgba(0,0,0,0.25)' }}>
+                <div style={{ fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>POSITION SIZE</div>
+                <div style={{ fontSize: 10, fontFamily: 'monospace', color: '#e5e7eb', marginTop: 2 }}>
+                  {units < 1 ? units.toFixed(4) : units.toFixed(3)} {coin}
+                  <span style={{ color: '#4b5563' }}> · {obFmtUsd(notional)} notional</span>
+                </div>
+                <div style={{ fontSize: 8, color: '#4b5563', marginTop: 2 }}>
+                  risking {obFmtUsd(riskDollars)} ({riskPct}% of {obFmtUsd(acctSize)}) at {fmt(s.riskPerUnit)} per unit · set in Account
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Why these levels, not arbitrary ones */}
+          <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>WHERE THE LEVELS COME FROM</div>
+            <div style={{ fontSize: 9, color: '#9ca3af', fontFamily: 'monospace', lineHeight: 1.7 }}>
+              <div><span style={{ color: '#ef4444' }}>stop</span> · {s.stopBasis}</div>
+              <div><span style={{ color: '#10b981' }}>tp1</span> · {s.tp1.basis}</div>
+              {s.tp2 && <div><span style={{ color: '#6ee7b7' }}>tp2</span> · {s.tp2.basis}</div>}
+              <div><span style={{ color: '#6b7280' }}>atr</span> · {fmt(s.atr)} on 1h, the noise unit both levels are measured against</div>
+            </div>
+            <div style={{ fontSize: 9, color: '#374151', marginTop: 6, lineHeight: 1.5 }}>{s.management}</div>
+          </div>
+
+          {/* Auditable score */}
+          <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>
+              CONFLUENCE BREAKDOWN · NET {d.rawScore > 0 ? '+' : ''}{d.rawScore}
+            </div>
+            {d.factors.map((f, i) => (
+              <div key={i} style={{ padding: '2px 0', borderTop: i ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9.5, fontFamily: 'monospace' }}>
+                  <span style={{ color: '#d1d5db' }}>{f.name}</span>
+                  <span style={{ color: f.score > 0 ? '#6ee7b7' : f.score < 0 ? '#fca5a5' : '#4b5563', fontWeight: 800 }}>
+                    {f.score > 0 ? '+' : ''}{f.score}
+                  </span>
+                </div>
+                {f.detail && <div style={{ fontSize: 8, color: '#4b5563', lineHeight: 1.4 }}>{f.detail}</div>}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {d?.levels && (
+        <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+          <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 4 }}>LEVELS IN PLAY</div>
+          {[...d.levels.above.slice().reverse().map(l => ({ ...l, side: 'above' })),
+            { price: d.spot, label: 'spot', side: 'spot' },
+            ...d.levels.below.map(l => ({ ...l, side: 'below' }))].map((l, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace', padding: '1px 0' }}>
+              <span style={{ color: l.side === 'spot' ? '#fbbf24' : l.side === 'above' ? '#fca5a5' : '#6ee7b7', fontWeight: l.side === 'spot' ? 800 : 400 }}>
+                {fmt(l.price)}
+              </span>
+              <span style={{ color: l.side === 'spot' ? '#fbbf24' : '#4b5563' }}>{l.label}</span>
+            </div>
+          ))}
+          {d.levels.bookWalls?.length > 0 && (
+            <div style={{ fontSize: 8, color: '#374151', marginTop: 5, lineHeight: 1.5 }}>
+              Order-book walls ({d.levels.bookWalls.map(w => `${fmt(w.price)} ${w.label}`).join(', ')}) are shown in the Order Book tab but are deliberately excluded from stops and targets — they sit within a few dollars of spot and can be cancelled instantly, which is exactly what a stop must not depend on.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CryptoPanel() {
-  const [mode, setMode] = useState('context');
+  const [mode, setMode] = useState('trade');
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', gap: 4 }}>
-        {[['context', 'Context'], ['options', 'Options — GEX & walls'], ['flow', 'Money flow']].map(([k, label]) => (
+        {[['trade', 'Trade Setup'], ['context', 'Context'], ['options', 'Options — GEX & walls'], ['flow', 'Money flow']].map(([k, label]) => (
           <button key={k} onClick={() => setMode(k)} style={{
             padding: '5px 12px', borderRadius: 6, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
             background: mode === k ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
@@ -7228,7 +7404,7 @@ function CryptoPanel() {
           }}>{label}</button>
         ))}
       </div>
-      {mode === 'context' ? <CryptoContextPanel /> : mode === 'options' ? <CryptoOptionsPanel /> : <CryptoFlowPanel />}
+      {mode === 'trade' ? <CryptoTradePanel /> : mode === 'context' ? <CryptoContextPanel /> : mode === 'options' ? <CryptoOptionsPanel /> : <CryptoFlowPanel />}
     </div>
   );
 }
