@@ -6661,6 +6661,376 @@ function OrderBookPanel() {
   );
 }
 
+// ─── Crypto options: GEX, walls, and a tape with real aggressor direction ────
+
+function CryptoOptionsPanel() {
+  const [ccy, setCcy] = useState('BTC');
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+  const [view, setView] = useState('levels');
+
+  const load = useCallback(async (c) => {
+    try {
+      const r = await fetch(`/api/cryptooptions?currency=${c}`).then(r => r.json());
+      if (r.error) { setErr(r.error); setD(null); } else { setErr(''); setD(r); }
+    } catch (e) { setErr(e.message); }
+  }, []);
+
+  useEffect(() => {
+    setD(null); setErr('');
+    load(ccy);
+    const t = setInterval(() => load(ccy), 20000);
+    return () => clearInterval(t);
+  }, [ccy, load]);
+
+  const fmtUsd = n => n == null ? '—' : obFmtUsd(Math.abs(n));
+  const fmtK = k => k == null ? '—' : k >= 1000 ? k.toLocaleString() : String(k);
+  const posGamma = (d?.netGex ?? 0) > 0;
+  const maxAbsGex = d ? Math.max(...d.gexByStrike.map(x => Math.abs(x.gex)), 1) : 1;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Crypto Options — GEX &amp; Flow</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>Deribit · ~85-90% of all crypto options open interest</div>
+        </div>
+        {d && <span style={{ fontSize: 15, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: '#f9fafb' }}>${Math.round(d.spot).toLocaleString()}</span>}
+      </div>
+
+      <div style={{ display: 'flex', gap: 4 }}>
+        {['BTC', 'ETH'].map(c => (
+          <button key={c} onClick={() => setCcy(c)} style={{
+            padding: '5px 14px', borderRadius: 6, fontSize: 11, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: ccy === c ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: ccy === c ? '#a5b4fc' : '#4b5563',
+          }}>{c}</button>
+        ))}
+        <div style={{ flex: 1 }} />
+        {[['levels', 'Levels'], ['flow', 'Tape']].map(([k, label]) => (
+          <button key={k} onClick={() => setView(k)} style={{
+            padding: '5px 12px', borderRadius: 6, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: view === k ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: view === k ? '#a5b4fc' : '#4b5563',
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
+      {!d && !err && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Loading chain…</div>}
+
+      {d && view === 'levels' && (
+        <>
+          {/* Regime */}
+          <div style={{
+            padding: '10px 12px', borderRadius: 9,
+            background: posGamma ? 'rgba(16,185,129,0.05)' : 'rgba(239,68,68,0.05)',
+            border: `1px solid ${posGamma ? 'rgba(16,185,129,0.25)' : 'rgba(239,68,68,0.25)'}`,
+          }}>
+            <div style={{ fontSize: 10, fontWeight: 900, color: posGamma ? '#6ee7b7' : '#fca5a5' }}>
+              {posGamma ? 'POSITIVE GAMMA' : 'NEGATIVE GAMMA'} · {fmtUsd(d.netGex)} per 1% move
+            </div>
+            <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 3 }}>
+              {posGamma
+                ? 'If dealers are short customer options, hedging dampens moves and price gets pinned toward the gamma wall.'
+                : 'If dealers are short customer options, hedging amplifies moves — the regime that trends.'}
+            </div>
+          </div>
+
+          {/* Levels */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 5 }}>
+            {[['Gamma wall', d.gammaWall, '#c4b5fd', 'largest positive GEX strike — the magnet'],
+              ['Call wall', d.callWall, '#10b981', 'largest call OI above spot — resistance'],
+              ['Put wall', d.putWall, '#ef4444', 'largest put OI below spot — support'],
+              ['Gamma flip', d.flipLevel, '#f59e0b', 'where net gamma changes sign']].map(([label, v, col, note]) => (
+              <div key={label} style={{ padding: '8px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em' }}>{label.toUpperCase()}</div>
+                <div style={{ fontSize: 15, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: col, marginTop: 2 }}>{fmtK(v)}</div>
+                {v != null && d.spot > 0 && (
+                  <div style={{ fontSize: 8, color: '#4b5563', fontFamily: 'monospace' }}>
+                    {((v - d.spot) / d.spot * 100) >= 0 ? '+' : ''}{((v - d.spot) / d.spot * 100).toFixed(1)}% from spot
+                  </div>
+                )}
+                <div style={{ fontSize: 7.5, color: '#374151', marginTop: 2 }}>{note}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* GEX by strike */}
+          <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 6 }}>
+              NET GEX BY STRIKE · {d.gexByStrike.length} STRIKES WITHIN ±40%
+            </div>
+            {d.gexByStrike.filter(x => Math.abs(x.gex) / maxAbsGex > 0.02).map(x => {
+              const pos = x.gex >= 0;
+              const w = Math.abs(x.gex) / maxAbsGex * 50;
+              const atSpot = Math.abs(x.strike - d.spot) / d.spot < 0.012;
+              return (
+                <div key={x.strike} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '0.5px 0' }}>
+                  <span style={{ fontSize: 8.5, fontFamily: 'monospace', color: atSpot ? '#fbbf24' : '#6b7280', width: 52, textAlign: 'right', fontWeight: atSpot ? 800 : 400 }}>{fmtK(x.strike)}</span>
+                  <div style={{ flex: 1, display: 'flex', height: 7, alignItems: 'center' }}>
+                    <div style={{ width: '50%', display: 'flex', justifyContent: 'flex-end' }}>
+                      {!pos && <div style={{ width: `${w * 2}%`, height: 7, background: '#ef4444', opacity: 0.75, borderRadius: '2px 0 0 2px' }} />}
+                    </div>
+                    <div style={{ width: '50%' }}>
+                      {pos && <div style={{ width: `${w * 2}%`, height: 7, background: '#10b981', opacity: 0.75, borderRadius: '0 2px 2px 0' }} />}
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 8, fontFamily: 'monospace', color: pos ? '#6ee7b7' : '#fca5a5', width: 44, textAlign: 'right' }}>{fmtUsd(x.gex)}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ display: 'flex', gap: 12, fontSize: 9, fontFamily: 'monospace', color: '#6b7280', flexWrap: 'wrap' }}>
+            <span>OI {obFmtUsd(d.totals.oiUsd)}</span>
+            <span>P/C OI <span style={{ color: (d.totals.pcOI ?? 1) > 1 ? '#ef4444' : '#10b981', fontWeight: 700 }}>{d.totals.pcOI ?? '—'}</span></span>
+            <span>{d.totals.instruments} contracts</span>
+            <span>{d.totals.expiries} expiries</span>
+          </div>
+        </>
+      )}
+
+      {d && view === 'flow' && (
+        <>
+          {d.flowTotals.buyShare != null && (
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+              <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 6 }}>
+                PREMIUM BY AGGRESSOR · LAST {d.flowTotals.count} TRADES OVER {Math.max(1, Math.round(d.flowTotals.windowMs / 60000))} MIN
+              </div>
+              <div style={{ display: 'flex', height: 7, borderRadius: 4, overflow: 'hidden', marginBottom: 5 }}>
+                <div style={{ width: `${d.flowTotals.buyShare}%`, background: '#10b981' }} />
+                <div style={{ width: `${100 - d.flowTotals.buyShare}%`, background: '#ef4444' }} />
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace' }}>
+                <span style={{ color: '#6ee7b7' }}>BOUGHT {obFmtUsd(d.flowTotals.buyPremium)} · {d.flowTotals.buyShare}%</span>
+                <span style={{ color: '#fca5a5' }}>{obFmtUsd(d.flowTotals.sellPremium)} SOLD</span>
+              </div>
+            </div>
+          )}
+
+          <div style={{ padding: '8px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '0.55fr 0.5fr 0.7fr 0.75fr 0.5fr 0.65fr', fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.05em', marginBottom: 4 }}>
+              <span>SIDE</span><span>TYPE</span><span>STRIKE</span><span>EXPIRY</span><span style={{ textAlign: 'right' }}>IV</span><span style={{ textAlign: 'right' }}>PREMIUM</span>
+            </div>
+            {d.flow.length === 0 && <div style={{ fontSize: 9, color: '#374151', padding: '6px 0' }}>No recent trades</div>}
+            {d.flow.map((f, i) => {
+              const buy = f.direction === 'BUY';
+              return (
+                <div key={i} style={{ display: 'grid', gridTemplateColumns: '0.55fr 0.5fr 0.7fr 0.75fr 0.5fr 0.65fr', fontSize: 9, fontFamily: 'monospace', padding: '1.5px 0', borderTop: i ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
+                  <span style={{ color: buy ? '#10b981' : '#ef4444', fontWeight: 800 }}>{f.direction}</span>
+                  <span style={{ color: f.type === 'CALL' ? '#6ee7b7' : '#fca5a5' }}>{f.type}</span>
+                  <span style={{ color: '#e5e7eb' }}>{fmtK(f.strike)}</span>
+                  <span style={{ color: '#6b7280', fontSize: 8 }}>{f.expiry}</span>
+                  <span style={{ color: '#9ca3af', textAlign: 'right' }}>{f.iv ? f.iv.toFixed(0) : '—'}</span>
+                  <span style={{ color: '#c4b5fd', textAlign: 'right', fontWeight: 700 }}>{obFmtUsd(f.premiumUsd)}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+            <strong style={{ color: '#6b7280' }}>BUY/SELL here is the real aggressor side</strong>, published by the exchange — not inferred. That is the one thing the equity Options Flow tab cannot do at any free price, since sweep/block and bid-vs-ask classification needs a paid OPRA feed. Premium is what actually changed hands; a large notional at a low premium is a cheap lottery ticket, not conviction.
+          </div>
+        </>
+      )}
+
+      {d && (
+        <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+          One caveat that matters more here than in equities: GEX sign assumes dealers are short customer options. In crypto a large share of open interest is miners and treasuries selling covered calls, plus systematic vol-selling vaults — flow that sits on the other side of that assumption. Treat the regime read as weaker evidence than the equivalent equity number, and the walls (which come from raw open interest, not from any assumption about who holds what) as the sturdier part of this tab.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Crypto money flow: wallet-attributed tape + positioning ─────────────────
+
+function CryptoFlowPanel() {
+  const [coin, setCoin] = useState('BTC');
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+  // recentTrades returns ~10 prints covering a few seconds, so a snapshot is
+  // near-useless. Accumulate across polls, deduped by trade id.
+  const seen = useRef(new Map());
+  const [tape, setTape] = useState([]);
+  const [since, setSince] = useState(Date.now());
+
+  useEffect(() => {
+    seen.current = new Map();
+    setTape([]); setSince(Date.now()); setD(null); setErr('');
+  }, [coin]);
+
+  useEffect(() => {
+    let live = true;
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/cryptoflow?coin=${encodeURIComponent(coin)}`).then(r => r.json());
+        if (!live) return;
+        if (r.error) { setErr(r.error); return; }
+        setErr(''); setD(r);
+        let added = false;
+        for (const t of r.trades || []) {
+          if (!seen.current.has(t.tid)) { seen.current.set(t.tid, t); added = true; }
+        }
+        if (added) {
+          const all = [...seen.current.values()].sort((a, b) => b.time - a.time);
+          // Cap so a long session cannot grow without bound
+          if (all.length > 400) {
+            const keep = all.slice(0, 400);
+            seen.current = new Map(keep.map(t => [t.tid, t]));
+            setTape(keep);
+          } else setTape(all);
+        }
+      } catch (e) { if (live) setErr(e.message); }
+    };
+    tick();
+    const iv = setInterval(tick, 2000);
+    return () => { live = false; clearInterval(iv); };
+  }, [coin]);
+
+  const buyUsd  = tape.filter(t => t.side === 'BUY').reduce((s, t) => s + t.usd, 0);
+  const sellUsd = tape.filter(t => t.side === 'SELL').reduce((s, t) => s + t.usd, 0);
+  const buyShare = buyUsd + sellUsd > 0 ? buyUsd / (buyUsd + sellUsd) * 100 : 50;
+  const elapsed = Math.max(1, Math.round((Date.now() - since) / 1000));
+
+  // Rank wallets by dollars traded across everything accumulated so far
+  const wallets = (() => {
+    const m = new Map();
+    for (const t of tape) for (const u of t.users || []) {
+      if (!m.has(u)) m.set(u, { addr: u, usd: 0, n: 0, buy: 0, sell: 0 });
+      const w = m.get(u);
+      w.usd += t.usd; w.n++;
+      if (t.side === 'BUY') w.buy += t.usd; else w.sell += t.usd;
+    }
+    return [...m.values()].sort((a, b) => b.usd - a.usd).slice(0, 8);
+  })();
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Crypto Money Flow</div>
+        <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>Wallet-attributed prints + funding-based positioning across every perp</div>
+      </div>
+
+      {/* Honest framing up front, not buried in a footnote */}
+      <div style={{ padding: '8px 11px', borderRadius: 7, background: 'rgba(99,102,241,0.05)', border: '1px solid rgba(99,102,241,0.2)' }}>
+        <div style={{ fontSize: 9, color: '#a5b4fc', fontWeight: 800 }}>THIS IS NOT A DARK POOL TAB</div>
+        <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 2, lineHeight: 1.5 }}>
+          Crypto has no FINRA ATS reporting, so hidden OTC volume is genuinely unavailable — nobody has it. What crypto gives instead is something equities never do at any price: the counterparty wallets on every print.
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {OB_COINS.map(c => (
+          <button key={c} onClick={() => setCoin(c)} style={{
+            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: coin === c ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: coin === c ? '#a5b4fc' : '#4b5563',
+          }}>{c}</button>
+        ))}
+      </div>
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
+
+      {/* Accumulated tape */}
+      <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+        <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 6 }}>
+          {coin} TAPE · {tape.length} PRINTS ACCUMULATED OVER {elapsed}s
+        </div>
+        {tape.length === 0 ? (
+          <div style={{ fontSize: 9, color: '#374151' }}>Collecting… the exchange only serves the last few seconds of prints per request, so this fills in as you watch.</div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', height: 7, borderRadius: 4, overflow: 'hidden', marginBottom: 5 }}>
+              <div style={{ width: `${buyShare}%`, background: '#10b981' }} />
+              <div style={{ width: `${100 - buyShare}%`, background: '#ef4444' }} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace', marginBottom: 6 }}>
+              <span style={{ color: '#6ee7b7' }}>BOUGHT {obFmtUsd(buyUsd)} · {buyShare.toFixed(0)}%</span>
+              <span style={{ color: '#fca5a5' }}>{obFmtUsd(sellUsd)} SOLD</span>
+            </div>
+            {wallets.length > 0 && (
+              <>
+                <div style={{ fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.05em', margin: '6px 0 3px' }}>MOST ACTIVE WALLETS</div>
+                {wallets.map(w => (
+                  <div key={w.addr} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace', padding: '1px 0' }}>
+                    <span style={{ color: '#9ca3af' }}>{w.addr.slice(0, 10)}…{w.addr.slice(-4)}</span>
+                    <span style={{ color: '#c4b5fd' }}>
+                      {obFmtUsd(w.usd)} <span style={{ color: '#4b5563' }}>· {w.n} prints</span>
+                    </span>
+                  </div>
+                ))}
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Positioning */}
+      {d && (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+            {[['CROWDED LONGS', d.crowdedLongs, '#ef4444', 'longs paying shorts to hold'],
+              ['CROWDED SHORTS', d.crowdedShorts, '#10b981', 'shorts paying longs to hold']].map(([label, rows, col, note]) => (
+              <div key={label} style={{ padding: '8px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ fontSize: 8, color: col, fontWeight: 800, letterSpacing: '0.06em' }}>{label}</div>
+                <div style={{ fontSize: 7.5, color: '#374151', marginBottom: 4 }}>{note}</div>
+                {(rows || []).map(m => (
+                  <div key={m.coin} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace', padding: '0.5px 0' }}>
+                    <span style={{ color: '#9ca3af' }}>{m.coin}</span>
+                    <span style={{ color: col }}>{m.fundingApr > 0 ? '+' : ''}{m.fundingApr.toFixed(0)}%</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          <div style={{ padding: '8px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 4 }}>
+              OPEN INTEREST · {obFmtUsd(d.totals.totalOiUsd)} ACROSS {d.totals.marketCount} PERPS
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '0.7fr 0.9fr 0.8fr 0.7fr', fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.05em', marginBottom: 3 }}>
+              <span>COIN</span><span style={{ textAlign: 'right' }}>OPEN INT</span><span style={{ textAlign: 'right' }}>FUND APR</span><span style={{ textAlign: 'right' }}>24H</span>
+            </div>
+            {d.markets.slice(0, 12).map(m => (
+              <div key={m.coin} style={{ display: 'grid', gridTemplateColumns: '0.7fr 0.9fr 0.8fr 0.7fr', fontSize: 9, fontFamily: 'monospace', padding: '1px 0', cursor: 'pointer' }}
+                   onClick={() => setCoin(m.coin)}>
+                <span style={{ color: m.coin === coin ? '#a5b4fc' : '#e5e7eb', fontWeight: m.coin === coin ? 800 : 400 }}>{m.coin}</span>
+                <span style={{ color: '#9ca3af', textAlign: 'right' }}>{obFmtUsd(m.oiUsd)}</span>
+                <span style={{ color: m.fundingApr >= 0 ? '#fca5a5' : '#6ee7b7', textAlign: 'right' }}>{m.fundingApr > 0 ? '+' : ''}{m.fundingApr.toFixed(1)}%</span>
+                <span style={{ color: (m.changePct ?? 0) >= 0 ? '#6ee7b7' : '#fca5a5', textAlign: 'right' }}>{(m.changePct ?? 0) >= 0 ? '+' : ''}{m.changePct ?? '—'}%</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+            Funding is the cleanest crowding signal crypto offers: it is what one side literally pays the other to keep the position open, so a large positive number means longs are crowded and paying for the privilege. It is a positioning gauge, not a timing signal — crowded can stay crowded for weeks, and the unwinds are violent in both directions.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function CryptoPanel() {
+  const [mode, setMode] = useState('options');
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', gap: 4 }}>
+        {[['options', 'Options — GEX & walls'], ['flow', 'Money flow & positioning']].map(([k, label]) => (
+          <button key={k} onClick={() => setMode(k)} style={{
+            padding: '5px 12px', borderRadius: 6, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: mode === k ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: mode === k ? '#a5b4fc' : '#4b5563',
+          }}>{label}</button>
+        ))}
+      </div>
+      {mode === 'options' ? <CryptoOptionsPanel /> : <CryptoFlowPanel />}
+    </div>
+  );
+}
+
 // ─── Options Flow ───────────────────────────────────────────────────────────
 
 // Quick chips for the handful of names that actually get watched all day; the
@@ -6960,7 +7330,7 @@ function GexIndependentPanel() {
   );
 }
 
-const TABS = ["Signals", "Confluence", "ICT", "ORB", "SMC", "Order Book", "Options Flow", "GEX", "Dark Pool", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
+const TABS = ["Signals", "Confluence", "ICT", "ORB", "SMC", "Order Book", "Options Flow", "GEX", "Crypto", "Dark Pool", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -7528,6 +7898,7 @@ export default function App() {
                 {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "SMC" && <SMCPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "Order Book" && <OrderBookPanel />}
+                {tab === "Crypto" && <CryptoPanel />}
                 {tab === "Options Flow" && <OptionsFlowPanel />}
                 {tab === "GEX" && <ProGate><GexIndependentPanel /></ProGate>}
                 {tab === "Dark Pool" && <DarkPoolPanel onChart={sym => setChartSymbol(sym)} />}
@@ -7647,6 +8018,7 @@ export default function App() {
                   {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "SMC" && <SMCPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "Order Book" && <OrderBookPanel />}
+                  {tab === "Crypto" && <CryptoPanel />}
                   {tab === "Options Flow" && <OptionsFlowPanel />}
                   {tab === "GEX" && <ProGate><GexIndependentPanel /></ProGate>}
                   {tab === "Dark Pool" && <DarkPoolPanel onChart={sym => setChartSymbol(sym)} />}
