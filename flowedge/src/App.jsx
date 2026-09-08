@@ -6782,8 +6782,37 @@ function CryptoOptionsPanel() {
             })}
           </div>
 
+          {/* Term structure and skew — what the options market is pricing */}
+          {d.termStructure?.length > 0 && (
+            <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 5, flexWrap: 'wrap', gap: 4 }}>
+                <span style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>IV TERM STRUCTURE &amp; 25-DELTA SKEW</span>
+                <span style={{ fontSize: 8.5, fontWeight: 800, color: d.termShape === 'BACKWARDATION' ? '#ef4444' : d.termShape === 'CONTANGO' ? '#10b981' : '#6b7280' }}>{d.termShape}</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 0.5fr 0.6fr 0.7fr', fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.05em', marginBottom: 3 }}>
+                <span>EXPIRY</span><span style={{ textAlign: 'right' }}>DTE</span><span style={{ textAlign: 'right' }}>ATM IV</span><span style={{ textAlign: 'right' }}>SKEW</span>
+              </div>
+              {d.termStructure.slice(0, 8).map(t => (
+                <div key={t.expiry} style={{ display: 'grid', gridTemplateColumns: '1fr 0.5fr 0.6fr 0.7fr', fontSize: 9, fontFamily: 'monospace', padding: '1px 0' }}>
+                  <span style={{ color: '#9ca3af' }}>{t.expiry}</span>
+                  <span style={{ color: '#4b5563', textAlign: 'right' }}>{t.dte}d</span>
+                  <span style={{ color: '#c4b5fd', textAlign: 'right' }}>{t.atmIv ?? '—'}</span>
+                  <span style={{ color: (t.skew25 ?? 0) > 0 ? '#fca5a5' : '#6ee7b7', textAlign: 'right' }}>
+                    {t.skew25 == null ? '—' : `${t.skew25 > 0 ? '+' : ''}${t.skew25}`}
+                  </span>
+                </div>
+              ))}
+              <div style={{ fontSize: 8, color: '#374151', marginTop: 5, lineHeight: 1.5 }}>
+                Positive skew means puts price above calls — demand for downside protection. Negative means calls are bid, which is speculative positioning. {d.termShape === 'BACKWARDATION'
+                  ? 'Front-month IV above back-month is the market pricing near-term stress; it usually resolves fast, in one direction or the other.'
+                  : 'Contango (back above front) is the normal, calm shape.'}
+              </div>
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: 12, fontSize: 9, fontFamily: 'monospace', color: '#6b7280', flexWrap: 'wrap' }}>
             <span>OI {obFmtUsd(d.totals.oiUsd)}</span>
+            {d.maxPain != null && <span>max pain <span style={{ color: '#fbbf24', fontWeight: 700 }}>{d.maxPain.toLocaleString()}</span></span>}
             <span>P/C OI <span style={{ color: (d.totals.pcOI ?? 1) > 1 ? '#ef4444' : '#10b981', fontWeight: 700 }}>{d.totals.pcOI ?? '—'}</span></span>
             <span>{d.totals.instruments} contracts</span>
             <span>{d.totals.expiries} expiries</span>
@@ -7013,12 +7042,185 @@ function CryptoFlowPanel() {
   );
 }
 
+// ─── Crypto context: what actually changes a trade decision ─────────────────
+
+const CE_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'SUI'];
+
+function CryptoContextPanel() {
+  const [coin, setCoin] = useState('BTC');
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+
+  const load = useCallback(async (c) => {
+    try {
+      const r = await fetch(`/api/cryptoedge?coin=${encodeURIComponent(c)}`).then(r => r.json());
+      if (r.error) { setErr(r.error); setD(null); } else { setErr(''); setD(r); }
+    } catch (e) { setErr(e.message); }
+  }, []);
+
+  useEffect(() => {
+    setD(null); setErr('');
+    load(coin);
+    const t = setInterval(() => load(coin), 60000);
+    return () => clearInterval(t);
+  }, [coin, load]);
+
+  const oi = d?.openInterest, pos = d?.positioning, tk = d?.takerFlow, vol = d?.volatility, sent = d?.sentiment;
+
+  // The two "OI down" regimes are the traps — a move that looks strong but is
+  // positions closing rather than new money arriving
+  const regimeColor = {
+    'NEW LONGS': '#10b981', 'NEW SHORTS': '#ef4444',
+    'SHORT COVERING': '#f59e0b', 'LONG LIQUIDATION': '#f59e0b',
+    'NEUTRAL': '#6b7280',
+  }[oi?.regime] || '#6b7280';
+
+  const spark = (rows, key, col) => {
+    if (!rows?.length) return null;
+    const vals = rows.map(r => typeof key === 'function' ? key(r) : r[key]).filter(Number.isFinite);
+    if (vals.length < 2) return null;
+    const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
+    return (
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 1, height: 22, marginTop: 4 }}>
+        {vals.map((v, i) => (
+          <div key={i} style={{ flex: 1, height: `${8 + ((v - lo) / span) * 92}%`, background: col, opacity: 0.35 + 0.65 * (i / vals.length), borderRadius: 1 }} />
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Market Context</div>
+        <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>
+          Open interest vs price, positioning, aggressive flow, and the volatility premium
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {CE_COINS.map(c => (
+          <button key={c} onClick={() => setCoin(c)} style={{
+            padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: coin === c ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: coin === c ? '#a5b4fc' : '#4b5563',
+          }}>{c}</button>
+        ))}
+      </div>
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
+      {!d && !err && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Loading context…</div>}
+
+      {d && (
+        <>
+          {/* The headline read */}
+          {oi?.regime && (
+            <div style={{ padding: '11px 13px', borderRadius: 9, background: `${regimeColor}0d`, border: `1px solid ${regimeColor}44` }}>
+              <div style={{ fontSize: 11, fontWeight: 900, color: regimeColor, letterSpacing: '0.03em' }}>{oi.regime}</div>
+              <div style={{ fontSize: 9.5, fontFamily: 'monospace', color: '#9ca3af', marginTop: 4 }}>
+                open interest {oi.changePct >= 0 ? '+' : ''}{oi.changePct}% · price {oi.priceChangePct >= 0 ? '+' : ''}{oi.priceChangePct}% over 24h
+              </div>
+              <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 4, lineHeight: 1.5 }}>{oi.regimeNote}</div>
+              {spark(oi.history, 'oiUsd', regimeColor)}
+              <div style={{ fontSize: 8, color: '#374151', marginTop: 2 }}>open interest, last 24h · now {obFmtUsd(oi.usd)}</div>
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+            {/* Positioning */}
+            <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em' }}>ACCOUNTS LONG / SHORT</div>
+              <div style={{ fontSize: 17, fontFamily: "'Space Mono', monospace", fontWeight: 800, marginTop: 2, color: pos?.skew === 'CROWDED LONG' ? '#ef4444' : pos?.skew === 'CROWDED SHORT' ? '#10b981' : '#e5e7eb' }}>
+                {pos?.longShortRatio ?? '—'}
+              </div>
+              <div style={{ fontSize: 8.5, fontWeight: 800, color: pos?.skew === 'BALANCED' ? '#6b7280' : '#fbbf24' }}>{pos?.skew ?? ''}</div>
+              {spark(pos?.history, 'ratio', '#818cf8')}
+              <div style={{ fontSize: 7.5, color: '#374151', marginTop: 3, lineHeight: 1.4 }}>
+                Above 1 = more accounts long. Contrarian at the extremes only — mid-range is noise.
+              </div>
+            </div>
+
+            {/* Taker flow */}
+            <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em' }}>AGGRESSIVE FLOW 24H</div>
+              <div style={{ fontSize: 17, fontFamily: "'Space Mono', monospace", fontWeight: 800, marginTop: 2, color: (tk?.buyShare ?? 50) >= 50 ? '#10b981' : '#ef4444' }}>
+                {tk?.buyShare ?? '—'}%
+              </div>
+              <div style={{ fontSize: 8.5, color: '#6b7280', fontWeight: 700 }}>bought at market</div>
+              <div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', marginTop: 6 }}>
+                <div style={{ width: `${tk?.buyShare ?? 50}%`, background: '#10b981' }} />
+                <div style={{ width: `${100 - (tk?.buyShare ?? 50)}%`, background: '#ef4444' }} />
+              </div>
+              <div style={{ fontSize: 7.5, color: '#374151', marginTop: 3, lineHeight: 1.4 }}>
+                Who crossed the spread rather than resting an order — impatience, which is what moves price.
+              </div>
+            </div>
+          </div>
+
+          {/* Volatility premium */}
+          <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 4 }}>VOLATILITY RISK PREMIUM</div>
+            {vol?.available ? (
+              <>
+                <div style={{ display: 'flex', gap: 16, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                  <div>
+                    <span style={{ fontSize: 16, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: '#c4b5fd' }}>{vol.dvol?.toFixed(1)}</span>
+                    <span style={{ fontSize: 8, color: '#4b5563', marginLeft: 4 }}>DVOL implied</span>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: 16, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: '#93c5fd' }}>{vol.realizedVol?.toFixed(1)}</span>
+                    <span style={{ fontSize: 8, color: '#4b5563', marginLeft: 4 }}>realized</span>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: 16, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: (vol.premium ?? 0) > 0 ? '#f59e0b' : '#10b981' }}>
+                      {(vol.premium ?? 0) >= 0 ? '+' : ''}{vol.premium}
+                    </span>
+                    <span style={{ fontSize: 8, color: '#4b5563', marginLeft: 4 }}>premium</span>
+                  </div>
+                </div>
+                <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 5, lineHeight: 1.5 }}>{vol.read}</div>
+              </>
+            ) : (
+              <div style={{ fontSize: 9, color: '#374151' }}>
+                Deribit publishes a volatility index for BTC and ETH only, so there is no implied-vs-realized read for {coin}.
+              </div>
+            )}
+          </div>
+
+          {/* Sentiment */}
+          {sent && (
+            <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em' }}>FEAR &amp; GREED</div>
+                  <div style={{ fontSize: 9, color: '#6b7280', marginTop: 2 }}>{sent.note}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 20, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: sent.value >= 75 ? '#ef4444' : sent.value >= 55 ? '#f59e0b' : sent.value <= 25 ? '#10b981' : '#9ca3af' }}>{sent.value}</div>
+                  <div style={{ fontSize: 9, fontWeight: 800, color: '#6b7280' }}>{sent.label}</div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', marginTop: 7, background: 'rgba(255,255,255,0.04)' }}>
+                <div style={{ width: `${sent.value}%`, background: sent.value >= 75 ? '#ef4444' : sent.value >= 55 ? '#f59e0b' : sent.value <= 25 ? '#10b981' : '#6b7280' }} />
+              </div>
+            </div>
+          )}
+
+          <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+            The open-interest read at the top is the one worth internalising. Price alone cannot tell you whether a move is new money or old positions closing, and those two look identical on a chart while behaving completely differently afterwards. A rally on falling open interest is short covering — it stops when the shorts are done, which is exactly when it looks most convincing. {d.sources}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function CryptoPanel() {
-  const [mode, setMode] = useState('options');
+  const [mode, setMode] = useState('context');
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', gap: 4 }}>
-        {[['options', 'Options — GEX & walls'], ['flow', 'Money flow & positioning']].map(([k, label]) => (
+        {[['context', 'Context'], ['options', 'Options — GEX & walls'], ['flow', 'Money flow']].map(([k, label]) => (
           <button key={k} onClick={() => setMode(k)} style={{
             padding: '5px 12px', borderRadius: 6, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
             background: mode === k ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
@@ -7026,7 +7228,7 @@ function CryptoPanel() {
           }}>{label}</button>
         ))}
       </div>
-      {mode === 'options' ? <CryptoOptionsPanel /> : <CryptoFlowPanel />}
+      {mode === 'context' ? <CryptoContextPanel /> : mode === 'options' ? <CryptoOptionsPanel /> : <CryptoFlowPanel />}
     </div>
   );
 }

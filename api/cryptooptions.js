@@ -34,6 +34,21 @@ function bsGamma(S, K, T, sigma, r = 0) {
   return normalPDF(d1) / (S * sigma * Math.sqrt(T));
 }
 
+// Cumulative normal, for delta. Abramowitz-Stegun 7.1.26 — accurate to ~1e-7,
+// which is far tighter than the input IV is anyway.
+function normalCDF(x) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const d = normalPDF(x);
+  const p = d * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  return x >= 0 ? 1 - p : p;
+}
+
+function bsDelta(S, K, T, sigma, isCall) {
+  if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) return isCall ? 0.5 : -0.5;
+  const d1 = (Math.log(S / K) + 0.5 * sigma * sigma * T) / (sigma * Math.sqrt(T));
+  return isCall ? normalCDF(d1) : normalCDF(d1) - 1;
+}
+
 // BTC-25SEP26-80000-C  ->  { K: 80000, isCall: true, expMs }
 function parseInstrument(name) {
   const m = /^[A-Z]+-(\d{1,2})([A-Z]{3})(\d{2})-(\d+(?:\.\d+)?)-([CP])$/.exec(name);
@@ -68,6 +83,9 @@ export default async function handler(req) {
 
     const now = Date.now();
     const byStrike = new Map();
+    const byExpiry = new Map();
+    const payoutStrikes = new Set();
+    const allContracts = [];
     const book = [];
     const expirySet = new Set();
     let callOI = 0, putOI = 0, callVol = 0, putVol = 0, oiUsd = 0;
@@ -81,6 +99,7 @@ export default async function handler(req) {
       if (inst.isCall) { callOI += oi; callVol += vol; } else { putOI += oi; putVol += vol; }
       expirySet.add(inst.expMs);
       if (oi <= 0 || iv <= 0) continue;
+      allContracts.push({ K: inst.K, isCall: inst.isCall, oi });
       // ±40% band. Equities use ±15%, but crypto ladders run far wider (BTC
       // lists 30k through 155k) and the deep OTM puts are exactly what drives
       // negative gamma below spot — cutting at ±25% moved the computed flip by
@@ -101,6 +120,11 @@ export default async function handler(req) {
       oiUsd += oi * spot;
 
       book.push({ K: inst.K, T, sigma: iv, oi, isCall: inst.isCall, w });
+      // Per-expiry contracts, for term structure and 25-delta skew
+      if (!byExpiry.has(inst.expMs)) byExpiry.set(inst.expMs, []);
+      byExpiry.get(inst.expMs).push({ K: inst.K, isCall: inst.isCall, iv, oi, T });
+      // Every strike with OI feeds max pain, including outside the gamma band
+      payoutStrikes.add(inst.K);
       if (!byStrike.has(inst.K)) byStrike.set(inst.K, { strike: inst.K, callOI: 0, putOI: 0, callGex: 0, putGex: 0, gex: 0 });
       const s = byStrike.get(inst.K);
       if (inst.isCall) { s.callOI += oi; s.callGex += gex; s.gex += gex; }
@@ -151,6 +175,57 @@ export default async function handler(req) {
       }
     }
 
+    // ---- Max pain ----
+    // The strike where option holders collectively receive the least. It is not
+    // a prediction — it is where the writers' book is cheapest to settle, and it
+    // acts as a weak magnet into expiry, strongest on large quarterly dates.
+    let maxPain = null, minPayout = Infinity;
+    for (const K of payoutStrikes) {
+      let payout = 0;
+      for (const c of allContracts) {
+        payout += c.isCall ? Math.max(0, K - c.K) * c.oi : Math.max(0, c.K - K) * c.oi;
+      }
+      if (payout < minPayout) { minPayout = payout; maxPain = K; }
+    }
+
+    // ---- IV term structure and 25-delta skew, per expiry ----
+    // Skew is the cleanest fear gauge options give: puts bid over calls means
+    // demand for downside protection. Term structure inverting (front above
+    // back) is the market pricing near-term stress.
+    const termStructure = [];
+    for (const [expMs, contracts] of [...byExpiry.entries()].sort((a, b) => a[0] - b[0])) {
+      const dte = (expMs - now) / 86400000;
+      if (dte < 0.2) continue;
+      // ATM IV: the contract whose strike sits closest to spot
+      let atm = null, best = Infinity;
+      for (const c of contracts) {
+        const d = Math.abs(c.K - spot);
+        if (d < best) { best = d; atm = c; }
+      }
+      // 25-delta put and call: nearest to |delta| = 0.25 on each side
+      let p25 = null, c25 = null, pBest = Infinity, cBest = Infinity;
+      for (const c of contracts) {
+        const dl = Math.abs(bsDelta(spot, c.K, c.T, c.iv, c.isCall));
+        const gap = Math.abs(dl - 0.25);
+        if (c.isCall) { if (gap < cBest) { cBest = gap; c25 = c; } }
+        else          { if (gap < pBest) { pBest = gap; p25 = c; } }
+      }
+      termStructure.push({
+        expiry: new Date(expMs).toISOString().slice(0, 10),
+        dte: +dte.toFixed(1),
+        atmIv: atm ? +(atm.iv * 100).toFixed(1) : null,
+        // Positive skew = puts more expensive than calls = downside demand
+        skew25: p25 && c25 ? +((p25.iv - c25.iv) * 100).toFixed(1) : null,
+        contracts: contracts.length,
+      });
+    }
+
+    const front = termStructure[0] || null;
+    const back  = termStructure[termStructure.length - 1] || null;
+    const termShape = front && back && front.atmIv != null && back.atmIv != null
+      ? (front.atmIv > back.atmIv + 1 ? 'BACKWARDATION' : back.atmIv > front.atmIv + 1 ? 'CONTANGO' : 'FLAT')
+      : null;
+
     // ---- The tape. Deribit gives the aggressor side outright. ----
     let buyPrem = 0, sellPrem = 0;
     const flow = [];
@@ -191,6 +266,9 @@ export default async function handler(req) {
         expiries: expirySet.size,
         instruments: rows.length,
       },
+      maxPain,
+      termStructure, termShape,
+      frontSkew: front?.skew25 ?? null,
       flow: flow.slice(0, 30),
       topFlow: byPremium.slice(0, 12),
       flowTotals: {
