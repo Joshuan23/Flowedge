@@ -21,17 +21,9 @@ export const config = { runtime: 'edge' };
 //      If no genuine level sits 1.5R away, that is a no-trade, and the engine
 //      says so instead of inventing a target to make the math work.
 
-const OKX = 'https://www.okx.com/api/v5';
+import { prec, structureFrom, buildSetup, splitLevels, MIN_CONF } from './_cryptocore.js';
 
-// Crypto prices span eight orders of magnitude (BTC ~79,000, kBONK ~0.003).
-// A fixed decimal count silently destroys the small ones — rounding kBONK's ATR
-// to 2dp reported it as 0. Scale the precision to the price.
-function prec(v, ref) {
-  if (v == null || !Number.isFinite(v)) return null;
-  const r = Math.abs(ref ?? v);
-  const dp = r >= 1000 ? 1 : r >= 100 ? 2 : r >= 1 ? 4 : r >= 0.01 ? 6 : 8;
-  return +v.toFixed(dp);
-}
+const OKX = 'https://www.okx.com/api/v5';
 
 const jget = async (u) => {
   try { const r = await fetch(u); return r.ok ? await r.json() : null; } catch { return null; }
@@ -76,18 +68,11 @@ export default async function handler(req) {
 
     const spot = book?.mid || edge?.openInterest?.priceNow || candles[candles.length - 1].c;
 
-    // ---- ATR(14) on 1h, the unit of noise ----
-    let trSum = 0, n = 0;
-    for (let i = Math.max(1, candles.length - 14); i < candles.length; i++) {
-      const p = candles[i - 1], x = candles[i];
-      trSum += Math.max(x.h - x.l, Math.abs(x.h - p.c), Math.abs(x.l - p.c));
-      n++;
-    }
-    const atr = n ? trSum / n : spot * 0.005;
-
-    const recent = candles.slice(-48);
-    const swingHigh = Math.max(...recent.map(r => r.h));
-    const swingLow  = Math.min(...recent.map(r => r.l));
+    // ATR(14) and the 48h swing range — shared with the market scanner so both
+    // measure structure identically
+    const st = structureFrom(candles);
+    const atr = st.atr || spot * 0.005;
+    const { swingHigh, swingLow } = st;
 
     // ---- Directional score. Every factor is listed with its contribution so
     // the number is auditable rather than a black box. ----
@@ -168,88 +153,17 @@ export default async function handler(req) {
     if (book?.askWalls?.length) bookWalls.push({ price: book.askWalls[0].px, label: 'book ask wall', side: 'above' });
     if (book?.bidWalls?.length) bookWalls.push({ price: book.bidWalls[0].px, label: 'book bid wall', side: 'below' });
 
-    // Targets beyond ~10 ATR are a different timeframe's trade. This setup is
-    // built on 1h ATR and 48h structure, so a level 7% away (max pain) or 24%
-    // away (a far put wall) is not something to hold this plan toward.
-    const MAX_TARGET_ATR = 10;
-    const reachable = l => Math.abs(l.price - spot) <= MAX_TARGET_ATR * atr;
-
     above.sort((a, b) => a.price - b.price);
     below.sort((a, b) => b.price - a.price);
 
     // ---- Build the plan ----
-    const MIN_RR = 1.5;              // the app's standing minimum
-    const MIN_CONF = 45;             // below this, confluence is not there
+    // Stop and target rules live in _cryptocore so the whole-market scanner and
+    // this detail view can never report different levels for the same coin.
     let setup = null, noTrade = null;
-
     if (confidence < MIN_CONF) {
       noTrade = `Confluence only ${confidence}%. The inputs disagree or are flat — no setup worth risking capital on.`;
     } else {
-      const isLong = dir === 'LONG';
-      const protect = isLong ? below : above;      // levels the stop must clear
-      const targets = isLong ? above : below;
-
-      // Stop: beyond the nearest real level, with an ATR buffer so ordinary
-      // noise does not take it out. If no level is close enough to be relevant,
-      // fall back to a pure volatility stop.
-      // A stop must clear structure AND clear noise. Structure alone is not
-      // enough: a level sitting 0.2 ATR from spot gives a stop that ordinary
-      // chop removes. So take whichever is WIDER — structure plus a buffer, or
-      // a 1.2 ATR volatility floor.
-      const MIN_STOP_ATR = 1.2;
-      const floor = isLong ? spot - MIN_STOP_ATR * atr : spot + MIN_STOP_ATR * atr;
-      const nearProtect = protect.find(l => Math.abs(l.price - spot) < 4 * atr);
-      let sl, slBasis;
-      if (nearProtect) {
-        const structural = isLong ? nearProtect.price - 0.5 * atr : nearProtect.price + 0.5 * atr;
-        if (isLong ? structural < floor : structural > floor) {
-          sl = structural;
-          slBasis = `${nearProtect.label} ${nearProtect.price.toLocaleString()} + 0.5 ATR buffer`;
-        } else {
-          sl = floor;
-          slBasis = `${nearProtect.label} is inside the noise band — widened to the ${MIN_STOP_ATR} ATR floor`;
-        }
-      } else {
-        sl = isLong ? spot - 2 * atr : spot + 2 * atr;
-        slBasis = 'no structure within 4 ATR — volatility stop at 2 ATR';
-      }
-
-      const risk = Math.abs(spot - sl);
-      const riskPct = risk / spot * 100;
-
-      if (riskPct > 4) {
-        noTrade = `Stop would sit ${riskPct.toFixed(1)}% away — structure is too far from price to risk sensibly right now.`;
-      } else if (risk <= 0) {
-        noTrade = 'Could not derive a valid stop from current structure.';
-      } else {
-        // Targets must be REAL levels at least 1.5R away. If none qualifies,
-        // that is a genuine no-trade rather than a reason to invent a number.
-        const qualifying = targets.filter(l => Math.abs(l.price - spot) >= MIN_RR * risk && reachable(l));
-        if (!qualifying.length) {
-          const nearest = targets.filter(reachable)[0];
-          noTrade = nearest
-            ? `Nearest level (${nearest.label} ${nearest.price.toLocaleString()}) is only ${(Math.abs(nearest.price - spot) / risk).toFixed(2)}R away. No room for ${MIN_RR}:1 — skip it.`
-            : 'No structural target in range to trade toward.';
-        } else {
-          const tp1 = qualifying[0];
-          const tp2 = qualifying[1] || null;
-          const rr1 = Math.abs(tp1.price - spot) / risk;
-          const rr2 = tp2 ? Math.abs(tp2.price - spot) / risk : null;
-          setup = {
-            direction: dir,
-            entry: prec(spot, spot),
-            stop: prec(sl, spot),
-            riskPerUnit: prec(risk, spot),
-            riskPct: +riskPct.toFixed(2),
-            stopBasis: slBasis,
-            tp1: { price: prec(tp1.price, spot), rr: +rr1.toFixed(2), basis: tp1.label },
-            tp2: tp2 ? { price: prec(tp2.price, spot), rr: +rr2.toFixed(2), basis: tp2.label } : null,
-            atr: prec(atr, spot),
-            // Matches the management used everywhere else in the app
-            management: 'Bank half at TP1 and move the stop to breakeven. Run the rest to TP2 — worst case from there is a scratch, not a loss.',
-          };
-        }
-      }
+      ({ setup, noTrade } = buildSetup({ dir, spot, atr, above, below }));
     }
 
     return json({

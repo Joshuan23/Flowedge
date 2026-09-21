@@ -7426,6 +7426,163 @@ function CryptoSignalTracker({ current, units, riskDollars }) {
   );
 }
 
+// ─── Whole-market scan ──────────────────────────────────────────────────────
+
+function CryptoMarketScan({ onPick }) {
+  const [scan, setScan] = useState(null);
+  const [rows, setRows] = useState([]);      // deep-scanned results
+  const [phase, setPhase] = useState('idle'); // idle | scanning | deep | done
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [err, setErr] = useState('');
+  const [depth, setDepth] = useState(20);
+  const abort = useRef(false);
+
+  useEffect(() => () => { abort.current = true; }, []);
+
+  const run = useCallback(async () => {
+    abort.current = false;
+    setErr(''); setRows([]); setPhase('scanning'); setProgress({ done: 0, total: 0 });
+    try {
+      const s = await fetch('/api/cryptoscan').then(r => r.json());
+      if (s.error) { setErr(s.error); setPhase('idle'); return; }
+      setScan(s);
+
+      // The structural scan is cheap and covers everything; full confluence
+      // needs three rate-limited OKX calls per coin, so the deep pass runs from
+      // the browser in small batches where there is no request timeout and
+      // results can appear as they land.
+      const targets = s.candidates.slice(0, depth);
+      setPhase('deep');
+      setProgress({ done: 0, total: targets.length });
+      const out = [];
+      for (let i = 0; i < targets.length; i += 3) {
+        if (abort.current) return;
+        const batch = await Promise.all(targets.slice(i, i + 3).map(async c => {
+          try {
+            const r = await fetch(`/api/cryptosignal?coin=${encodeURIComponent(c.coin)}`).then(x => x.json());
+            return r.error ? null : { ...r, oiUsd: c.oiUsd, rangePos: c.rangePos, fundingApr: c.fundingApr, changePct: c.changePct };
+          } catch { return null; }
+        }));
+        out.push(...batch.filter(Boolean));
+        if (abort.current) return;
+        setRows(out.slice().sort((a, b) => (b.setup ? 1 : 0) - (a.setup ? 1 : 0) || b.confidence - a.confidence));
+        setProgress({ done: Math.min(i + 3, targets.length), total: targets.length });
+        await new Promise(r => setTimeout(r, 700));   // stay under OKX rate limits
+      }
+      setPhase('done');
+    } catch (e) { setErr(e.message); setPhase('idle'); }
+  }, [depth]);
+
+  const withSetup = rows.filter(r => r.setup);
+  const running = phase === 'scanning' || phase === 'deep';
+
+  // Market-wide context. When nothing fires, this is what explains why.
+  const marketRead = (() => {
+    if (!scan?.candidates?.length) return null;
+    const c = scan.candidates;
+    const med = arr => { const s = arr.slice().sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+    const fund = med(c.map(x => x.fundingApr).filter(Number.isFinite));
+    const pos  = med(c.map(x => x.rangePos).filter(Number.isFinite));
+    const chg  = med(c.map(x => x.changePct).filter(Number.isFinite));
+    return { fund, pos, chg };
+  })();
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 900, color: '#f9fafb' }}>Market Scan</div>
+          <div style={{ fontSize: 9, color: '#4b5563' }}>Every liquid perp, not just the one selected</div>
+        </div>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          <select value={depth} onChange={e => setDepth(+e.target.value)} disabled={running} style={{
+            background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 5,
+            padding: '3px 6px', color: '#9ca3af', fontSize: 9, fontFamily: 'monospace', cursor: 'pointer',
+          }}>
+            {[10, 20, 30, 40].map(n => <option key={n} value={n}>top {n}</option>)}
+          </select>
+          <button onClick={run} disabled={running} style={{
+            padding: '4px 12px', borderRadius: 6, fontSize: 10, fontWeight: 800, border: 'none',
+            cursor: running ? 'default' : 'pointer',
+            background: running ? 'rgba(255,255,255,0.05)' : 'rgba(99,102,241,0.25)',
+            color: running ? '#4b5563' : '#a5b4fc',
+          }}>{phase === 'scanning' ? 'scanning…' : phase === 'deep' ? `${progress.done}/${progress.total}` : 'Scan market'}</button>
+        </div>
+      </div>
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5' }}>{err}</div>}
+
+      {scan && (
+        <div style={{ fontSize: 9, color: '#6b7280', fontFamily: 'monospace', lineHeight: 1.6 }}>
+          {scan.scanned} perps · {scan.liquid} liquid · <span style={{ color: '#c4b5fd' }}>{scan.viable} structurally viable</span>
+          <span style={{ color: '#374151' }}> ({scan.longViable} long / {scan.shortViable} short)</span> · {scan.elapsedMs}ms
+        </div>
+      )}
+
+      {phase === 'deep' && (
+        <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+          <div style={{ width: `${progress.total ? progress.done / progress.total * 100 : 0}%`, height: '100%', background: '#6366f1', transition: 'width 0.3s' }} />
+        </div>
+      )}
+
+      {/* Why nothing fires is as useful as what does */}
+      {marketRead && rows.length > 0 && (
+        <div style={{ padding: '7px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+          <div style={{ fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 3 }}>MARKET-WIDE (MEDIAN)</div>
+          <div style={{ fontSize: 9, fontFamily: 'monospace', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            <span>24h <span style={{ color: marketRead.chg >= 0 ? '#6ee7b7' : '#fca5a5' }}>{marketRead.chg >= 0 ? '+' : ''}{marketRead.chg}%</span></span>
+            <span>funding <span style={{ color: marketRead.fund > 30 ? '#fca5a5' : marketRead.fund < -30 ? '#6ee7b7' : '#9ca3af' }}>{marketRead.fund > 0 ? '+' : ''}{marketRead.fund}% APR</span></span>
+            <span>48h range pos <span style={{ color: marketRead.pos > 80 ? '#fbbf24' : marketRead.pos < 20 ? '#fbbf24' : '#9ca3af' }}>{marketRead.pos}</span></span>
+          </div>
+          {marketRead.fund > 30 && marketRead.pos > 75 && (
+            <div style={{ fontSize: 8.5, color: '#f59e0b', marginTop: 4, lineHeight: 1.5 }}>
+              Broad crowded rally: price near 48h highs with longs paying heavily to hold. Trend and crowding point opposite ways, so confluence nets toward zero across the board — the engine will show few setups in exactly this condition.
+            </div>
+          )}
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div>
+          <div style={{ fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 3 }}>
+            {withSetup.length > 0 ? `${withSetup.length} TRADEABLE · ${rows.length} SCANNED` : `NO SETUPS · ${rows.length} SCANNED`}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '0.8fr 0.55fr 0.5fr 1.5fr', fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.05em', marginBottom: 2 }}>
+            <span>COIN</span><span>BIAS</span><span style={{ textAlign: 'right' }}>CONF</span><span style={{ textAlign: 'right' }}>SETUP / WHY NOT</span>
+          </div>
+          {rows.map(r => {
+            const s = r.setup;
+            return (
+              <div key={r.coin} onClick={() => onPick?.(r.coin)} style={{
+                display: 'grid', gridTemplateColumns: '0.8fr 0.55fr 0.5fr 1.5fr', fontSize: 9, fontFamily: 'monospace',
+                padding: '3px 4px', alignItems: 'center', cursor: 'pointer', borderRadius: 4,
+                background: s ? 'rgba(16,185,129,0.07)' : 'transparent',
+                borderTop: '1px solid rgba(255,255,255,0.03)',
+              }}>
+                <span style={{ color: s ? '#f9fafb' : '#9ca3af', fontWeight: s ? 800 : 400 }}>{r.coin}</span>
+                <span style={{ color: r.direction === 'LONG' ? '#6ee7b7' : '#fca5a5' }}>{r.direction}</span>
+                <span style={{ textAlign: 'right', color: r.confidence >= 45 ? '#fbbf24' : '#4b5563' }}>{r.confidence}%</span>
+                <span style={{ textAlign: 'right', color: s ? '#6ee7b7' : '#374151', fontSize: s ? 9 : 8 }}>
+                  {s ? `${s.tp1.rr}R · risk ${s.riskPct}%` : (r.noTrade || '').replace(/^Confluence only \d+%\. /, '').slice(0, 42)}
+                </span>
+              </div>
+            );
+          })}
+          <div style={{ fontSize: 8, color: '#374151', marginTop: 5, lineHeight: 1.5 }}>
+            Ranked by whether a setup exists, then confluence. Tap a row to load it above. Coins beyond the top {depth} by open interest were structurally viable but not deep-scanned — raise the depth to include them.
+          </div>
+        </div>
+      )}
+
+      {phase === 'idle' && !scan && (
+        <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+          Scans every listed perp above $1M open interest and $1M daily volume for structural viability — a real target at least 1.5R from a structure-based stop — then runs full confluence scoring on the most liquid candidates. Structural pass takes about three seconds; the confluence pass is rate-limited by the positioning data and runs in batches.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Crypto trade setups: entry, stop, targets from every other crypto tab ───
 
 function CryptoTradePanel() {
@@ -7484,6 +7641,10 @@ function CryptoTradePanel() {
         <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 2, lineHeight: 1.5 }}>
           Every other strategy in this app had to survive walk-forward out-of-sample testing, and several were rejected on it. This one could not be tested that way — free historical open-interest, funding and GEX series do not exist. The individual reads are well founded, but the combination is unproven. Track it forward before sizing up.
         </div>
+      </div>
+
+      <div style={{ padding: '10px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+        <CryptoMarketScan onPick={setCoin} />
       </div>
 
       <CryptoCoinPicker value={coin} onChange={setCoin} />
