@@ -7426,6 +7426,383 @@ function CryptoSignalTracker({ current, units, riskDollars }) {
   );
 }
 
+// ─── Stock setups: scanner, plan, and forward tracking ──────────────────────
+
+const STOCK_SIGNAL_KEY = 'fe_stock_signals';
+const loadStockSignals = () => { try { return JSON.parse(localStorage.getItem(STOCK_SIGNAL_KEY) || '[]'); } catch { return []; } };
+
+function appendStockJournal(sig, r) {
+  try {
+    const isLong = sig.direction === 'LONG';
+    // The Journal stores pnl directly, so the exit written here is the price
+    // that makes (exit - entry) * shares equal the realised R. The true fill
+    // goes in the notes — with scale-out management no single price describes
+    // the whole trade.
+    const effExit = isLong ? sig.entry + r.rMultiple * sig.riskPerUnit
+                           : sig.entry - r.rMultiple * sig.riskPerUnit;
+    const pnl = r.rMultiple * sig.riskDollars;
+    const journal = JSON.parse(localStorage.getItem('fe_journal') || '[]');
+    journal.unshift({
+      id: Date.now() + Math.floor(Math.random() * 1000),
+      symbol: sig.symbol,
+      direction: isLong ? 'long' : 'short',
+      entry: sig.entry,
+      exit: +effExit.toFixed(4),
+      shares: +sig.shares.toFixed(4),
+      pnl: +pnl.toFixed(2),
+      date: new Date(sig.openedAt).toISOString().split('T')[0],
+      notes: `Auto-logged stock setup · ${r.outcome} · ${r.rMultiple >= 0 ? '+' : ''}${r.rMultiple}R · ${sig.confidence}% confluence · actual exit ${r.exitPrice} after ${r.elapsedHours}h${r.gapped ? ' · GAPPED through the stop, loss exceeded 1R' : ''} · logged exit is the R-equivalent price, not a single fill · UNVALIDATED rules engine`,
+    });
+    localStorage.setItem('fe_journal', JSON.stringify(journal));
+  } catch {}
+}
+
+function StockSetupPanel() {
+  const [symbol, setSymbol] = useState('SPY');
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  // Scanner state
+  const [scan, setScan] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [phase, setPhase] = useState('idle');
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [depth, setDepth] = useState(15);
+  const abort = useRef(false);
+
+  // Forward tracking
+  const [signals, setSignals] = useState(loadStockSignals);
+  const [autoLog, setAutoLog] = useState(() => {
+    try { return localStorage.getItem('fe_stock_autolog') !== '0'; } catch { return true; }
+  });
+  const signalsRef = useRef(signals);
+  const journaled = useRef(new Set());
+
+  const acctSize = (() => { try { return parseInt(localStorage.getItem('fe_account_size') || '25000') || 25000; } catch { return 25000; } })();
+  const riskPct  = (() => { try { return parseFloat(localStorage.getItem('fe_risk_pct') || '1') || 1; } catch { return 1; } })();
+  const riskDollars = acctSize * (riskPct / 100);
+
+  useEffect(() => { signalsRef.current = signals; }, [signals]);
+  useEffect(() => { try { localStorage.setItem(STOCK_SIGNAL_KEY, JSON.stringify(signals)); } catch {} }, [signals]);
+  useEffect(() => { try { localStorage.setItem('fe_stock_autolog', autoLog ? '1' : '0'); } catch {} }, [autoLog]);
+  useEffect(() => () => { abort.current = true; }, []);
+
+  const load = useCallback(async (s) => {
+    setLoading(true);
+    try {
+      const r = await fetch(`/api/stocksignal?symbol=${encodeURIComponent(s)}`).then(x => x.json());
+      if (r.error) { setErr(r.error); setD(null); } else { setErr(''); setD(r); }
+    } catch (e) { setErr(e.message); }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { setD(null); setErr(''); load(symbol); }, [symbol, load]);
+
+  const s = d?.setup;
+  const shares = s?.riskPerUnit > 0 ? riskDollars / s.riskPerUnit : null;
+
+  // Record a setup once per symbol while it is open
+  useEffect(() => {
+    if (!autoLog || !s || !shares) return;
+    setSignals(prev => {
+      if (prev.some(x => x.symbol === d.symbol && x.status === 'open')) return prev;
+      return [{
+        id: Date.now(), symbol: d.symbol, direction: s.direction,
+        entry: s.entry, stop: s.stop, tp1: s.tp1.price, tp2: s.tp2?.price ?? null,
+        riskPerUnit: s.riskPerUnit, shares, riskDollars,
+        confidence: d.confidence, openedAt: Date.now(), status: 'open',
+      }, ...prev].slice(0, 200);
+    });
+  }, [d, s, autoLog, shares, riskDollars]);
+
+  // Resolve open setups by replaying candles, through a ref so the interval
+  // never works from a stale snapshot
+  useEffect(() => {
+    let live = true;
+    const resolve = async () => {
+      for (const sig of signalsRef.current.filter(x => x.status === 'open')) {
+        const q = new URLSearchParams({
+          symbol: sig.symbol, dir: sig.direction, entry: String(sig.entry),
+          stop: String(sig.stop), tp1: String(sig.tp1), since: String(sig.openedAt),
+        });
+        if (sig.tp2) q.set('tp2', String(sig.tp2));
+        try {
+          const r = await fetch(`/api/stockresolve?${q}`).then(x => x.json());
+          if (!live || r.error) continue;
+          if (r.status === 'closed') {
+            if (!journaled.current.has(sig.id)) { journaled.current.add(sig.id); appendStockJournal(sig, r); }
+            setSignals(prev => prev.map(x => x.id === sig.id
+              ? { ...x, status: 'closed', outcome: r.outcome, rMultiple: r.rMultiple, exitPrice: r.exitPrice, gapped: r.gapped, closedAt: Date.now() } : x));
+          } else {
+            setSignals(prev => prev.map(x => x.id === sig.id
+              ? { ...x, unrealisedR: r.unrealisedR, tp1Hit: r.tp1Hit, lockedR: r.lockedR } : x));
+          }
+        } catch {}
+      }
+    };
+    resolve();
+    const iv = setInterval(resolve, 120000);
+    return () => { live = false; clearInterval(iv); };
+  }, []);
+
+  const runScan = useCallback(async () => {
+    abort.current = false;
+    setRows([]); setPhase('scanning'); setProgress({ done: 0, total: 0 });
+    try {
+      const sc = await fetch('/api/stockscan').then(r => r.json());
+      if (sc.error) { setErr(sc.error); setPhase('idle'); return; }
+      setScan(sc);
+      const targets = sc.candidates.slice(0, depth);
+      setPhase('deep'); setProgress({ done: 0, total: targets.length });
+      const out = [];
+      // Two at a time: each deep scan pulls two option chains, a dark pool
+      // history and a candle series
+      for (let i = 0; i < targets.length; i += 2) {
+        if (abort.current) return;
+        const batch = await Promise.all(targets.slice(i, i + 2).map(async c => {
+          try {
+            const r = await fetch(`/api/stocksignal?symbol=${encodeURIComponent(c.symbol)}`).then(x => x.json());
+            return r.error ? null : { ...r, relVolume: c.relVolume, changePct: c.changePct };
+          } catch { return null; }
+        }));
+        out.push(...batch.filter(Boolean));
+        if (abort.current) return;
+        setRows(out.slice().sort((a, b) => (b.setup ? 1 : 0) - (a.setup ? 1 : 0) || b.confidence - a.confidence));
+        setProgress({ done: Math.min(i + 2, targets.length), total: targets.length });
+      }
+      setPhase('done');
+    } catch (e) { setErr(e.message); setPhase('idle'); }
+  }, [depth]);
+
+  const running = phase === 'scanning' || phase === 'deep';
+  const withSetup = rows.filter(r => r.setup);
+  const open = signals.filter(x => x.status === 'open');
+  const closed = signals.filter(x => x.status === 'closed');
+  const totalR = closed.reduce((a, x) => a + (x.rMultiple ?? 0), 0);
+  const wins = closed.filter(x => (x.rMultiple ?? 0) > 0);
+  const winRate = closed.length ? Math.round(wins.length / closed.length * 100) : null;
+
+  const fmt = v => v == null ? '—' : v >= 1000 ? v.toLocaleString('en-US', { maximumFractionDigits: 2 }) : v.toFixed(2);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Stock Setups</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>
+            Dealer gamma, options flow, dark pool levels and structure — one plan per name
+          </div>
+        </div>
+        {d && <span style={{ fontSize: 15, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: '#f9fafb' }}>${fmt(d.spot)}</span>}
+      </div>
+
+      <div style={{ padding: '8px 11px', borderRadius: 7, background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.22)' }}>
+        <div style={{ fontSize: 9, color: '#fbbf24', fontWeight: 800 }}>RULES ENGINE — NOT BACKTESTED</div>
+        <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 2, lineHeight: 1.5 }}>
+          The FX strategies in this app had to survive walk-forward out-of-sample testing and several were rejected on it. This could not be tested that way — free historical GEX, options-flow and dark-pool series do not exist. Each read is well founded; the combination is unproven.
+        </div>
+      </div>
+
+      {/* Scanner */}
+      <div style={{ padding: '10px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 900, color: '#f9fafb' }}>Market Scan</div>
+            <div style={{ fontSize: 9, color: '#4b5563' }}>All 217 optionable names, ranked by relative volume</div>
+          </div>
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <select value={depth} onChange={e => setDepth(+e.target.value)} disabled={running} style={{
+              background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 5,
+              padding: '3px 6px', color: '#9ca3af', fontSize: 9, fontFamily: 'monospace', cursor: 'pointer',
+            }}>{[10, 15, 25, 40].map(n => <option key={n} value={n}>top {n}</option>)}</select>
+            <button onClick={runScan} disabled={running} style={{
+              padding: '4px 12px', borderRadius: 6, fontSize: 10, fontWeight: 800, border: 'none',
+              cursor: running ? 'default' : 'pointer',
+              background: running ? 'rgba(255,255,255,0.05)' : 'rgba(99,102,241,0.25)',
+              color: running ? '#4b5563' : '#a5b4fc',
+            }}>{phase === 'scanning' ? 'scanning…' : phase === 'deep' ? `${progress.done}/${progress.total}` : 'Scan market'}</button>
+          </div>
+        </div>
+
+        {scan && (
+          <div style={{ fontSize: 9, color: '#6b7280', fontFamily: 'monospace' }}>
+            {scan.scanned} scanned · {scan.liquid} liquid · {scan.marketState} · {scan.elapsedMs}ms
+          </div>
+        )}
+        {phase === 'deep' && (
+          <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden', marginTop: 5 }}>
+            <div style={{ width: `${progress.total ? progress.done / progress.total * 100 : 0}%`, height: '100%', background: '#6366f1', transition: 'width 0.3s' }} />
+          </div>
+        )}
+
+        {rows.length > 0 && (
+          <div style={{ marginTop: 7 }}>
+            <div style={{ fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 3 }}>
+              {withSetup.length > 0 ? `${withSetup.length} TRADEABLE · ${rows.length} SCANNED` : `NO SETUPS · ${rows.length} SCANNED`}
+            </div>
+            {rows.map(r => (
+              <div key={r.symbol} onClick={() => setSymbol(r.symbol)} style={{
+                display: 'grid', gridTemplateColumns: '0.75fr 0.5fr 0.7fr 1.4fr', fontSize: 9, fontFamily: 'monospace',
+                padding: '3px 4px', alignItems: 'center', cursor: 'pointer', borderRadius: 4,
+                background: r.setup ? 'rgba(16,185,129,0.07)' : 'transparent',
+                borderTop: '1px solid rgba(255,255,255,0.03)',
+              }}>
+                <span style={{ color: r.setup ? '#f9fafb' : '#9ca3af', fontWeight: r.setup ? 800 : 400 }}>{r.symbol}</span>
+                <span style={{ color: r.direction === 'LONG' ? '#6ee7b7' : '#fca5a5' }}>{r.direction}</span>
+                <span style={{ color: r.confidence >= 45 ? '#fbbf24' : '#4b5563' }}>
+                  {r.confidence}%<span style={{ color: '#374151' }}>/{r.confidenceCeiling}</span>
+                </span>
+                <span style={{ textAlign: 'right', color: r.setup ? '#6ee7b7' : '#374151', fontSize: r.setup ? 9 : 8 }}>
+                  {r.setup ? `${r.setup.tp1.rr}R · risk ${r.setup.riskPct}%` : (r.noTrade || '').replace(/^Confluence only \d+%\. /, '').slice(0, 40)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <TickerPicker value={symbol} onChange={setSymbol} />
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
+      {loading && !d && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Reading the chain…</div>}
+
+      {d && !s && (
+        <div style={{ padding: '14px 13px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)' }}>
+          <div style={{ fontSize: 12, fontWeight: 900, color: '#6b7280', letterSpacing: '0.04em' }}>NO TRADE</div>
+          <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 5, lineHeight: 1.55 }}>{d.noTrade}</div>
+          <div style={{ fontSize: 9, color: '#374151', marginTop: 6 }}>
+            Lean {d.direction.toLowerCase()} at {d.confidence}% of a possible {d.confidenceCeiling}%.
+          </div>
+        </div>
+      )}
+
+      {d && s && (
+        <>
+          <div style={{ padding: '12px 13px', borderRadius: 9, background: `${s.direction === 'LONG' ? '#10b981' : '#ef4444'}0d`, border: `1px solid ${s.direction === 'LONG' ? '#10b981' : '#ef4444'}44` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 6 }}>
+              <span style={{ fontSize: 15, fontWeight: 900, color: s.direction === 'LONG' ? '#10b981' : '#ef4444' }}>{s.direction} {d.symbol}</span>
+              <span style={{ fontSize: 10, fontWeight: 800, color: '#9ca3af' }}>{d.confidence}% of {d.confidenceCeiling}% possible</span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 5, marginTop: 9 }}>
+              {[['ENTRY', s.entry, '#e5e7eb', 'at market'],
+                ['STOP', s.stop, '#ef4444', `${s.riskPct}% risk`],
+                ['TP1', s.tp1.price, '#10b981', `${s.tp1.rr}R`],
+                ['TP2', s.tp2?.price, '#6ee7b7', s.tp2 ? `${s.tp2.rr}R` : 'none in range']].map(([l, v, c, sub]) => (
+                <div key={l} style={{ padding: '7px 9px', borderRadius: 7, background: 'rgba(0,0,0,0.25)' }}>
+                  <div style={{ fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>{l}</div>
+                  <div style={{ fontSize: 15, fontFamily: "'Space Mono', monospace", fontWeight: 800, color: c }}>{fmt(v)}</div>
+                  <div style={{ fontSize: 8, color: '#4b5563', fontFamily: 'monospace' }}>{sub}</div>
+                </div>
+              ))}
+            </div>
+            {shares != null && (
+              <div style={{ marginTop: 8, padding: '7px 9px', borderRadius: 7, background: 'rgba(0,0,0,0.25)' }}>
+                <div style={{ fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>POSITION SIZE</div>
+                <div style={{ fontSize: 10, fontFamily: 'monospace', color: '#e5e7eb', marginTop: 2 }}>
+                  {Math.floor(shares).toLocaleString()} shares
+                  <span style={{ color: '#4b5563' }}> · {obFmtUsd(Math.floor(shares) * s.entry)} notional</span>
+                </div>
+                <div style={{ fontSize: 8, color: '#4b5563', marginTop: 2 }}>
+                  risking {obFmtUsd(riskDollars)} ({riskPct}% of {obFmtUsd(acctSize)}) at ${fmt(s.riskPerUnit)}/share · set in Account
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>WHERE THE LEVELS COME FROM</div>
+            <div style={{ fontSize: 9, color: '#9ca3af', fontFamily: 'monospace', lineHeight: 1.7 }}>
+              <div><span style={{ color: '#ef4444' }}>stop</span> · {s.stopBasis}</div>
+              <div><span style={{ color: '#10b981' }}>tp1</span> · {s.tp1.basis}</div>
+              {s.tp2 && <div><span style={{ color: '#6ee7b7' }}>tp2</span> · {s.tp2.basis}</div>}
+              <div><span style={{ color: '#6b7280' }}>atr</span> · {fmt(s.atr)} daily — the noise unit both levels are measured against</div>
+            </div>
+            <div style={{ fontSize: 9, color: '#374151', marginTop: 6, lineHeight: 1.5 }}>
+              {d.context.confirmedCount}/4 GEX levels are confirmed by both the NASDAQ and Yahoo chains independently. A level marked ✓confirmed is one two separate sources agree on; the rest are single-source and softer. {s.management}
+            </div>
+          </div>
+        </>
+      )}
+
+      {d && (
+        <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+          <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em', marginBottom: 5 }}>
+            CONFLUENCE BREAKDOWN · NET {d.rawScore > 0 ? '+' : ''}{d.rawScore}
+          </div>
+          {d.factors.length === 0 && <div style={{ fontSize: 9, color: '#374151' }}>No factor crossed its threshold.</div>}
+          {d.factors.map((f, i) => (
+            <div key={i} style={{ padding: '2px 0', borderTop: i ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9.5, fontFamily: 'monospace' }}>
+                <span style={{ color: '#d1d5db' }}>{f.name}</span>
+                <span style={{ color: f.score > 0 ? '#6ee7b7' : f.score < 0 ? '#fca5a5' : '#4b5563', fontWeight: 800 }}>{f.score > 0 ? '+' : ''}{f.score}</span>
+              </div>
+              {f.detail && <div style={{ fontSize: 8, color: '#4b5563', lineHeight: 1.4 }}>{f.detail}</div>}
+            </div>
+          ))}
+          {d.coverage?.note && (
+            <div style={{ fontSize: 9, color: '#f59e0b', marginTop: 6, lineHeight: 1.5 }}>{d.coverage.note}</div>
+          )}
+          <div style={{ fontSize: 9, color: '#374151', marginTop: 5, lineHeight: 1.5 }}>
+            Levels in play: {[...d.levels.above.slice().reverse(), ...d.levels.below].map(l => `${fmt(l.price)} ${l.label}`).join(' · ')}
+          </div>
+        </div>
+      )}
+
+      {/* Forward record */}
+      <div style={{ padding: '10px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+          <div style={{ fontSize: 8, color: '#4b5563', fontWeight: 800, letterSpacing: '0.08em' }}>FORWARD RECORD · AUTO-LOGGED TO JOURNAL</div>
+          <button onClick={() => setAutoLog(v => !v)} style={{
+            padding: '3px 9px', borderRadius: 5, fontSize: 9, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: autoLog ? 'rgba(16,185,129,0.18)' : 'rgba(255,255,255,0.05)',
+            color: autoLog ? '#6ee7b7' : '#6b7280',
+          }}>{autoLog ? '● AUTO-LOG ON' : '○ AUTO-LOG OFF'}</button>
+        </div>
+
+        {closed.length > 0 && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5, marginBottom: 6 }}>
+            {[['CLOSED', closed.length, '#e5e7eb'],
+              ['WIN RATE', `${winRate}%`, winRate >= 50 ? '#10b981' : '#ef4444'],
+              ['TOTAL R', `${totalR >= 0 ? '+' : ''}${totalR.toFixed(2)}`, totalR >= 0 ? '#10b981' : '#ef4444']].map(([l, v, c]) => (
+              <div key={l} style={{ padding: '6px 8px', borderRadius: 7, background: 'rgba(255,255,255,0.03)', textAlign: 'center' }}>
+                <div style={{ fontSize: 7, color: '#4b5563', letterSpacing: '0.06em' }}>{l}</div>
+                <div style={{ fontSize: 12, fontFamily: 'monospace', fontWeight: 800, color: c }}>{v}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {closed.length > 0 && closed.length < 30 && (
+          <div style={{ fontSize: 8.5, color: '#f59e0b', lineHeight: 1.5, marginBottom: 5 }}>
+            {closed.length} closed — far too few to judge. A win rate does not stabilise until roughly 30-50 trades, and this engine is unvalidated to begin with.
+          </div>
+        )}
+        {open.map(x => (
+          <div key={x.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace', padding: '2px 0' }}>
+            <span style={{ color: x.direction === 'LONG' ? '#6ee7b7' : '#fca5a5', fontWeight: 700 }}>
+              {x.direction} {x.symbol} <span style={{ color: '#4b5563' }}>@ {fmt(x.entry)}</span>
+            </span>
+            <span style={{ color: x.tp1Hit ? '#10b981' : '#9ca3af' }}>
+              {x.tp1Hit ? `TP1 banked +${x.lockedR}R` : `${(x.unrealisedR ?? 0) >= 0 ? '+' : ''}${x.unrealisedR ?? 0}R`}
+            </span>
+          </div>
+        ))}
+        {closed.slice(0, 8).map(x => (
+          <div key={x.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace', padding: '2px 0' }}>
+            <span style={{ color: '#9ca3af' }}>{x.direction} {x.symbol} <span style={{ color: x.gapped ? '#f59e0b' : '#4b5563' }}>{x.outcome}</span></span>
+            <span style={{ color: (x.rMultiple ?? 0) > 0 ? '#6ee7b7' : '#fca5a5', fontWeight: 800 }}>{(x.rMultiple ?? 0) >= 0 ? '+' : ''}{x.rMultiple}R</span>
+          </div>
+        ))}
+        {signals.length === 0 && (
+          <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.5 }}>
+            Nothing tracked yet. Setups that clear confluence and 1.5:1 are recorded automatically, then resolved by replaying candles from the moment they opened — so the record stays complete even if you close the browser. Gaps through the stop are modelled at the open price, so a logged loss can exceed 1R: equity stops are not guaranteed.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Whole-market scan ──────────────────────────────────────────────────────
 
 function CryptoMarketScan({ onPick }) {
@@ -8083,7 +8460,7 @@ function GexIndependentPanel() {
   );
 }
 
-const TABS = ["Signals", "Confluence", "ICT", "ORB", "SMC", "Order Book", "Options Flow", "GEX", "Crypto", "Dark Pool", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
+const TABS = ["Signals", "Setups", "Confluence", "ICT", "ORB", "SMC", "Order Book", "Options Flow", "GEX", "Crypto", "Dark Pool", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -8646,6 +9023,7 @@ export default function App() {
                   </div>
                 )}
                 {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
+                {tab === "Setups" && <StockSetupPanel />}
                 {tab === "Confluence" && <ConfluencePanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
@@ -8766,6 +9144,7 @@ export default function App() {
 
                 <div style={{ flex: 1, overflowY: "auto" }}>
                   {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
+                  {tab === "Setups" && <StockSetupPanel />}
                   {tab === "Confluence" && <ConfluencePanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}

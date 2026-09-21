@@ -1,7 +1,7 @@
-// Shared crypto setup logic.
+// Shared setup logic — crypto AND equities.
 //
-// Both /api/cryptosignal (one coin, full confluence) and /api/cryptoscan
-// (whole market, structure only) build levels from this file. That is
+// /api/cryptosignal, /api/cryptoscan and /api/stocksignal all build levels
+// from this file. That is
 // deliberate: if the scanner had its own copy, it could list a coin at one R
 // multiple and the detail view could show another, and the user would have no
 // way to know which to believe. One implementation, one answer.
@@ -20,9 +20,17 @@ export function prec(v, ref) {
 
 export const MIN_RR = 1.5;          // the app's standing minimum
 export const MIN_CONF = 45;         // below this, confluence is not there
-const MIN_STOP_ATR = 1.2;           // a stop inside the noise band is stop-bait
-const MAX_TARGET_ATR = 10;          // beyond this is a different timeframe's trade
-const MAX_RISK_PCT = 4;             // structure too far from price to risk sensibly
+
+// Defaults are tuned to crypto's 1h ATR. Equities run on DAILY ATR over a
+// multi-day swing, where 10 ATR of target is a different trade entirely, so
+// callers pass their own bounds rather than inheriting numbers that only make
+// sense on one timeframe.
+const DEFAULTS = {
+  minStopAtr: 1.2,      // a stop inside the noise band is stop-bait
+  maxTargetAtr: 10,     // beyond this is a different timeframe's trade
+  maxRiskPct: 4,        // structure too far from price to risk sensibly
+  minRr: MIN_RR,
+};
 
 // ATR(14) plus the 48h swing range, from 1h candles sorted oldest-first
 export function structureFrom(candles) {
@@ -43,7 +51,8 @@ export function structureFrom(candles) {
 // Build a plan, or explain why there isn't one. `above`/`below` are candidate
 // levels sorted outward from spot; pass only levels that genuinely exist in the
 // market — options walls backed by open interest, or swings.
-export function buildSetup({ dir, spot, atr, above, below }) {
+export function buildSetup({ dir, spot, atr, above, below, ...opts }) {
+  const { minStopAtr, maxTargetAtr, maxRiskPct, minRr } = { ...DEFAULTS, ...opts };
   const isLong = dir === 'LONG';
   const protect = isLong ? below : above;
   const targets = isLong ? above : below;
@@ -51,7 +60,7 @@ export function buildSetup({ dir, spot, atr, above, below }) {
   // A stop must clear structure AND clear noise. Structure alone is not enough:
   // a level sitting 0.2 ATR from spot gives a stop ordinary chop removes. Take
   // whichever is WIDER — structure plus a buffer, or the volatility floor.
-  const floor = isLong ? spot - MIN_STOP_ATR * atr : spot + MIN_STOP_ATR * atr;
+  const floor = isLong ? spot - minStopAtr * atr : spot + minStopAtr * atr;
   const nearProtect = protect.find(l => Math.abs(l.price - spot) < 4 * atr);
   let sl, slBasis;
   if (nearProtect) {
@@ -61,7 +70,7 @@ export function buildSetup({ dir, spot, atr, above, below }) {
       slBasis = `${nearProtect.label} ${prec(nearProtect.price, spot)} + 0.5 ATR buffer`;
     } else {
       sl = floor;
-      slBasis = `${nearProtect.label} is inside the noise band — widened to the ${MIN_STOP_ATR} ATR floor`;
+      slBasis = `${nearProtect.label} is inside the noise band — widened to the ${minStopAtr} ATR floor`;
     }
   } else {
     sl = isLong ? spot - 2 * atr : spot + 2 * atr;
@@ -71,15 +80,15 @@ export function buildSetup({ dir, spot, atr, above, below }) {
   const risk = Math.abs(spot - sl);
   const riskPct = risk / spot * 100;
   if (risk <= 0) return { setup: null, noTrade: 'Could not derive a valid stop from current structure.' };
-  if (riskPct > MAX_RISK_PCT) {
+  if (riskPct > maxRiskPct) {
     return { setup: null, noTrade: `Stop would sit ${riskPct.toFixed(1)}% away — structure is too far from price to risk sensibly right now.` };
   }
 
   // Targets must be REAL levels at least 1.5R away and within reach on this
   // timeframe. If none qualifies that is a genuine no-trade, not a reason to
   // invent a number that makes the ratio work.
-  const reachable = l => Math.abs(l.price - spot) <= MAX_TARGET_ATR * atr;
-  const qualifying = targets.filter(l => Math.abs(l.price - spot) >= MIN_RR * risk && reachable(l));
+  const reachable = l => Math.abs(l.price - spot) <= maxTargetAtr * atr;
+  const qualifying = targets.filter(l => Math.abs(l.price - spot) >= minRr * risk && reachable(l));
   if (!qualifying.length) {
     const nearest = targets.filter(reachable)[0];
     return {
