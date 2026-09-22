@@ -7562,14 +7562,16 @@ function StrikeLadderPanel({ symbol: symbolProp, target: targetProp, direction: 
                       }}>
                         {r.liquidity.note} {r.liquidity.strikesWithSize}/{r.liquidity.strikesTotal} strikes have size resting at the offer, measured {r.liquidity.measuredWithin}.
                       </div>
-                      <div style={{ display: 'grid', gridTemplateColumns: '0.5fr 0.38fr 0.45fr 0.62fr 0.42fr 0.5fr 0.62fr', fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.04em', marginBottom: 2 }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '0.46fr 0.34fr 0.42fr 0.56fr 0.36fr 0.5fr 0.5fr 0.54fr', fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.04em', marginBottom: 2 }}>
                         <span>STRIKE</span><span>Δ</span><span style={{ textAlign: 'right' }}>COST</span>
-                        <span style={{ textAlign: 'right' }}>BREAKEVEN</span><span style={{ textAlign: 'right' }}>IN EM</span><span style={{ textAlign: 'right' }}>P(PROFIT)</span>
-                        <span style={{ textAlign: 'right' }}>SIZE @ OFFER</span>
+                        <span style={{ textAlign: 'right' }}>BREAKEVEN</span><span style={{ textAlign: 'right' }}>IN EM</span>
+                        <span style={{ textAlign: 'right' }}>P(TOUCH)</span>
+                        <span style={{ textAlign: 'right' }}>P(PROFIT)</span>
+                        <span style={{ textAlign: 'right' }}>SIZE@OFFER</span>
                       </div>
                       {r.strikes.map(x => (
                         <div key={x.strike} title={x.liquidityNote} style={{
-                          display: 'grid', gridTemplateColumns: '0.5fr 0.38fr 0.45fr 0.62fr 0.42fr 0.5fr 0.62fr',
+                          display: 'grid', gridTemplateColumns: '0.46fr 0.34fr 0.42fr 0.56fr 0.36fr 0.5fr 0.5fr 0.54fr',
                           fontSize: 9, fontFamily: 'monospace', padding: '1px 0',
                           color: x.strike === r.recommended ? '#f9fafb' : '#6b7280',
                           fontWeight: x.strike === r.recommended ? 800 : 400,
@@ -7582,6 +7584,7 @@ function StrikeLadderPanel({ symbol: symbolProp, target: targetProp, direction: 
                           <span style={{ textAlign: 'right', color: x.withinExpectedMove ? '#6ee7b7' : '#ef4444' }}>
                             {x.breakevenInExpectedMoves}
                           </span>
+                          <span style={{ textAlign: 'right', color: '#93c5fd' }}>{x.probTouchStrikePct}%</span>
                           <span style={{ textAlign: 'right', color: probColor(x.probProfitPct) }}>{x.probProfitPct}%</span>
                           <span style={{
                             textAlign: 'right',
@@ -7601,6 +7604,8 @@ function StrikeLadderPanel({ symbol: symbolProp, target: targetProp, direction: 
           <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(245,158,11,0.05)', border: '1px solid rgba(245,158,11,0.2)' }}>
             <div style={{ fontSize: 9, color: '#fbbf24', fontWeight: 800 }}>READ THIS BEFORE USING THE PICKS</div>
             <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 3, lineHeight: 1.6 }}>
+              <strong style={{ color: '#fbbf24' }}>P(TOUCH) vs P(PROFIT) are different trades.</strong> Touch is the chance price REACHES that strike at any point before expiry — sell into it and that is your number. Profit is the chance price is still beyond your BREAKEVEN at the bell. Near the money touch runs close to double, because reaching a level and holding it are not the same thing.
+              <br /><br />
               Notice that almost every probability of profit is under 50%. That is not a flaw in the picks — it is what paying premium costs, and it is true on every screen anywhere. Options are priced so that buying them is roughly break-even before costs and negative after the spread.
               <br /><br />
               So no strike on this table is profitable by itself. What the table actually does is stop you paying for moves the market prices as unlikely: a breakeven beyond 1.0 expected moves is a bet the market gives you worse than one-in-three odds on. Profit has to come from your directional read being better than the market's pricing on the occasions you take it — the ladder just makes sure you are not handing away the premium before your read even gets a chance.

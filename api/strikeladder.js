@@ -44,6 +44,28 @@ function ncdf(x) {
   return x >= 0 ? 1 - p : p;
 }
 
+// Probability spot TOUCHES a level at any point before expiry — a different and
+// usually much larger number than the probability it FINISHES beyond it. This is
+// the relevant one if the plan is to sell into a move rather than hold to the
+// bell, and for a near-the-money strike it runs close to double.
+//
+// First-passage probability for geometric Brownian motion via the reflection
+// principle, in log space: X_t = ln(S_t/S) = vt + sigma*W_t with v = r - s^2/2,
+// barrier b = ln(H/S).
+function probTouch(S, H, T, sigma, above, r = 0.04) {
+  if (T <= 0 || sigma <= 0 || H <= 0 || S <= 0) return null;
+  const v = r - 0.5 * sigma * sigma;
+  const b = Math.log(H / S);
+  const sq = sigma * Math.sqrt(T);
+  // Already through the barrier
+  if (above && b <= 0) return 1;
+  if (!above && b >= 0) return 1;
+  const p = above
+    ? ncdf((v * T - b) / sq) + Math.exp(2 * v * b / (sigma * sigma)) * ncdf((-b - v * T) / sq)
+    : ncdf((b - v * T) / sq) + Math.exp(2 * v * b / (sigma * sigma)) * ncdf((b + v * T) / sq);
+  return Math.min(1, Math.max(0, p));
+}
+
 // Risk-neutral probability spot finishes beyond a level by expiry
 function probBeyond(S, level, T, sigma, above, r = 0.04) {
   if (T <= 0 || sigma <= 0 || level <= 0) return null;
@@ -120,6 +142,9 @@ export default async function handler(req) {
       const targetProbPct = target != null
         ? +(probBeyond(spot, target, T, sigma, isCall) * 100).toFixed(1)
         : null;
+      const targetTouchPct = target != null
+        ? +(probTouch(spot, target, T, sigma, isCall) * 100).toFixed(1)
+        : null;
       const targetInExpectedMoves = target != null && expectedMove > 0
         ? +(Math.abs(target - spot) / expectedMove).toFixed(2)
         : null;
@@ -159,6 +184,8 @@ export default async function handler(req) {
         const beInSd = expectedMove > 0 ? beDistance / expectedMove : null;
         const pProfit = probBeyond(spot, breakeven, T, sigma, isCall);
         const pItm = probBeyond(spot, c.strike, T, sigma, isCall);
+        const pTouchStrike = probTouch(spot, c.strike, T, sigma, isCall);
+        const pTouchBe = probTouch(spot, breakeven, T, sigma, isCall);
         picks.push({
           strike: c.strike,
           delta: +c.delta.toFixed(3),
@@ -191,6 +218,9 @@ export default async function handler(req) {
           withinExpectedMove: beInSd != null ? beInSd <= 1 : null,
           probProfitPct: pProfit != null ? +(pProfit * 100).toFixed(1) : null,
           probItmPct: pItm != null ? +(pItm * 100).toFixed(1) : null,
+          // Reaching the level at any point, vs still being beyond it at the bell
+          probTouchStrikePct: pTouchStrike != null ? +(pTouchStrike * 100).toFixed(1) : null,
+          probTouchBreakevenPct: pTouchBe != null ? +(pTouchBe * 100).toFixed(1) : null,
         });
       }
 
@@ -245,7 +275,7 @@ export default async function handler(req) {
           putWallPct: putWall ? +((putWall - spot) / spot * 100).toFixed(2) : null,
           maxPainPct: maxPain ? +((maxPain - spot) / spot * 100).toFixed(2) : null,
         },
-        targetProbPct, targetInExpectedMoves,
+        targetProbPct, targetTouchPct, targetInExpectedMoves,
         strikes: picks,
         recommended: best ? best.strike : null,
         recommendation: best
@@ -277,6 +307,7 @@ export default async function handler(req) {
       expiryAdvice,
       expiryCount: rows.length,
       ladder: rows,
+      probabilityGuide: 'Two different probabilities are reported per strike. probTouchStrikePct is the chance price REACHES that strike at any point before expiry — the number that matters if you intend to sell into a move. probItmPct is the chance it is still beyond the strike at the bell, and probProfitPct the chance it is beyond your BREAKEVEN then. Touch is always the largest and, near the money, runs close to double the finish probability. Selling a touch and holding to expiry are different trades with materially different odds.',
       howToRead: 'For each date: expected move is that expiry\'s own implied 1-standard-deviation range, so roughly a 2-in-3 chance price lands inside it. A strike is only listed as recommended when its BREAKEVEN — not its strike — sits inside that range. Probability of profit is risk-neutral N(d2) from the same implied vol: the market\'s own odds, carrying no view of its own.',
       caveat: 'These are the market\'s implied odds, not a forecast, and they already include the premium you pay. No strike is reliably profitable on its own — profitability comes from taking these only when your directional read disagrees with the market\'s pricing, and sizing so the losers do not compound.',
       source: `CBOE delayed quotes, live two-sided markets, ${data?.timestamp || 'n/a'}`,
