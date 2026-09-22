@@ -39,9 +39,27 @@ function parseOcc(sym) {
   };
 }
 
+// CBOE rate-limits per source IP, and Vercel's edge egress is shared — measured
+// from the edge it starts returning 429 after roughly 60 symbols, while the same
+// requests from a dedicated IP sustain 21/s cleanly. So a 429 is expected under
+// load rather than exceptional, and is retried with backoff instead of being
+// reported as a dead symbol.
+async function fetchChain(symbol) {
+  const delays = [0, 600, 1800];
+  let last = 0;
+  for (const d of delays) {
+    if (d) await new Promise(r => setTimeout(r, d));
+    const res = await fetch(`${CBOE}${symbol}.json`, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+    if (res.ok) return { res, status: 200 };
+    last = res.status;
+    if (res.status !== 429) break;          // only backoff is worth retrying
+  }
+  return { res: null, status: last };
+}
+
 async function scoreSymbol(symbol) {
-  const res = await fetch(`${CBOE}${symbol}.json`, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
-  if (!res.ok) return { symbol, error: `CBOE ${res.status}` };
+  const { res, status } = await fetchChain(symbol);
+  if (!res) return { symbol, error: status === 429 ? 'rate limited' : `CBOE ${status}` };
   const data = await res.json();
   const spot = Number(data?.data?.current_price) || null;
   const raw = data?.data?.options || [];
@@ -209,12 +227,12 @@ export default async function handler(req) {
   if (!list.length) return json({ error: 'symbols required' }, 400);
   // Each chain averages ~790KB, so the batch is bounded to keep one request
   // comfortably inside the edge budget
-  const symbols = list.slice(0, 30);
+  const symbols = list.slice(0, 25);
 
   try {
     const t0 = Date.now();
     const out = [];
-    const CONC = 10;
+    const CONC = 5;
     for (let i = 0; i < symbols.length; i += CONC) {
       const batch = await Promise.all(symbols.slice(i, i + CONC).map(s =>
         scoreSymbol(s).catch(e => ({ symbol: s, error: e.message }))));
@@ -225,6 +243,7 @@ export default async function handler(req) {
       requested: symbols.length,
       scored: ok.length,
       failed: out.length - ok.length,
+      rateLimited: out.filter(r => r.error === 'rate limited').length,
       results: out,
       elapsedMs: Date.now() - t0,
       note: 'Scored on the same factor weights as /api/stocksignal. Dark pool is the one input CBOE cannot supply, so the confidence ceiling here is 92% rather than 100% — open a symbol for the full read.',
@@ -240,7 +259,7 @@ function json(body, status = 200) {
     status,
     headers: {
       'Content-Type': 'application/json',
-      'Cache-Control': 's-maxage=60, stale-while-revalidate=60',
+      'Cache-Control': 's-maxage=300, stale-while-revalidate=600',
       'Access-Control-Allow-Origin': '*',
     },
   });
