@@ -8,16 +8,28 @@ export const config = { runtime: 'edge' };
 // seconds each. Across 540 names that is nearly half an hour, so the scanner
 // could only ever deep-scan a top slice and the rest of the index went unseen.
 //
-// CBOE's chain carries almost everything needed in ONE request per symbol,
-// including per-contract gamma, IV, open interest and volume. Measured: 20
-// symbols in 992ms at concurrency 10. So the whole index becomes reachable when
-// the client walks it in batches.
+// SOURCE, AND WHY IT CHANGED: this was built CBOE-first. That was wrong at
+// scale. CBOE rate-limits per source IP and Vercel's edge egress is shared, so
+// a full-index pass scored 58/540, then 284/540 after backoff and caching,
+// before the IP was blocked outright. Yahoo, measured properly during market
+// hours, is better on every axis that matters here:
 //
-// SCORED IDENTICALLY, NOT APPROXIMATELY. The factor weights, the bias formula
-// and the confidence normaliser are the same ones /api/stocksignal uses, so a
-// batch score and a detail score are directly comparable. The one factor CBOE
-// cannot supply is the dark pool level (weight 0.4), which is why the ceiling
-// here is 92% rather than 100% — reported, not hidden.
+//   40 symbols x 3 expiries = 120 requests in 2.07s, every response a 200,
+//   3.0MB total, two-sided quotes on 40 of 40 symbols.
+//   Extrapolated to the index: ~28s and 40MB, against CBOE's 228s and 418MB.
+//
+// An earlier note in this file claimed Yahoo had no usable bid/ask. That was
+// measured at 09:28 ET, two minutes before the open, when the whole chain is
+// zeros. During the session Yahoo quotes fine, so the call-premium factor works
+// and Yahoo rows now reach the same 92% ceiling CBOE rows do. Three expiries are
+// pulled rather than one, so the GEX profile is not front-month only.
+//
+// CBOE remains the fallback for anything Yahoo cannot serve.
+//
+// SCORED IDENTICALLY, NOT APPROXIMATELY. The factor weights, the king-node bias
+// formula and the confidence normaliser are the same ones /api/stocksignal
+// uses, so batch and detail scores sit on one scale. Dark pool is the only
+// input neither chain supplies, which is why the ceiling is 92%, not 100%.
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
 const CBOE = 'https://cdn.cboe.com/api/global/delayed_quotes/options/';
@@ -29,6 +41,24 @@ const CBOE = 'https://cdn.cboe.com/api/global/delayed_quotes/options/';
 // is unavailable and the GEX profile is front-expiry only. That is a real
 // quality drop, so rows say which source produced them and the confidence
 // ceiling falls accordingly rather than pretending parity.
+const npdf = x => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+function bsGamma(S, K, T, sigma, r = 0.04) {
+  if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) return 0;
+  const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
+  return npdf(d1) / (S * sigma * Math.sqrt(T));
+}
+
+// SPY261231C00631000 -> { expMs, isCall, strike }
+function parseOcc(sym) {
+  const m = /^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(sym || '');
+  if (!m) return null;
+  return {
+    expMs: Date.UTC(2000 + Number(m[2]), Number(m[3]) - 1, Number(m[4]), 20, 0, 0),
+    isCall: m[5] === 'C',
+    strike: Number(m[6]) / 1000,
+  };
+}
+
 let yahooAuth = null;
 async function getYahooAuth() {
   if (yahooAuth) return yahooAuth;
@@ -39,54 +69,51 @@ async function getYahooAuth() {
   return yahooAuth;
 }
 
-// Shape Yahoo's front-expiry chain like CBOE's so one scorer handles both
-async function yahooContracts(symbol) {
+// Yahoo chain across several expiries, shaped so one scorer handles any source
+async function yahooContracts(symbol, wantExpiries = 3) {
   const { cookie, crumb } = await getYahooAuth();
-  const r = await fetch(`https://query1.finance.yahoo.com/v7/finance/options/${symbol}?crumb=${encodeURIComponent(crumb)}`,
-    { headers: { 'User-Agent': UA, 'Cookie': cookie, 'Accept': 'application/json' } });
+  const H = { 'User-Agent': UA, 'Cookie': cookie, 'Accept': 'application/json' };
+  const base = `https://query1.finance.yahoo.com/v7/finance/options/${encodeURIComponent(symbol)}`;
+  const r = await fetch(`${base}?crumb=${encodeURIComponent(crumb)}`, { headers: H });
   if (!r.ok) return null;
   const root = (await r.json())?.optionChain?.result?.[0];
-  const opt = root?.options?.[0];
   const spot = root?.quote?.regularMarketPrice;
-  if (!opt || !spot) return null;
-  const expMs = (opt.expirationDate || 0) * 1000;
-  const dte = Math.max(0.5, (expMs - Date.now()) / 86400000);
-  const T = dte / 365;
+  if (!root || !spot) return null;
+
+  const chains = [root.options?.[0]].filter(Boolean);
+  const more = (root.expirationDates || []).slice(1, wantExpiries);
+  const rest = await Promise.all(more.map(d =>
+    fetch(`${base}?date=${d}&crumb=${encodeURIComponent(crumb)}`, { headers: H })
+      .then(x => x.ok ? x.json() : null).catch(() => null)));
+  for (const x of rest) {
+    const o = x?.optionChain?.result?.[0]?.options?.[0];
+    if (o) chains.push(o);
+  }
+
   const out = [];
-  const take = (list, isCall) => {
-    for (const c of list || []) {
-      const K = Number(c.strike);
-      const iv = Number(c.impliedVolatility) || 0;
-      if (!K || iv <= 0.01 || iv > 5) continue;      // Yahoo IV is unreliable at the edges
-      out.push({
-        option: null, strike: K, isCall, expMs,
-        open_interest: Number(c.openInterest) || 0,
-        volume: Number(c.volume) || 0,
-        iv, gamma: bsGamma(spot, K, T, iv),
-        bid: 0, ask: 0,
-      });
-    }
-  };
-  take(opt.calls, true);
-  take(opt.puts, false);
-  return { spot, contracts: out };
-}
-
-const npdf = x => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
-function bsGamma(S, K, T, sigma, r = 0.04) {
-  if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) return 0;
-  const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
-  return npdf(d1) / (S * sigma * Math.sqrt(T));
-}
-
-function parseOcc(sym) {
-  const m = /^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(sym || '');
-  if (!m) return null;
-  return {
-    expMs: Date.UTC(2000 + Number(m[2]), Number(m[3]) - 1, Number(m[4]), 20, 0, 0),
-    isCall: m[5] === 'C',
-    strike: Number(m[6]) / 1000,
-  };
+  for (const opt of chains) {
+    const expMs = (opt.expirationDate || 0) * 1000;
+    const dte = Math.max(0.5, (expMs - Date.now()) / 86400000);
+    const T = dte / 365;
+    const take = (list, isCall) => {
+      for (const c of list || []) {
+        const K = Number(c.strike);
+        const iv = Number(c.impliedVolatility) || 0;
+        // Yahoo's IV field is unreliable at the edges; clamp rather than trust
+        if (!K || iv <= 0.01 || iv > 5) continue;
+        out.push({
+          strike: K, isCall, expMs,
+          open_interest: Number(c.openInterest) || 0,
+          volume: Number(c.volume) || 0,
+          iv, gamma: bsGamma(spot, K, T, iv),
+          bid: Number(c.bid) || 0, ask: Number(c.ask) || 0,
+        });
+      }
+    };
+    take(opt.calls, true);
+    take(opt.puts, false);
+  }
+  return out.length ? { spot, contracts: out } : null;
 }
 
 // CBOE rate-limits per source IP, and Vercel's edge egress is shared — measured
@@ -108,25 +135,28 @@ async function fetchChain(symbol) {
 }
 
 async function scoreSymbol(symbol) {
-  let spot = null, raw = [], source = 'cboe';
-  const { res, status } = await fetchChain(symbol);
-  if (res) {
-    const data = await res.json();
-    spot = Number(data?.data?.current_price) || null;
-    raw = (data?.data?.options || []).map(o => {
-      const p = parseOcc(o.option);
-      return p ? { ...o, strike: p.strike, isCall: p.isCall, expMs: p.expMs } : null;
-    }).filter(Boolean);
-  }
+  let spot = null, raw = [], source = 'yahoo';
+  // Yahoo first: faster, far smaller, and not rate limited at index scale
+  try {
+    const y = await yahooContracts(symbol);
+    if (y) { spot = y.spot; raw = y.contracts; }
+  } catch { /* fall through to CBOE */ }
+
   if (!spot || !raw.length) {
-    // CBOE unavailable or rate limited — take the breadth source instead of
-    // dropping the symbol out of the scan entirely
-    try {
-      const y = await yahooContracts(symbol);
-      if (y) { spot = y.spot; raw = y.contracts; source = 'yahoo'; }
-    } catch { /* fall through to the error below */ }
+    const { res, status } = await fetchChain(symbol);
+    if (res) {
+      const data = await res.json();
+      spot = Number(data?.data?.current_price) || null;
+      raw = (data?.data?.options || []).map(o => {
+        const p = parseOcc(o.option);
+        return p ? { ...o, strike: p.strike, isCall: p.isCall, expMs: p.expMs } : null;
+      }).filter(Boolean);
+      source = 'cboe';
+    }
+    if (!spot || !raw.length) {
+      return { symbol, error: status === 429 ? 'rate limited' : `no chain (${status || 'n/a'})` };
+    }
   }
-  if (!spot || !raw.length) return { symbol, error: status === 429 ? 'rate limited' : `no chain (${status || 'n/a'})` };
 
   const now = Date.now();
   const byStrike = new Map();
@@ -134,6 +164,11 @@ async function scoreSymbol(symbol) {
   let callVol = 0, putVol = 0, callOI = 0, putOI = 0, callNotional = 0, putNotional = 0;
   let unusualCallN = 0, unusualPutN = 0, unusualCount = 0;
   let atmIv = null, atmDist = Infinity;
+  // Chain depth near the money. A high confluence score on a hollow chain is
+  // the single most misleading thing this scan can produce: the bias factor
+  // saturates on a handful of contracts and reads like conviction.
+  const atmSpreads = [];
+  let atmOi = 0;
 
   for (const p of raw) {
     const o = p;
@@ -173,6 +208,11 @@ async function scoreSymbol(symbol) {
     // At-the-money IV for the nearest meaningful expiry
     const d = Math.abs(p.strike - spot) + Math.abs(dte - 7);
     if (iv > 0 && d < atmDist) { atmDist = d; atmIv = iv; }
+
+    if (Math.abs(p.strike - spot) / spot <= 0.05) {
+      atmOi += oi;
+      if (bid > 0 && ask > 0) atmSpreads.push((ask - bid) / ((bid + ask) / 2) * 100);
+    }
 
     if (oi <= 0 || gamma <= 0) continue;
     // Same short-dated discount as the single-symbol engine
@@ -267,10 +307,34 @@ async function scoreSymbol(symbol) {
   // Dark pool (0.4) is the one factor CBOE cannot supply — never counted as
   // available, which is why the ceiling here tops out at 92%
 
+  const med = arr => { const q = arr.slice().sort((a, b) => a - b); return q.length ? q[Math.floor(q.length / 2)] : null; };
+  const medSpread = med(atmSpreads);
+  // Open interest leads, spread is a veto. Percentage spreads are naturally
+  // wide on cheap out-of-the-money strikes, so gating on them alone mislabelled
+  // SPY — 302,000 contracts open near the money — as merely "ok". Measured
+  // across the index: mega-caps run 120k-300k, a mid-cap like JPM ~22k, and the
+  // names that topped the last scan (ATO 943, GL 598) are hollow.
+  const brokenQuotes = medSpread != null && medSpread > 25;
+  const chainTier = brokenQuotes ? 'thin'
+    : atmOi >= 50000 ? 'deep'
+    : atmOi >= 10000 ? 'ok' : 'thin';
+
   const rawScore = factors.reduce((a, f) => a + f.score, 0);
   const MAX = 5.25;
   return {
     symbol, spot, source,
+    chain: {
+      tier: chainTier,
+      atmOpenInterest: atmOi,
+      medianAtmSpreadPct: medSpread != null ? +medSpread.toFixed(1) : null,
+      note: chainTier === 'deep'
+        ? 'Deep chain — the score rests on real open interest.'
+        : chainTier === 'ok'
+          ? `Workable — ${atmOi.toLocaleString()} contracts open near the money, thinner than a mega-cap but real.`
+          : brokenQuotes
+            ? `Quotes are ${medSpread.toFixed(0)}% wide near the money. Whatever the score says, the spread eats the trade before direction matters.`
+            : `Hollow chain: only ${atmOi.toLocaleString()} contracts open near the money. A high score here rests on a handful of contracts, not conviction — treat it with far more suspicion than the same number on a liquid name.`,
+    },
     confidence: Math.min(100, Math.round(Math.abs(rawScore) / MAX * 100)),
     confidenceCeiling: Math.round(maxAvailable / MAX * 100),
     direction: rawScore > 0 ? 'LONG' : 'SHORT',
@@ -301,11 +365,15 @@ export default async function handler(req) {
       out.push(...batch);
     }
     const ok = out.filter(r => !r.error);
+    const bySource = {};
+    for (const r of ok) bySource[r.source] = (bySource[r.source] || 0) + 1;
     return json({
       requested: symbols.length,
       scored: ok.length,
       failed: out.length - ok.length,
       rateLimited: out.filter(r => r.error === 'rate limited').length,
+      bySource,
+      tradeable: ok.filter(r => r.chain.tier !== 'thin').length,
       results: out,
       elapsedMs: Date.now() - t0,
       note: 'Scored on the same factor weights as /api/stocksignal. Dark pool is the one input CBOE cannot supply, so the confidence ceiling here is 92% rather than 100% — open a symbol for the full read.',
