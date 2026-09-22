@@ -7842,7 +7842,7 @@ function StockSetupPanel() {
   const [rows, setRows] = useState([]);
   const [phase, setPhase] = useState('idle');
   const [progress, setProgress] = useState({ done: 0, total: 0 });
-  const [depth, setDepth] = useState(15);
+  const [depth, setDepth] = useState(100);
   const abort = useRef(false);
 
   // Forward tracking
@@ -7927,30 +7927,34 @@ function StockSetupPanel() {
       const sc = await fetch('/api/stockscan').then(r => r.json());
       if (sc.error) { setErr(sc.error); setPhase('idle'); return; }
       setScan(sc);
-      const targets = sc.candidates.slice(0, depth);
+      const targets = depth === 'all' ? sc.candidates : sc.candidates.slice(0, Number(depth));
       setPhase('deep'); setProgress({ done: 0, total: targets.length });
+      const meta = new Map(sc.candidates.map(c => [c.symbol, c]));
       const out = [];
-      // Two at a time: each deep scan pulls two option chains, a dark pool
-      // history and a candle series
-      for (let i = 0; i < targets.length; i += 2) {
+      // /api/stockbatch scores 30 symbols per request off a single option chain
+      // each, which is what makes the whole index reachable — the per-symbol
+      // engine needs ~8 upstream calls and would take half an hour for 540.
+      const CHUNK = 30;
+      for (let i = 0; i < targets.length; i += CHUNK) {
         if (abort.current) return;
-        const batch = await Promise.all(targets.slice(i, i + 2).map(async c => {
-          try {
-            const r = await fetch(`/api/stocksignal?symbol=${encodeURIComponent(c.symbol)}`).then(x => x.json());
-            return r.error ? null : { ...r, relVolume: c.relVolume, changePct: c.changePct };
-          } catch { return null; }
-        }));
-        out.push(...batch.filter(Boolean));
+        const syms = targets.slice(i, i + CHUNK).map(c => c.symbol);
+        try {
+          const r = await fetch(`/api/stockbatch?symbols=${syms.join(',')}`).then(x => x.json());
+          for (const row of (r.results || [])) {
+            if (row.error) continue;
+            const m = meta.get(row.symbol);
+            out.push({ ...row, relVolume: m?.relVolume, changePct: m?.changePct });
+          }
+        } catch { /* a failed chunk should not abandon the scan */ }
         if (abort.current) return;
-        setRows(out.slice().sort((a, b) => (b.setup ? 1 : 0) - (a.setup ? 1 : 0) || b.confidence - a.confidence));
-        setProgress({ done: Math.min(i + 2, targets.length), total: targets.length });
+        setRows(out.slice().sort((a, b) => b.confidence - a.confidence));
+        setProgress({ done: Math.min(i + CHUNK, targets.length), total: targets.length });
       }
       setPhase('done');
     } catch (e) { setErr(e.message); setPhase('idle'); }
   }, [depth]);
 
   const running = phase === 'scanning' || phase === 'deep';
-  const withSetup = rows.filter(r => r.setup);
   const open = signals.filter(x => x.status === 'open');
   const closed = signals.filter(x => x.status === 'closed');
   const totalR = closed.reduce((a, x) => a + (x.rMultiple ?? 0), 0);
@@ -7989,7 +7993,10 @@ function StockSetupPanel() {
             <select value={depth} onChange={e => setDepth(+e.target.value)} disabled={running} style={{
               background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 5,
               padding: '3px 6px', color: '#9ca3af', fontSize: 9, fontFamily: 'monospace', cursor: 'pointer',
-            }}>{[10, 15, 25, 40].map(n => <option key={n} value={n}>top {n}</option>)}</select>
+            }}>
+              {[50, 100, 250].map(n => <option key={n} value={n}>top {n}</option>)}
+              <option value="all">all 500+</option>
+            </select>
             <button onClick={runScan} disabled={running} style={{
               padding: '4px 12px', borderRadius: 6, fontSize: 10, fontWeight: 800, border: 'none',
               cursor: running ? 'default' : 'pointer',
@@ -8013,25 +8020,36 @@ function StockSetupPanel() {
         {rows.length > 0 && (
           <div style={{ marginTop: 7 }}>
             <div style={{ fontSize: 7.5, color: '#4b5563', fontWeight: 800, letterSpacing: '0.06em', marginBottom: 3 }}>
-              {withSetup.length > 0 ? `${withSetup.length} TRADEABLE · ${rows.length} SCANNED` : `NO SETUPS · ${rows.length} SCANNED`}
+              {rows.filter(r => r.confidence >= 45).length} ABOVE THRESHOLD · {rows.length} SCORED
             </div>
-            {rows.map(r => (
-              <div key={r.symbol} onClick={() => setSymbol(r.symbol)} style={{
-                display: 'grid', gridTemplateColumns: '0.75fr 0.5fr 0.7fr 1.4fr', fontSize: 9, fontFamily: 'monospace',
-                padding: '3px 4px', alignItems: 'center', cursor: 'pointer', borderRadius: 4,
-                background: r.setup ? 'rgba(16,185,129,0.07)' : 'transparent',
-                borderTop: '1px solid rgba(255,255,255,0.03)',
-              }}>
-                <span style={{ color: r.setup ? '#f9fafb' : '#9ca3af', fontWeight: r.setup ? 800 : 400 }}>{r.symbol}</span>
-                <span style={{ color: r.direction === 'LONG' ? '#6ee7b7' : '#fca5a5' }}>{r.direction}</span>
-                <span style={{ color: r.confidence >= 45 ? '#fbbf24' : '#4b5563' }}>
-                  {r.confidence}%<span style={{ color: '#374151' }}>/{r.confidenceCeiling}</span>
-                </span>
-                <span style={{ textAlign: 'right', color: r.setup ? '#6ee7b7' : '#374151', fontSize: r.setup ? 9 : 8 }}>
-                  {r.setup ? `${r.setup.tp1.rr}R · risk ${r.setup.riskPct}%` : (r.noTrade || '').replace(/^Confluence only \d+%\. /, '').slice(0, 40)}
-                </span>
+            {rows.slice(0, 60).map(r => {
+              const strong = r.confidence >= 45;
+              return (
+                <div key={r.symbol} onClick={() => setSymbol(r.symbol)} style={{
+                  display: 'grid', gridTemplateColumns: '0.7fr 0.5fr 0.72fr 0.7fr 1.1fr', fontSize: 9, fontFamily: 'monospace',
+                  padding: '3px 4px', alignItems: 'center', cursor: 'pointer', borderRadius: 4,
+                  background: strong ? 'rgba(16,185,129,0.07)' : 'transparent',
+                  borderTop: '1px solid rgba(255,255,255,0.03)',
+                }}>
+                  <span style={{ color: strong ? '#f9fafb' : '#9ca3af', fontWeight: strong ? 800 : 400 }}>{r.symbol}</span>
+                  <span style={{ color: r.direction === 'LONG' ? '#6ee7b7' : '#fca5a5' }}>{r.direction}</span>
+                  <span style={{ color: strong ? '#fbbf24' : '#4b5563' }}>
+                    {r.confidence}%<span style={{ color: '#374151' }}>/{r.confidenceCeiling}</span>
+                  </span>
+                  <span style={{ color: '#6b7280', textAlign: 'right' }}>
+                    {r.relVolume != null ? `${r.relVolume}x` : ''}
+                  </span>
+                  <span style={{ textAlign: 'right', color: '#4b5563', fontSize: 8 }}>
+                    wall {r.gammaWall ?? '—'}{r.flipLevel != null ? ` · flip ${r.flipLevel}` : ''}
+                  </span>
+                </div>
+              );
+            })}
+            {rows.length > 60 && (
+              <div style={{ fontSize: 8, color: '#374151', marginTop: 4 }}>
+                Showing the 60 highest-confluence of {rows.length} scored. Tap any row to load its full read, including the dark pool level the batch pass cannot see.
               </div>
-            ))}
+            )}
           </div>
         )}
       </div>
