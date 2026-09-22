@@ -22,6 +22,56 @@ export const config = { runtime: 'edge' };
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
 const CBOE = 'https://cdn.cboe.com/api/global/delayed_quotes/options/';
 
+// Yahoo is the fallback when CBOE rate-limits, and it is a good one for breadth:
+// measured at 30 chains in 592ms with every response a 200, and 30KB per chain
+// against CBOE's 790KB — 26x smaller. What it costs is depth. Yahoo returns one
+// expiry per request and carries no reliable bid/ask, so the call-premium factor
+// is unavailable and the GEX profile is front-expiry only. That is a real
+// quality drop, so rows say which source produced them and the confidence
+// ceiling falls accordingly rather than pretending parity.
+let yahooAuth = null;
+async function getYahooAuth() {
+  if (yahooAuth) return yahooAuth;
+  const seed = await fetch('https://fc.yahoo.com', { headers: { 'User-Agent': UA } });
+  const cookie = (seed.headers.get('set-cookie') || '').split(',').map(p => p.split(';')[0].trim()).filter(Boolean).join('; ');
+  const r = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', { headers: { 'User-Agent': UA, 'Cookie': cookie } });
+  yahooAuth = { cookie, crumb: (await r.text()).trim() };
+  return yahooAuth;
+}
+
+// Shape Yahoo's front-expiry chain like CBOE's so one scorer handles both
+async function yahooContracts(symbol) {
+  const { cookie, crumb } = await getYahooAuth();
+  const r = await fetch(`https://query1.finance.yahoo.com/v7/finance/options/${symbol}?crumb=${encodeURIComponent(crumb)}`,
+    { headers: { 'User-Agent': UA, 'Cookie': cookie, 'Accept': 'application/json' } });
+  if (!r.ok) return null;
+  const root = (await r.json())?.optionChain?.result?.[0];
+  const opt = root?.options?.[0];
+  const spot = root?.quote?.regularMarketPrice;
+  if (!opt || !spot) return null;
+  const expMs = (opt.expirationDate || 0) * 1000;
+  const dte = Math.max(0.5, (expMs - Date.now()) / 86400000);
+  const T = dte / 365;
+  const out = [];
+  const take = (list, isCall) => {
+    for (const c of list || []) {
+      const K = Number(c.strike);
+      const iv = Number(c.impliedVolatility) || 0;
+      if (!K || iv <= 0.01 || iv > 5) continue;      // Yahoo IV is unreliable at the edges
+      out.push({
+        option: null, strike: K, isCall, expMs,
+        open_interest: Number(c.openInterest) || 0,
+        volume: Number(c.volume) || 0,
+        iv, gamma: bsGamma(spot, K, T, iv),
+        bid: 0, ask: 0,
+      });
+    }
+  };
+  take(opt.calls, true);
+  take(opt.puts, false);
+  return { spot, contracts: out };
+}
+
 const npdf = x => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 function bsGamma(S, K, T, sigma, r = 0.04) {
   if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) return 0;
@@ -58,12 +108,25 @@ async function fetchChain(symbol) {
 }
 
 async function scoreSymbol(symbol) {
+  let spot = null, raw = [], source = 'cboe';
   const { res, status } = await fetchChain(symbol);
-  if (!res) return { symbol, error: status === 429 ? 'rate limited' : `CBOE ${status}` };
-  const data = await res.json();
-  const spot = Number(data?.data?.current_price) || null;
-  const raw = data?.data?.options || [];
-  if (!spot || !raw.length) return { symbol, error: 'no chain' };
+  if (res) {
+    const data = await res.json();
+    spot = Number(data?.data?.current_price) || null;
+    raw = (data?.data?.options || []).map(o => {
+      const p = parseOcc(o.option);
+      return p ? { ...o, strike: p.strike, isCall: p.isCall, expMs: p.expMs } : null;
+    }).filter(Boolean);
+  }
+  if (!spot || !raw.length) {
+    // CBOE unavailable or rate limited — take the breadth source instead of
+    // dropping the symbol out of the scan entirely
+    try {
+      const y = await yahooContracts(symbol);
+      if (y) { spot = y.spot; raw = y.contracts; source = 'yahoo'; }
+    } catch { /* fall through to the error below */ }
+  }
+  if (!spot || !raw.length) return { symbol, error: status === 429 ? 'rate limited' : `no chain (${status || 'n/a'})` };
 
   const now = Date.now();
   const byStrike = new Map();
@@ -72,9 +135,8 @@ async function scoreSymbol(symbol) {
   let unusualCallN = 0, unusualPutN = 0, unusualCount = 0;
   let atmIv = null, atmDist = Infinity;
 
-  for (const o of raw) {
-    const p = parseOcc(o.option);
-    if (!p) continue;
+  for (const p of raw) {
+    const o = p;
     // GEX aggregation stays in the ±15% band the single-symbol engine uses, so
     // the two produce the same profile. The FLIP book is collected wider,
     // because for a 50%-IV single stock ±15% is well under one standard
@@ -208,7 +270,7 @@ async function scoreSymbol(symbol) {
   const rawScore = factors.reduce((a, f) => a + f.score, 0);
   const MAX = 5.25;
   return {
-    symbol, spot,
+    symbol, spot, source,
     confidence: Math.min(100, Math.round(Math.abs(rawScore) / MAX * 100)),
     confidenceCeiling: Math.round(maxAvailable / MAX * 100),
     direction: rawScore > 0 ? 'LONG' : 'SHORT',
