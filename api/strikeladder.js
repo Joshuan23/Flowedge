@@ -22,6 +22,14 @@ export const config = { runtime: 'edge' };
 // it embeds no view. A 35% probability of profit is not an edge or a warning on
 // its own; it is the price of admission the market is charging.
 //
+// LIQUIDITY IS A GATE, NOT A FOOTNOTE. A strike you cannot fill is not a trade.
+// Measured on SPY, expiries a week out vary enormously: 2026-09-30 carries a
+// median 1469 open interest per strike while 2026-10-01, one day later, carries
+// 20 with a median volume of 5. An earlier version of this endpoint recommended
+// the thin one purely on probability. Every strike now reports the size resting
+// at the offer, its open interest and its spread, and nothing can be
+// recommended unless it is actually fillable.
+//
 // Magnets per expiry — max pain and the largest open-interest strikes — are
 // shown because they are where dealer hedging concentrates into that date.
 
@@ -80,6 +88,7 @@ export default async function handler(req) {
       if (!byExp.has(p.expMs)) byExp.set(p.expMs, []);
       byExp.get(p.expMs).push({
         ...p, bid, ask, mid: (bid + ask) / 2,
+        bidSize: Number(o.bid_size) || 0, askSize: Number(o.ask_size) || 0,
         iv: Number(o.iv) || 0, delta: Number(o.delta) || 0, theta: Number(o.theta) || 0,
         oi: Number(o.open_interest) || 0, volume: Number(o.volume) || 0,
       });
@@ -158,7 +167,23 @@ export default async function handler(req) {
           iv: +(c.iv * 100).toFixed(1),
           thetaPerDay: +(c.theta * 100).toFixed(2),
           oi: c.oi, volume: c.volume,
+          bidSize: c.bidSize, askSize: c.askSize,
           spreadPct: +((c.ask - c.bid) / c.mid * 100).toFixed(1),
+          // Can you actually get filled here, and at what cost in slippage
+          ...(() => {
+            const spreadPct = (c.ask - c.bid) / c.mid * 100;
+            const deep = c.askSize >= 25 && c.oi >= 250 && spreadPct <= 3;
+            const ok   = c.askSize >= 10 && c.oi >= 50  && spreadPct <= 8;
+            return {
+              fillable: deep || ok,
+              liquidity: deep ? 'deep' : ok ? 'ok' : 'thin',
+              liquidityNote: deep
+                ? `${c.askSize} contracts at the offer, ${c.oi} open interest, ${spreadPct.toFixed(1)}% spread — fills at the quote`
+                : ok
+                  ? `${c.askSize} at the offer, ${c.oi} open interest, ${spreadPct.toFixed(1)}% spread — workable, use a limit`
+                  : `only ${c.askSize} at the offer, ${c.oi} open interest, ${spreadPct.toFixed(1)}% spread — you will pay up or not get filled`,
+            };
+          })(),
           breakeven: +breakeven.toFixed(2),
           breakevenMovePct: +((breakeven - spot) / spot * 100).toFixed(2),
           // How far the breakeven sits in units of this expiry's expected move
@@ -169,15 +194,44 @@ export default async function handler(req) {
         });
       }
 
-      // The pick: cheapest admission whose breakeven the market's own expected
-      // move actually covers. Ties break toward the higher probability.
-      const affordable = picks.filter(p => p.withinExpectedMove);
+      // The pick must clear BOTH tests: a breakeven the market's own expected
+      // move covers, AND enough resting size to actually trade. Probability
+      // alone once recommended a strike with 20 open interest.
+      const affordable = picks.filter(p => p.withinExpectedMove && p.fillable);
       const best = affordable.length
         ? affordable.reduce((b, x) => x.probProfitPct > b.probProfitPct ? x : b)
         : null;
+      const blockedByLiquidity = !best && picks.some(p => p.withinExpectedMove);
+
+      const med = arr => { const q = arr.slice().sort((a, b) => a - b); return q.length ? q[Math.floor(q.length / 2)] : 0; };
+      // Judge the DAY on strikes you would actually trade. Measuring across the
+      // full ±30% band drags the median down with dead far-OTM strikes and
+      // mislabelled 0DTE as thin when near the money it carries 442 open
+      // interest.
+      const tradeable = side.filter(c => Math.abs(c.strike - spot) / spot <= 0.05);
+      const liqSample = tradeable.length >= 5 ? tradeable : side;
+      const sideSpreads = liqSample.map(c => (c.ask - c.bid) / c.mid * 100);
+      const medSpread = +med(sideSpreads).toFixed(1);
+      const medOi = med(liqSample.map(c => c.oi));
+      const sized = liqSample.filter(c => c.askSize >= 10).length;
+      const dayLiquidity = (medOi >= 250 && medSpread <= 3) ? 'deep'
+        : (medOi >= 50 && medSpread <= 8) ? 'ok' : 'thin';
 
       rows.push({
         expiry: new Date(e.ts).toISOString().slice(0, 10),
+        liquidity: {
+          tier: dayLiquidity,
+          medianSpreadPct: medSpread,
+          medianOi: medOi,
+          strikesWithSize: sized,
+          strikesTotal: liqSample.length,
+          measuredWithin: tradeable.length >= 5 ? '±5% of spot' : 'full quoted band',
+          note: dayLiquidity === 'deep'
+            ? `Real market all day — median ${medOi} open interest, ${medSpread}% spreads.`
+            : dayLiquidity === 'ok'
+              ? `Tradable with limit orders — median ${medOi} open interest, ${medSpread}% spreads.`
+              : `Thin. Median ${medOi} open interest and ${medSpread}% spreads: orders sit, and crossing costs more than the edge.`,
+        },
         dte: +e.dte.toFixed(2),
         atmIv: +(sigma * 100).toFixed(1),
         expectedMove: +expectedMove.toFixed(2),
@@ -195,8 +249,10 @@ export default async function handler(req) {
         strikes: picks,
         recommended: best ? best.strike : null,
         recommendation: best
-          ? `${best.strike} — breakeven ${best.breakeven} is ${best.breakevenInExpectedMoves} expected moves away, inside what the market prices for this date. ${best.probProfitPct}% chance it finishes profitable, ${best.thetaPerDay} per day of decay.`
-          : `No strike on this date has a breakeven inside the expected move. Every one needs a bigger move than the market is pricing — on this expiry you are buying the improbable, which is how option buyers bleed.`,
+          ? `${best.strike} — breakeven ${best.breakeven} is ${best.breakevenInExpectedMoves} expected moves away, inside what the market prices for this date. ${best.probProfitPct}% chance it finishes profitable, ${best.thetaPerDay} per day of decay. ${best.liquidityNote}.`
+          : blockedByLiquidity
+            ? `Strikes on this date price sensibly but there is no size behind them — median ${medOi} open interest and ${medSpread}% spreads. Skip the date rather than pay the spread.`
+            : `No strike on this date has a breakeven inside the expected move. Every one needs a bigger move than the market is pricing — on this expiry you are buying the improbable, which is how option buyers bleed.`,
       });
     }
 
@@ -204,11 +260,14 @@ export default async function handler(req) {
     // market gives the target a realistic chance. 35% is a deliberate choice —
     // below roughly a third, a directional option buyer needs an unusually
     // large payoff to compensate, and most do not get one.
-    const hit = target != null ? rows.find(r => r.targetProbPct != null && r.targetProbPct >= 35) : null;
+    // Must be both realistic AND fillable — an untradable date is not an answer
+    const hit = target != null
+      ? rows.find(r => r.targetProbPct != null && r.targetProbPct >= 35 && r.liquidity.tier !== 'thin')
+      : null;
     const earliestReasonableExpiry = hit ? hit.expiry : null;
     const expiryAdvice = target == null ? null
       : hit
-        ? `${target} is ${hit.targetInExpectedMoves} expected moves away by ${hit.expiry}, which the market prices at ${hit.targetProbPct}%. Earlier expiries need a bigger move than is priced — that is where premium goes to die.`
+        ? `${target} is ${hit.targetInExpectedMoves} expected moves away by ${hit.expiry}, which the market prices at ${hit.targetProbPct}% — and that date has real markets (${hit.liquidity.note.toLowerCase()}). Earlier expiries need a bigger move than is priced, which is where premium goes to die.`
         : `No expiry in this window gives ${target} even a 35% chance. Either the target is too far for options on this timeframe, or you need to go further out in time than the ${rows.length} dates shown.`;
 
     return json({

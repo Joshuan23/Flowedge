@@ -17,30 +17,81 @@ export const config = { runtime: 'edge' };
 // live in stage two, so guessing direction here from price alone would bury
 // exactly the names whose signal has not been fetched yet. Relative volume is
 // the honest stage-one question — where is something actually happening.
+//
+// UNIVERSE: the full S&P 500 plus the liquid ETF and leveraged/vol complex,
+// which is 567 names. Index membership is fetched at runtime so additions and
+// deletions arrive on their own, with a baked snapshot as fallback — a source
+// outage degrades the universe, it does not break the scan.
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
 
-// Mirrors TICKER_GROUPS in the app so the scanner and the pickers agree
-const UNIVERSE = [
+// Liquid ETFs and leveraged/vol products — heavily traded options that are not
+// in the index, so they are unioned with it rather than replaced by it
+const ETFS = [
   'SPY', 'QQQ', 'IWM', 'DIA', 'MDY', 'VOO', 'VTI', 'XLF', 'XLK', 'XLE', 'XLV', 'XLI', 'XLU',
   'XLP', 'XLB', 'XLRE', 'XLY', 'XLC', 'EEM', 'EFA', 'IEMG', 'KWEB', 'MCHI', 'EWJ', 'EWZ', 'EWY',
   'VEA', 'VWO', 'GLD', 'SLV', 'GDX', 'GDXJ', 'USO', 'UNG', 'TLT', 'HYG', 'LQD', 'IEF', 'SHY',
   'AGG', 'TQQQ', 'SQQQ', 'SPXL', 'SPXU', 'UPRO', 'UVXY', 'VXX', 'SVXY', 'SOXL', 'SOXS', 'LABU',
   'LABD', 'FAS', 'FAZ', 'ARKK', 'ARKG', 'ARKF', 'ARKW', 'ARKQ', 'SMH', 'SOXX', 'IGV', 'CIBR',
-  'HACK', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'GOOG', 'META', 'TSLA', 'AVGO', 'ORCL',
-  'AMD', 'INTC', 'QCOM', 'MU', 'AMAT', 'LRCX', 'KLAC', 'MRVL', 'SMCI', 'ARM', 'TXN', 'NXPI',
-  'ADI', 'MCHP', 'ON', 'MPWR', 'CRM', 'ADBE', 'NOW', 'WDAY', 'INTU', 'PLTR', 'AI', 'NET',
-  'SNOW', 'DDOG', 'CRWD', 'ZS', 'PANW', 'OKTA', 'FTNT', 'MDB', 'COIN', 'MSTR', 'HOOD', 'RIOT',
-  'MARA', 'CLSK', 'SOFI', 'UPST', 'AFRM', 'JPM', 'BAC', 'GS', 'MS', 'WFC', 'C', 'V', 'MA',
-  'AXP', 'BLK', 'COF', 'SCHW', 'BX', 'KKR', 'UNH', 'LLY', 'JNJ', 'PFE', 'ABBV', 'MRK', 'TMO',
-  'DHR', 'AMGN', 'GILD', 'ISRG', 'VRTX', 'REGN', 'MRNA', 'HD', 'MCD', 'NKE', 'SBUX', 'WMT',
-  'COST', 'DIS', 'NFLX', 'BKNG', 'ABNB', 'UBER', 'LYFT', 'DASH', 'GM', 'F', 'RIVN', 'XOM',
-  'CVX', 'COP', 'EOG', 'SLB', 'OXY', 'VLO', 'PSX', 'HAL', 'DVN', 'LNG', 'MPC', 'BA', 'CAT',
-  'GE', 'HON', 'RTX', 'LMT', 'NOC', 'GD', 'UNP', 'CSX', 'FDX', 'UPS', 'DE', 'MMM', 'ETN', 'T',
-  'VZ', 'TMUS', 'CMCSA', 'SNAP', 'PINS', 'RDDT', 'MTCH', 'PARA', 'AMT', 'PLD', 'EQIX', 'SPG',
-  'O', 'PSA', 'DLR', 'WELL', 'CCI', 'VICI', 'FCX', 'NEM', 'GOLD', 'AA', 'CLF', 'STLD', 'NUE',
-  'LIN', 'APD', 'ECL', 'ALB', 'SQM',
+  'HACK',
 ];
+
+// Snapshot of S&P 500 membership, used only when the live fetch fails
+const SP500_FALLBACK = [
+  'MMM', 'AOS', 'ABT', 'ABBV', 'ACN', 'ADBE', 'AMD', 'AES', 'AFL', 'A', 'APD', 'ABNB', 'AKAM',
+  'ALB', 'ARE', 'ALGN', 'ALLE', 'LNT', 'ALL', 'GOOGL', 'GOOG', 'MO', 'AMZN', 'AMCR', 'AEE',
+  'AEP', 'AXP', 'AIG', 'AMT', 'AWK', 'AMP', 'AME', 'AMGN', 'APH', 'ADI', 'AON', 'APA', 'APO',
+  'AAPL', 'AMAT', 'APP', 'APTV', 'ACGL', 'ADM', 'ARES', 'ANET', 'AJG', 'AIZ', 'T', 'ATO',
+  'ADSK', 'ADP', 'AZO', 'AVY', 'AXON', 'BKR', 'BALL', 'BAC', 'BAX', 'BDX', 'BRK.B', 'BBY',
+  'TECH', 'BIIB', 'BLK', 'BX', 'XYZ', 'BE', 'BNY', 'BA', 'BKNG', 'BSX', 'BMY', 'AVGO', 'BR',
+  'BRO', 'BF.B', 'BG', 'BXP', 'CHRW', 'CDNS', 'CPT', 'COF', 'CAH', 'CCL', 'CARR', 'CVNA',
+  'CASY', 'CAT', 'CBOE', 'CBRE', 'CDW', 'COR', 'CNC', 'CNP', 'CF', 'CRL', 'SCHW', 'CHTR', 'CVX',
+  'CMG', 'CB', 'CHD', 'CIEN', 'CI', 'CINF', 'CTAS', 'CSCO', 'C', 'CFG', 'CLX', 'CME', 'CMS',
+  'KO', 'CTSH', 'COHR', 'COIN', 'CL', 'CMCSA', 'FIX', 'COP', 'ED', 'STZ', 'CEG', 'COO', 'CPRT',
+  'GLW', 'CPAY', 'CTVA', 'CSGP', 'COST', 'CRH', 'CRWD', 'CCI', 'CSX', 'CMI', 'CVS', 'DHR',
+  'DRI', 'DDOG', 'DVA', 'DECK', 'DE', 'DELL', 'DAL', 'DVN', 'DXCM', 'FANG', 'DLR', 'DG', 'DLTR',
+  'D', 'DPZ', 'DASH', 'DOV', 'DOW', 'DHI', 'DTE', 'DUK', 'DD', 'ETN', 'EBAY', 'ECHO', 'ECL',
+  'EIX', 'EW', 'ELV', 'EME', 'EMR', 'ETR', 'EOG', 'EQT', 'EFX', 'EQIX', 'ERIE', 'ESS', 'EL',
+  'EG', 'EVRG', 'P', 'ES', 'EXC', 'EXE', 'EXPE', 'EXPD', 'EXR', 'XOM', 'FFIV', 'FDS', 'FICO',
+  'FAST', 'FRT', 'FDX', 'FDXF', 'FERG', 'FIS', 'FITB', 'FSLR', 'FE', 'FISV', 'FLEX', 'F',
+  'FTNT', 'FTV', 'FOXA', 'FOX', 'BEN', 'FCX', 'GRMN', 'IT', 'GE', 'GEHC', 'GEV', 'GEN', 'GNRC',
+  'GD', 'GIS', 'GM', 'GPC', 'GILD', 'GPN', 'GL', 'GDDY', 'GS', 'HAL', 'HIG', 'HAS', 'HCA',
+  'DOC', 'HSIC', 'HSY', 'HPE', 'HLT', 'HD', 'HONA', 'HON', 'HRL', 'HST', 'HWM', 'HPQ', 'HUBB',
+  'HUM', 'HBAN', 'HII', 'IBM', 'IEX', 'IDXX', 'ITW', 'ILMN', 'INCY', 'IR', 'PODD', 'INTC',
+  'IBKR', 'ICE', 'IFF', 'IP', 'INTU', 'ISRG', 'IVZ', 'INVH', 'IQV', 'IRM', 'JBHT', 'JBL',
+  'JKHY', 'J', 'JNJ', 'JCI', 'JPM', 'KVUE', 'KDP', 'KEY', 'KEYS', 'KMB', 'KIM', 'KMI', 'KKR',
+  'KLAC', 'KHC', 'KR', 'LHX', 'LH', 'LRCX', 'LVS', 'LDOS', 'LEN', 'LII', 'LLY', 'LIN', 'LYV',
+  'LMT', 'L', 'LOW', 'LULU', 'LITE', 'LYB', 'MTB', 'MPC', 'MAR', 'MRSH', 'MLM', 'MRVL', 'MAS',
+  'MA', 'MKC', 'MCD', 'MCK', 'MDT', 'MRK', 'META', 'MET', 'MTD', 'MGM', 'MCHP', 'MU', 'MSFT',
+  'MAA', 'MRNA', 'MDLZ', 'MPWR', 'MNST', 'MCO', 'MS', 'MOS', 'MSI', 'MSCI', 'NDAQ', 'NTAP',
+  'NFLX', 'NEM', 'NWSA', 'NWS', 'NEE', 'NKE', 'NI', 'NDSN', 'NSC', 'NTRS', 'NOC', 'NCLH', 'NRG',
+  'NUE', 'NVDA', 'NVR', 'NXPI', 'ORLY', 'OXY', 'ODFL', 'OMC', 'ON', 'OKE', 'ORCL', 'OTIS',
+  'PCAR', 'PKG', 'PLTR', 'PANW', 'PSKY', 'PH', 'PAYX', 'PYPL', 'PNR', 'PEP', 'PFE', 'PCG', 'PM',
+  'PSX', 'PNW', 'PNC', 'PPG', 'PPL', 'PFG', 'PG', 'PGR', 'PLD', 'PRU', 'PEG', 'PTC', 'PSA',
+  'PHM', 'PWR', 'QCOM', 'DGX', 'Q', 'RL', 'RJF', 'RDDT', 'RTX', 'O', 'REG', 'REGN', 'RF', 'RSG',
+  'RMD', 'RVTY', 'HOOD', 'ROK', 'ROL', 'ROP', 'ROST', 'RCL', 'SPGI', 'CRM', 'SNDK', 'SBAC',
+  'SLB', 'STX', 'SRE', 'NOW', 'SHW', 'SPG', 'SWKS', 'SJM', 'SW', 'SNA', 'SOLV', 'SO', 'LUV',
+  'SWK', 'SBUX', 'STT', 'STLD', 'STE', 'SYK', 'SMCI', 'SYF', 'SNPS', 'SYY', 'TMUS', 'TROW',
+  'TTWO', 'TPR', 'TRGP', 'TGT', 'TEL', 'TDY', 'TER', 'TSLA', 'TXN', 'TPL', 'TXT', 'TMO', 'TJX',
+  'TKO', 'TSCO', 'TT', 'TDG', 'TRV', 'TRMB', 'TFC', 'TYL', 'TSN', 'USB', 'UBER', 'UDR', 'ULTA',
+  'UNP', 'UAL', 'UPS', 'URI', 'UNH', 'UHS', 'VLO', 'VEEV', 'VTR', 'VLTO', 'VRSN', 'VRSK', 'VZ',
+  'VRTX', 'VRT', 'VTRS', 'VICI', 'V', 'VST', 'VMRK', 'VMC', 'WRB', 'GWW', 'WAB', 'WMT', 'DIS',
+  'WBD', 'WM', 'WAT', 'WEC', 'WFC', 'WELL', 'WST', 'WDC', 'WY', 'WSM', 'WMB', 'WTW', 'WDAY',
+  'WYNN', 'XEL', 'XYL', 'YUM', 'ZBRA', 'ZBH', 'ZTS',
+];
+
+const SP500_CSV = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv';
+
+async function sp500Constituents() {
+  try {
+    const r = await fetch(SP500_CSV, { headers: { 'User-Agent': UA } });
+    if (!r.ok) return { list: SP500_FALLBACK, live: false };
+    const rows = (await r.text()).trim().split('\n').slice(1);
+    const list = rows.map(x => x.split(',')[0].trim()).filter(x => /^[A-Z.]{1,6}$/.test(x));
+    // A truncated or malformed file should not silently shrink the universe
+    return list.length > 400 ? { list, live: true } : { list: SP500_FALLBACK, live: false };
+  } catch { return { list: SP500_FALLBACK, live: false }; }
+}
 
 const FIELDS = [
   'symbol', 'shortName', 'regularMarketPrice', 'regularMarketChangePercent',
@@ -63,15 +114,17 @@ async function getCrumb() {
 export default async function handler(req) {
   const url = new URL(req.url);
   const override = url.searchParams.get('symbols');
-  const symbols = override
-    ? override.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
-    : UNIVERSE;
   // Liquidity floors, because a setup you cannot fill is not a setup
   const minPrice = Number(url.searchParams.get('minPrice')) || 3;
   const minAvgVol = Number(url.searchParams.get('minAvgVol')) || 500000;
 
   try {
     const t0 = Date.now();
+    const sp = override ? null : await sp500Constituents();
+    const symbols = override
+      ? override.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+      : [...new Set([...sp.list, ...ETFS])].sort();
+
     const { cookie, crumb } = await getCrumb();
     if (!crumb) return json({ error: 'Could not obtain Yahoo crumb' }, 502);
     const headers = { 'User-Agent': UA, 'Cookie': cookie, 'Accept': 'application/json' };
@@ -123,6 +176,8 @@ export default async function handler(req) {
       returned: results.length,
       liquid: rows.length,
       marketState,
+      universe: override ? 'custom' : `S&P 500 (${sp.live ? 'live membership' : 'cached snapshot'}) + ${ETFS.length} ETFs`,
+      sp500Live: override ? null : sp.live,
       filters: { minPrice, minAvgVol },
       candidates: rows,
       elapsedMs: Date.now() - t0,

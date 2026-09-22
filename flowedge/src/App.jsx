@@ -7508,10 +7508,11 @@ function StrikeLadderPanel({ symbol: symbolProp, target: targetProp, direction: 
           )}
 
           <div style={{ padding: '8px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 0.45fr 0.75fr 0.6fr 0.6fr 0.6fr', fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.04em', marginBottom: 3 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '0.95fr 0.4fr 0.62fr 0.55fr 0.55fr 0.55fr 0.5fr', fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.04em', marginBottom: 3 }}>
               <span>EXPIRY</span><span>DTE</span><span style={{ textAlign: 'right' }}>EXP MOVE</span>
               <span style={{ textAlign: 'right' }}>{d.target ? 'P(HIT)' : 'IV'}</span>
               <span style={{ textAlign: 'right' }}>STRIKE</span><span style={{ textAlign: 'right' }}>P(PROFIT)</span>
+              <span style={{ textAlign: 'right' }}>ORDERS</span>
             </div>
             {d.ladder.map(r => {
               const pick = r.strikes.find(x => x.strike === r.recommended);
@@ -7519,12 +7520,19 @@ function StrikeLadderPanel({ symbol: symbolProp, target: targetProp, direction: 
               return (
                 <div key={r.expiry}>
                   <div onClick={() => setExpanded(isOpen ? null : r.expiry)} style={{
-                    display: 'grid', gridTemplateColumns: '1fr 0.45fr 0.75fr 0.6fr 0.6fr 0.6fr',
+                    display: 'grid', gridTemplateColumns: '0.95fr 0.4fr 0.62fr 0.55fr 0.55fr 0.55fr 0.5fr',
                     fontSize: 9, fontFamily: 'monospace', padding: '3px 2px', alignItems: 'center', cursor: 'pointer',
                     borderTop: '1px solid rgba(255,255,255,0.03)',
-                    background: isOpen ? 'rgba(99,102,241,0.07)' : 'transparent',
+                    // A day with real resting orders is the one you can actually
+                    // trade, so it is lit rather than merely annotated
+                    background: isOpen ? 'rgba(99,102,241,0.09)'
+                      : r.liquidity.tier === 'deep' ? 'rgba(16,185,129,0.06)'
+                      : r.liquidity.tier === 'thin' ? 'rgba(239,68,68,0.04)' : 'transparent',
+                    opacity: r.liquidity.tier === 'thin' ? 0.55 : 1,
                   }}>
-                    <span style={{ color: '#e5e7eb' }}>{r.expiry.slice(5)}</span>
+                    <span style={{ color: r.expiry === d.earliestReasonableExpiry ? '#fbbf24' : '#e5e7eb', fontWeight: r.expiry === d.earliestReasonableExpiry ? 800 : 400 }}>
+                      {r.expiry === d.earliestReasonableExpiry ? '★ ' : ''}{r.expiry.slice(5)}
+                    </span>
                     <span style={{ color: '#4b5563' }}>{Math.round(r.dte)}d</span>
                     <span style={{ color: '#9ca3af', textAlign: 'right' }}>±{r.expectedMove}</span>
                     <span style={{ textAlign: 'right', color: d.target ? probColor(r.targetProbPct) : '#6b7280' }}>
@@ -7536,24 +7544,36 @@ function StrikeLadderPanel({ symbol: symbolProp, target: targetProp, direction: 
                     <span style={{ textAlign: 'right', color: probColor(pick?.probProfitPct) }}>
                       {pick ? `${pick.probProfitPct}%` : '—'}
                     </span>
+                    <span style={{
+                      textAlign: 'right', fontWeight: 800, fontSize: 8,
+                      color: r.liquidity.tier === 'deep' ? '#10b981' : r.liquidity.tier === 'ok' ? '#f59e0b' : '#ef4444',
+                    }}>{r.liquidity.tier === 'deep' ? 'DEEP' : r.liquidity.tier === 'ok' ? 'OK' : 'THIN'}</span>
                   </div>
 
                   {isOpen && (
                     <div style={{ padding: '6px 4px 8px', background: 'rgba(0,0,0,0.2)', borderRadius: 6, marginBottom: 3 }}>
-                      <div style={{ fontSize: 8.5, color: '#6b7280', fontFamily: 'monospace', marginBottom: 4 }}>
+                      <div style={{ fontSize: 8.5, color: '#6b7280', fontFamily: 'monospace', marginBottom: 3 }}>
                         implied range {r.impliedLow} – {r.impliedHigh} · ATM IV {r.atmIv}%
                         {r.magnets.maxPain != null && ` · max pain ${r.magnets.maxPain} (${r.magnets.maxPainPct >= 0 ? '+' : ''}${r.magnets.maxPainPct}%)`}
                       </div>
-                      <div style={{ display: 'grid', gridTemplateColumns: '0.55fr 0.45fr 0.5fr 0.7fr 0.5fr 0.55fr', fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.04em', marginBottom: 2 }}>
+                      <div style={{
+                        fontSize: 8.5, marginBottom: 5, lineHeight: 1.45,
+                        color: r.liquidity.tier === 'deep' ? '#6ee7b7' : r.liquidity.tier === 'ok' ? '#fbbf24' : '#fca5a5',
+                      }}>
+                        {r.liquidity.note} {r.liquidity.strikesWithSize}/{r.liquidity.strikesTotal} strikes have size resting at the offer, measured {r.liquidity.measuredWithin}.
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '0.5fr 0.38fr 0.45fr 0.62fr 0.42fr 0.5fr 0.62fr', fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.04em', marginBottom: 2 }}>
                         <span>STRIKE</span><span>Δ</span><span style={{ textAlign: 'right' }}>COST</span>
                         <span style={{ textAlign: 'right' }}>BREAKEVEN</span><span style={{ textAlign: 'right' }}>IN EM</span><span style={{ textAlign: 'right' }}>P(PROFIT)</span>
+                        <span style={{ textAlign: 'right' }}>SIZE @ OFFER</span>
                       </div>
                       {r.strikes.map(x => (
-                        <div key={x.strike} style={{
-                          display: 'grid', gridTemplateColumns: '0.55fr 0.45fr 0.5fr 0.7fr 0.5fr 0.55fr',
+                        <div key={x.strike} title={x.liquidityNote} style={{
+                          display: 'grid', gridTemplateColumns: '0.5fr 0.38fr 0.45fr 0.62fr 0.42fr 0.5fr 0.62fr',
                           fontSize: 9, fontFamily: 'monospace', padding: '1px 0',
                           color: x.strike === r.recommended ? '#f9fafb' : '#6b7280',
                           fontWeight: x.strike === r.recommended ? 800 : 400,
+                          opacity: x.fillable ? 1 : 0.5,
                         }}>
                           <span>{x.strike}</span>
                           <span>{Math.abs(x.delta).toFixed(2)}</span>
@@ -7563,6 +7583,10 @@ function StrikeLadderPanel({ symbol: symbolProp, target: targetProp, direction: 
                             {x.breakevenInExpectedMoves}
                           </span>
                           <span style={{ textAlign: 'right', color: probColor(x.probProfitPct) }}>{x.probProfitPct}%</span>
+                          <span style={{
+                            textAlign: 'right',
+                            color: x.liquidity === 'deep' ? '#10b981' : x.liquidity === 'ok' ? '#f59e0b' : '#ef4444',
+                          }}>{x.askSize}×<span style={{ color: '#4b5563' }}> oi {x.oi}</span></span>
                         </div>
                       ))}
                       <div style={{ fontSize: 8.5, color: '#4b5563', marginTop: 5, lineHeight: 1.5 }}>{r.recommendation}</div>
@@ -7959,7 +7983,7 @@ function StockSetupPanel() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
           <div>
             <div style={{ fontSize: 11, fontWeight: 900, color: '#f9fafb' }}>Market Scan</div>
-            <div style={{ fontSize: 9, color: '#4b5563' }}>All 217 optionable names, ranked by relative volume</div>
+            <div style={{ fontSize: 9, color: '#4b5563' }}>{scan ? scan.universe : 'Full S&P 500 + liquid ETFs'}, ranked by relative volume</div>
           </div>
           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             <select value={depth} onChange={e => setDepth(+e.target.value)} disabled={running} style={{
@@ -7977,7 +8001,7 @@ function StockSetupPanel() {
 
         {scan && (
           <div style={{ fontSize: 9, color: '#6b7280', fontFamily: 'monospace' }}>
-            {scan.scanned} scanned · {scan.liquid} liquid · {scan.marketState} · {scan.elapsedMs}ms
+            {scan.scanned} scanned · {scan.liquid} liquid · {scan.marketState} · {scan.elapsedMs}ms{scan.sp500Live === false ? ' · index membership from cached snapshot' : ''}
           </div>
         )}
         {phase === 'deep' && (
