@@ -52,6 +52,21 @@ function parseOcc(sym) {
   };
 }
 
+// Yahoo stamps an option expiry as UTC MIDNIGHT of the expiry date, not the
+// 4pm ET settlement. Used raw, TODAY's expiry computes as ~16 hours in the PAST
+// and was being dropped by the dte >= 0 filter — silently excluding the
+// front expiry, which carries the most gamma of any, from every GEX profile.
+// This maps the date to the actual 4pm ET close, DST included.
+function yahooExpiryToClose(ts) {
+  const d = new Date(ts * 1000);
+  const guess = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 20, 0, 0);
+  // 20:00 UTC is 4pm ET only during EDT; in EST it lands at 3pm, so shift an hour
+  const hourET = Number(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour: 'numeric', hour12: false,
+  }).format(new Date(guess)));
+  return hourET === 16 ? guess : guess + 3600000;
+}
+
 let yahooAuth = null;
 async function getYahooAuth() {
   if (yahooAuth) return yahooAuth;
@@ -85,7 +100,7 @@ async function yahooContracts(symbol, wantExpiries = 3) {
 
   const out = [];
   for (const opt of chains) {
-    const expMs = (opt.expirationDate || 0) * 1000;
+    const expMs = yahooExpiryToClose(opt.expirationDate || 0);
     const dte = Math.max(0.5, (expMs - Date.now()) / 86400000);
     const T = dte / 365;
     const take = (list, isCall) => {
@@ -162,6 +177,11 @@ async function scoreSymbol(symbol) {
   // saturates on a handful of contracts and reads like conviction.
   const atmSpreads = [];
   let atmOi = 0;
+  // Does this name have an expiry TODAY — compared as calendar dates in ET,
+  // because a raw timestamp comparison gets it wrong in both directions
+  const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const isToday = ms => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms)) === todayET;
+  let zeroDte = false, zeroDteOi = 0, zeroDteVol = 0;
 
   for (const p of raw) {
     const o = p;
@@ -174,6 +194,8 @@ async function scoreSymbol(symbol) {
     if (bandPct > 0.30) continue;
     const inGexBand = bandPct <= 0.15;
     const dte = (p.expMs - now) / 86400000;
+    // Expired is expired, but an expiry later TODAY is the most gamma-heavy
+    // contract on the board and must not be filtered out
     if (dte < 0) continue;
     const oi = Number(o.open_interest) || 0;
     const vol = Number(o.volume) || 0;
@@ -202,6 +224,10 @@ async function scoreSymbol(symbol) {
     const d = Math.abs(p.strike - spot) + Math.abs(dte - 7);
     if (iv > 0 && d < atmDist) { atmDist = d; atmIv = iv; }
 
+    if (isToday(p.expMs)) {
+      zeroDte = true;
+      if (Math.abs(p.strike - spot) / spot <= 0.05) { zeroDteOi += oi; zeroDteVol += vol; }
+    }
     if (Math.abs(p.strike - spot) / spot <= 0.05) {
       atmOi += oi;
       if (bid > 0 && ask > 0) atmSpreads.push((ask - bid) / ((bid + ask) / 2) * 100);
@@ -316,6 +342,13 @@ async function scoreSymbol(symbol) {
   const MAX = 5.25;
   return {
     symbol, spot, source,
+    zeroDte: zeroDte ? {
+      available: true,
+      atmOpenInterest: zeroDteOi,
+      atmVolume: zeroDteVol,
+      // A 0DTE chain with no size is a trap, not an opportunity
+      tradeable: zeroDteOi >= 2000,
+    } : { available: false },
     chain: {
       tier: chainTier,
       atmOpenInterest: atmOi,
@@ -367,6 +400,8 @@ export default async function handler(req) {
       rateLimited: out.filter(r => r.error === 'rate limited').length,
       bySource,
       tradeable: ok.filter(r => r.chain.tier !== 'thin').length,
+      withZeroDte: ok.filter(r => r.zeroDte.available).length,
+      zeroDteTradeable: ok.filter(r => r.zeroDte.available && r.zeroDte.tradeable).length,
       results: out,
       elapsedMs: Date.now() - t0,
       note: 'Scored on the same factor weights as /api/stocksignal. Dark pool is the one input CBOE cannot supply, so the confidence ceiling here is 92% rather than 100% — open a symbol for the full read.',
