@@ -7426,6 +7426,163 @@ function CryptoSignalTracker({ current, units, riskDollars }) {
   );
 }
 
+// ─── Options contract picker: which strike, which expiry ────────────────────
+
+function OptionPickPanel({ symbol: symbolProp, target: targetProp, stop: stopProp, direction: dirProp }) {
+  const [symbol, setSymbol] = useState(symbolProp || 'SPY');
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [showExpiries, setShowExpiries] = useState(false);
+
+  const riskPct = (() => { try { return parseFloat(localStorage.getItem('fe_risk_pct') || '1') || 1; } catch { return 1; } })();
+  const acctSize = (() => { try { return parseInt(localStorage.getItem('fe_account_size') || '25000') || 25000; } catch { return 25000; } })();
+  const riskBudget = Math.round(acctSize * (riskPct / 100));
+
+  useEffect(() => { if (symbolProp) setSymbol(symbolProp); }, [symbolProp]);
+
+  const load = useCallback(async (s) => {
+    setLoading(true); setErr(''); setD(null);
+    try {
+      const p = new URLSearchParams({ symbol: s, risk: String(riskBudget) });
+      if (targetProp) p.set('target', String(targetProp));
+      if (stopProp) p.set('stop', String(stopProp));
+      if (dirProp) p.set('dir', dirProp);
+      const r = await fetch(`/api/optionpick?${p}`).then(x => x.json());
+      if (r.error) setErr(r.error); else setD(r);
+    } catch (e) { setErr(e.message); }
+    setLoading(false);
+  }, [riskBudget, targetProp, stopProp, dirProp]);
+
+  useEffect(() => { load(symbol); }, [symbol, load]);
+
+  const money = v => v == null ? '—' : `$${Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Contract Picker</div>
+          <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>Which strike, which expiry — priced and projected to your target</div>
+        </div>
+        <button onClick={() => load(symbol)} disabled={loading} style={{
+          background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: 6,
+          padding: '4px 10px', color: loading ? '#4b5563' : '#a5b4fc', fontSize: 10, fontWeight: 700, cursor: loading ? 'default' : 'pointer',
+        }}>{loading ? '…' : '↻'}</button>
+      </div>
+
+      {!symbolProp && <TickerPicker value={symbol} onChange={setSymbol} />}
+
+      {err && (
+        <div style={{ fontSize: 10, color: '#fca5a5', padding: '8px 11px', borderRadius: 7, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', lineHeight: 1.5 }}>
+          {err}
+        </div>
+      )}
+      {loading && !d && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Pricing the chain…</div>}
+
+      {d && (
+        <>
+          {/* Expiry choice, with the reasoning shown rather than assumed */}
+          <div style={{ padding: '10px 12px', borderRadius: 9, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.25)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 6 }}>
+              <span style={{ fontSize: 14, fontWeight: 900, color: '#a5b4fc' }}>{d.expiry}</span>
+              <span style={{ fontSize: 10, fontFamily: 'monospace', color: '#9ca3af' }}>{d.dte}d · {d.direction} {d.symbol} → {d.target}</span>
+            </div>
+            <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 5, lineHeight: 1.55 }}>{d.expirySelection.reason}</div>
+            <div style={{ fontSize: 8.5, color: '#4b5563', marginTop: 4, fontFamily: 'monospace' }}>
+              spot {d.spot} · target {d.target} · {d.expirySelection.distanceToTarget} away · daily ATR {d.expirySelection.dailyAtr} · ATM IV {d.atmIv}%
+            </div>
+            <button onClick={() => setShowExpiries(v => !v)} style={{
+              marginTop: 6, padding: '2px 8px', borderRadius: 4, fontSize: 8.5, fontWeight: 700, border: 'none',
+              background: 'rgba(255,255,255,0.05)', color: '#6b7280', cursor: 'pointer',
+            }}>{showExpiries ? 'hide' : 'show'} other expiries</button>
+            {showExpiries && (
+              <div style={{ marginTop: 5 }}>
+                {d.expirySelection.alternatives.map(a => (
+                  <div key={a.date} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, fontFamily: 'monospace', padding: '1px 0' }}>
+                    <span style={{ color: a.date === d.expiry ? '#a5b4fc' : '#6b7280', fontWeight: a.date === d.expiry ? 800 : 400 }}>{a.date}</span>
+                    <span style={{ color: a.sufficient ? '#6ee7b7' : '#ef4444' }}>
+                      {a.dte}d {a.sufficient ? '✓ enough time' : '✗ too soon'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Earnings is the single biggest way a correct call still loses */}
+          {d.earningsInWindow && (
+            <div style={{ padding: '8px 11px', borderRadius: 7, background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.25)' }}>
+              <div style={{ fontSize: 9, color: '#fca5a5', fontWeight: 800 }}>EARNINGS {d.earningsInWindow} — INSIDE THIS EXPIRY</div>
+              <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 2, lineHeight: 1.5 }}>
+                Implied vol is elevated into the print and collapses immediately after. A long option can be directionally right and still lose money on the IV crush alone. Spreads are far less exposed to this than a naked long.
+              </div>
+            </div>
+          )}
+
+          {d.structures.map((s, i) => {
+            const isCredit = s.credit != null;
+            const good = s.returnAtTarget != null && s.returnAtTarget > 0;
+            return (
+              <div key={i} style={{ padding: '10px 12px', borderRadius: 9, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 6 }}>
+                  <span style={{ fontSize: 12, fontWeight: 900, color: '#f9fafb' }}>{s.structure}</span>
+                  {s.returnAtTarget != null && (
+                    <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 800, color: good ? '#10b981' : '#ef4444' }}>
+                      {s.returnAtTarget > 0 ? '+' : ''}{s.returnAtTarget}% at target
+                    </span>
+                  )}
+                </div>
+
+                {/* The actual order */}
+                <div style={{ margin: '7px 0', padding: '7px 9px', borderRadius: 7, background: 'rgba(0,0,0,0.3)' }}>
+                  {s.legs.map((l, j) => (
+                    <div key={j} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5, fontFamily: "'Space Mono', monospace", padding: '1px 0' }}>
+                      <span style={{ color: l.action === 'BUY' ? '#6ee7b7' : '#fca5a5', fontWeight: 800 }}>
+                        {l.action} {d.expiry} {l.strike}{s.structure.toLowerCase().includes('put') ? 'P' : 'C'}
+                      </span>
+                      <span style={{ color: '#9ca3af' }}>
+                        ${l.price} <span style={{ color: '#4b5563' }}>Δ{l.delta} · IV {l.iv}%</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
+                  {[[isCredit ? 'CREDIT' : 'DEBIT', money(s.creditPerContract ?? s.costPerContract), '#e5e7eb'],
+                    ['MAX LOSS', money(s.maxLoss), '#ef4444'],
+                    [isCredit ? 'MAX PROFIT' : 'AT TARGET', money(isCredit ? s.maxProfit : s.profitAtTarget), '#10b981']].map(([l, v, c]) => (
+                    <div key={l} style={{ padding: '5px 7px', borderRadius: 6, background: 'rgba(255,255,255,0.03)' }}>
+                      <div style={{ fontSize: 7, color: '#4b5563', letterSpacing: '0.06em' }}>{l}</div>
+                      <div style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 800, color: c }}>{v}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: 'flex', gap: 10, marginTop: 5, fontSize: 8.5, fontFamily: 'monospace', color: '#6b7280', flexWrap: 'wrap' }}>
+                  <span>BE {s.breakeven}</span>
+                  {s.riskReward != null && <span>R:R {s.riskReward}</span>}
+                  {s.thetaPerDay != null && <span style={{ color: s.thetaPerDay < 0 ? '#fca5a5' : '#6ee7b7' }}>theta {s.thetaPerDay}/day</span>}
+                  {s.approxPopPct != null && <span>~{s.approxPopPct}% POP</span>}
+                  {s.suggestedContracts != null && (
+                    <span style={{ color: '#c4b5fd' }}>{s.suggestedContracts} contract{s.suggestedContracts === 1 ? '' : 's'} = {money(s.actualRisk)} risk</span>
+                  )}
+                </div>
+
+                <div style={{ fontSize: 8.5, color: '#374151', marginTop: 5, lineHeight: 1.5 }}>{s.note}</div>
+              </div>
+            );
+          })}
+
+          <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.55 }}>
+            {d.assumption} Prices shown are the offer on what you buy and the bid on what you sell, so the numbers are what you would actually pay rather than mid-market optimism. {d.source}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── Stock setups: scanner, plan, and forward tracking ──────────────────────
 
 const STOCK_SIGNAL_KEY = 'fe_stock_signals';
@@ -7746,6 +7903,13 @@ function StockSetupPanel() {
           <div style={{ fontSize: 9, color: '#374151', marginTop: 5, lineHeight: 1.5 }}>
             Levels in play: {[...d.levels.above.slice().reverse(), ...d.levels.below].map(l => `${fmt(l.price)} ${l.label}`).join(' · ')}
           </div>
+        </div>
+      )}
+
+      {/* Trade it as options, anchored to this exact plan */}
+      {d && s && (
+        <div style={{ padding: '10px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+          <OptionPickPanel symbol={d.symbol} target={s.tp1.price} stop={s.stop} direction={s.direction} />
         </div>
       )}
 
@@ -8460,7 +8624,7 @@ function GexIndependentPanel() {
   );
 }
 
-const TABS = ["Signals", "Setups", "Confluence", "ICT", "ORB", "SMC", "Order Book", "Options Flow", "GEX", "Crypto", "Dark Pool", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
+const TABS = ["Signals", "Setups", "Contracts", "Confluence", "ICT", "ORB", "SMC", "Order Book", "Options Flow", "GEX", "Crypto", "Dark Pool", "Stats", "News", "Journal", "Portfolio", "Alerts", "Gamma", "Perps", "Account"];
 
 export default function App() {
   const isMobile = useIsMobile();
@@ -9024,6 +9188,7 @@ export default function App() {
                 )}
                 {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                 {tab === "Setups" && <StockSetupPanel />}
+                {tab === "Contracts" && <OptionPickPanel />}
                 {tab === "Confluence" && <ConfluencePanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
@@ -9145,6 +9310,7 @@ export default function App() {
                 <div style={{ flex: 1, overflowY: "auto" }}>
                   {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                   {tab === "Setups" && <StockSetupPanel />}
+                  {tab === "Contracts" && <OptionPickPanel />}
                   {tab === "Confluence" && <ConfluencePanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
