@@ -7592,6 +7592,39 @@ function StrikeLadderPanel({ symbol: symbolProp, target: targetProp, direction: 
                           }}>{x.askSize}×<span style={{ color: '#4b5563' }}> oi {x.oi}</span></span>
                         </div>
                       ))}
+                      {/* If it goes above: odds of reaching each level and what
+                          the contract is worth there */}
+                      {r.upside?.levels?.length > 0 && (
+                        <div style={{ marginTop: 7, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                          <div style={{ fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.05em', marginBottom: 3 }}>
+                            IF IT GOES {d.direction === 'LONG' ? 'ABOVE' : 'BELOW'} — P&amp;L PER CONTRACT AT EACH LEVEL
+                          </div>
+                          <div style={{ overflowX: 'auto' }}>
+                            <div style={{ minWidth: 300 }}>
+                              <div style={{ display: 'grid', gridTemplateColumns: `0.72fr 0.62fr 0.62fr repeat(${r.strikes.length}, 1fr)`, fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.04em', marginBottom: 2 }}>
+                                <span>LEVEL</span>
+                                <span style={{ textAlign: 'right' }}>P(TOUCH)</span>
+                                <span style={{ textAlign: 'right' }}>P(END&gt;)</span>
+                                {r.strikes.map(x => <span key={x.strike} style={{ textAlign: 'right' }}>{x.strike}</span>)}
+                              </div>
+                              {r.upside.levels.map(L => (
+                                <div key={L.level} style={{ display: 'grid', gridTemplateColumns: `0.72fr 0.62fr 0.62fr repeat(${r.strikes.length}, 1fr)`, fontSize: 9, fontFamily: 'monospace', padding: '1px 0' }}>
+                                  <span style={{ color: '#d1d5db' }}>{L.level}</span>
+                                  <span style={{ textAlign: 'right', color: '#93c5fd' }}>{L.probTouchPct}%</span>
+                                  <span style={{ textAlign: 'right', color: '#6b7280' }}>{L.probFinishBeyondPct}%</span>
+                                  {L.strikeValues.map(v => (
+                                    <span key={v.strike} style={{ textAlign: 'right', color: v.profit > 0 ? '#6ee7b7' : '#fca5a5' }}>
+                                      {v.profit >= 0 ? '+' : '−'}${Math.abs(v.profit)}
+                                    </span>
+                                  ))}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 8, color: '#374151', marginTop: 4, lineHeight: 1.45 }}>{r.upside.note}</div>
+                        </div>
+                      )}
+
                       <div style={{ fontSize: 8.5, color: '#4b5563', marginTop: 5, lineHeight: 1.5 }}>{r.recommendation}</div>
                     </div>
                   )}

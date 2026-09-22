@@ -44,6 +44,16 @@ function ncdf(x) {
   return x >= 0 ? 1 - p : p;
 }
 
+// Black-Scholes price, used to value a contract IF price reaches a level
+function bsPrice(S, K, T, sigma, isCall, r = 0.04) {
+  if (T <= 0 || sigma <= 0) return isCall ? Math.max(0, S - K) : Math.max(0, K - S);
+  const sq = sigma * Math.sqrt(T);
+  const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / sq;
+  const d2 = d1 - sq;
+  const disc = Math.exp(-r * T);
+  return isCall ? S * ncdf(d1) - K * disc * ncdf(d2) : K * disc * ncdf(-d2) - S * ncdf(-d1);
+}
+
 // Probability spot TOUCHES a level at any point before expiry — a different and
 // usually much larger number than the probability it FINISHES beyond it. This is
 // the relevant one if the plan is to sell into a move rather than hold to the
@@ -227,6 +237,34 @@ export default async function handler(req) {
       // The pick must clear BOTH tests: a breakeven the market's own expected
       // move covers, AND enough resting size to actually trade. Probability
       // alone once recommended a strike with 20 open interest.
+      // ---- If it goes above: what each level is worth, and the odds of getting
+      // there. Value assumes the level is reached with HALF the remaining time
+      // left — touch it in the first hour and the contract is worth more than
+      // this, touch it near the bell and it is worth close to intrinsic.
+      const Thalf = T / 2;
+      const steps = [0.25, 0.5, 0.75, 1.0, 1.5];
+      const levels = steps.map(k => {
+        const level = isCall ? spot + k * expectedMove : spot - k * expectedMove;
+        return {
+          level: +level.toFixed(2),
+          movePct: +((level - spot) / spot * 100).toFixed(2),
+          expectedMoves: k,
+          probTouchPct: +(probTouch(spot, level, T, sigma, isCall) * 100).toFixed(1),
+          probFinishBeyondPct: +(probBeyond(spot, level, T, sigma, isCall) * 100).toFixed(1),
+          // What each candidate strike is worth if price gets there
+          strikeValues: picks.map(pk => {
+            const val = bsPrice(level, pk.strike, Thalf, pk.iv / 100, isCall);
+            const cost = pk.cost / 100;
+            return {
+              strike: pk.strike,
+              value: +(val * 100).toFixed(0),
+              profit: +((val - cost) * 100).toFixed(0),
+              returnPct: cost > 0 ? +(((val - cost) / cost) * 100).toFixed(0) : null,
+            };
+          }),
+        };
+      });
+
       const affordable = picks.filter(p => p.withinExpectedMove && p.fillable);
       const best = affordable.length
         ? affordable.reduce((b, x) => x.probProfitPct > b.probProfitPct ? x : b)
@@ -277,6 +315,10 @@ export default async function handler(req) {
         },
         targetProbPct, targetTouchPct, targetInExpectedMoves,
         strikes: picks,
+        upside: {
+          levels,
+          note: `Levels are measured in this expiry's own expected move (±${expectedMove.toFixed(2)}). Contract values assume the level is reached with half the remaining time left — hit it early and it is worth more, hit it near the bell and it is worth close to intrinsic.`,
+        },
         recommended: best ? best.strike : null,
         recommendation: best
           ? `${best.strike} — breakeven ${best.breakeven} is ${best.breakevenInExpectedMoves} expected moves away, inside what the market prices for this date. ${best.probProfitPct}% chance it finishes profitable, ${best.thetaPerDay} per day of decay. ${best.liquidityNote}.`
