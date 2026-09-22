@@ -7426,7 +7426,191 @@ function CryptoSignalTracker({ current, units, riskDollars }) {
   );
 }
 
+// ─── Strike ladder: which strike, for every expiry ──────────────────────────
+
+function StrikeLadderPanel({ symbol: symbolProp, target: targetProp, direction: dirProp }) {
+  const [symbol, setSymbol] = useState(symbolProp || 'SPY');
+  const [dir, setDir] = useState(dirProp || 'LONG');
+  const [target, setTarget] = useState(targetProp ? String(targetProp) : '');
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(null);
+
+  useEffect(() => { if (symbolProp) setSymbol(symbolProp); }, [symbolProp]);
+  useEffect(() => { if (targetProp) setTarget(String(targetProp)); }, [targetProp]);
+  useEffect(() => { if (dirProp) setDir(dirProp); }, [dirProp]);
+
+  const load = useCallback(async () => {
+    setLoading(true); setErr(''); setD(null);
+    try {
+      const p = new URLSearchParams({ symbol, dir, expiries: '12' });
+      if (target && Number(target) > 0) p.set('target', target);
+      const r = await fetch(`/api/strikeladder?${p}`).then(x => x.json());
+      if (r.error) setErr(r.error); else setD(r);
+    } catch (e) { setErr(e.message); }
+    setLoading(false);
+  }, [symbol, dir, target]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const probColor = p => p == null ? '#4b5563' : p >= 45 ? '#10b981' : p >= 30 ? '#f59e0b' : '#ef4444';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 900, color: '#f9fafb' }}>Strike Ladder</div>
+        <div style={{ fontSize: 10, color: '#4b5563', marginTop: 2 }}>
+          Every expiry, its expected move, and the strike whose breakeven fits inside it
+        </div>
+      </div>
+
+      {!symbolProp && <TickerPicker value={symbol} onChange={setSymbol} />}
+
+      <div style={{ display: 'flex', gap: 5, alignItems: 'center', flexWrap: 'wrap' }}>
+        {['LONG', 'SHORT'].map(x => (
+          <button key={x} onClick={() => setDir(x)} style={{
+            padding: '4px 12px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: dir === x ? (x === 'LONG' ? 'rgba(16,185,129,0.22)' : 'rgba(239,68,68,0.22)') : 'rgba(255,255,255,0.04)',
+            color: dir === x ? (x === 'LONG' ? '#6ee7b7' : '#fca5a5') : '#4b5563',
+          }}>{x === 'LONG' ? 'Calls' : 'Puts'}</button>
+        ))}
+        <input
+          value={target} onChange={e => setTarget(e.target.value)} placeholder="target price"
+          style={{
+            background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 5,
+            padding: '4px 8px', color: '#f9fafb', fontSize: 10, fontFamily: 'monospace', width: 100, outline: 'none',
+          }}
+        />
+        <button onClick={load} disabled={loading} style={{
+          padding: '4px 10px', borderRadius: 5, fontSize: 10, fontWeight: 800, border: 'none',
+          background: 'rgba(99,102,241,0.2)', color: loading ? '#4b5563' : '#a5b4fc', cursor: loading ? 'default' : 'pointer',
+        }}>{loading ? '…' : '↻'}</button>
+      </div>
+
+      {err && <div style={{ fontSize: 10, color: '#fca5a5', padding: '6px 10px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>{err}</div>}
+      {loading && !d && <div style={{ fontSize: 11, color: '#4b5563', padding: 16, textAlign: 'center' }}>Pricing every expiry…</div>}
+
+      {d && (
+        <>
+          {/* Which DATE, which is the decision the ladder actually settles */}
+          {d.expiryAdvice && (
+            <div style={{
+              padding: '10px 12px', borderRadius: 9,
+              background: d.earliestReasonableExpiry ? 'rgba(16,185,129,0.06)' : 'rgba(239,68,68,0.06)',
+              border: `1px solid ${d.earliestReasonableExpiry ? 'rgba(16,185,129,0.25)' : 'rgba(239,68,68,0.25)'}`,
+            }}>
+              <div style={{ fontSize: 9, fontWeight: 900, color: d.earliestReasonableExpiry ? '#6ee7b7' : '#fca5a5', letterSpacing: '0.04em' }}>
+                {d.earliestReasonableExpiry ? `EARLIEST REALISTIC EXPIRY · ${d.earliestReasonableExpiry}` : 'NO EXPIRY GIVES THIS TARGET A FAIR CHANCE'}
+              </div>
+              <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 3, lineHeight: 1.55 }}>{d.expiryAdvice}</div>
+            </div>
+          )}
+
+          <div style={{ padding: '8px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 0.45fr 0.75fr 0.6fr 0.6fr 0.6fr', fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.04em', marginBottom: 3 }}>
+              <span>EXPIRY</span><span>DTE</span><span style={{ textAlign: 'right' }}>EXP MOVE</span>
+              <span style={{ textAlign: 'right' }}>{d.target ? 'P(HIT)' : 'IV'}</span>
+              <span style={{ textAlign: 'right' }}>STRIKE</span><span style={{ textAlign: 'right' }}>P(PROFIT)</span>
+            </div>
+            {d.ladder.map(r => {
+              const pick = r.strikes.find(x => x.strike === r.recommended);
+              const isOpen = expanded === r.expiry;
+              return (
+                <div key={r.expiry}>
+                  <div onClick={() => setExpanded(isOpen ? null : r.expiry)} style={{
+                    display: 'grid', gridTemplateColumns: '1fr 0.45fr 0.75fr 0.6fr 0.6fr 0.6fr',
+                    fontSize: 9, fontFamily: 'monospace', padding: '3px 2px', alignItems: 'center', cursor: 'pointer',
+                    borderTop: '1px solid rgba(255,255,255,0.03)',
+                    background: isOpen ? 'rgba(99,102,241,0.07)' : 'transparent',
+                  }}>
+                    <span style={{ color: '#e5e7eb' }}>{r.expiry.slice(5)}</span>
+                    <span style={{ color: '#4b5563' }}>{Math.round(r.dte)}d</span>
+                    <span style={{ color: '#9ca3af', textAlign: 'right' }}>±{r.expectedMove}</span>
+                    <span style={{ textAlign: 'right', color: d.target ? probColor(r.targetProbPct) : '#6b7280' }}>
+                      {d.target ? `${r.targetProbPct}%` : `${r.atmIv}%`}
+                    </span>
+                    <span style={{ textAlign: 'right', color: r.recommended ? '#c4b5fd' : '#ef4444', fontWeight: 800 }}>
+                      {r.recommended ?? '—'}
+                    </span>
+                    <span style={{ textAlign: 'right', color: probColor(pick?.probProfitPct) }}>
+                      {pick ? `${pick.probProfitPct}%` : '—'}
+                    </span>
+                  </div>
+
+                  {isOpen && (
+                    <div style={{ padding: '6px 4px 8px', background: 'rgba(0,0,0,0.2)', borderRadius: 6, marginBottom: 3 }}>
+                      <div style={{ fontSize: 8.5, color: '#6b7280', fontFamily: 'monospace', marginBottom: 4 }}>
+                        implied range {r.impliedLow} – {r.impliedHigh} · ATM IV {r.atmIv}%
+                        {r.magnets.maxPain != null && ` · max pain ${r.magnets.maxPain} (${r.magnets.maxPainPct >= 0 ? '+' : ''}${r.magnets.maxPainPct}%)`}
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '0.55fr 0.45fr 0.5fr 0.7fr 0.5fr 0.55fr', fontSize: 7, color: '#4b5563', fontWeight: 800, letterSpacing: '0.04em', marginBottom: 2 }}>
+                        <span>STRIKE</span><span>Δ</span><span style={{ textAlign: 'right' }}>COST</span>
+                        <span style={{ textAlign: 'right' }}>BREAKEVEN</span><span style={{ textAlign: 'right' }}>IN EM</span><span style={{ textAlign: 'right' }}>P(PROFIT)</span>
+                      </div>
+                      {r.strikes.map(x => (
+                        <div key={x.strike} style={{
+                          display: 'grid', gridTemplateColumns: '0.55fr 0.45fr 0.5fr 0.7fr 0.5fr 0.55fr',
+                          fontSize: 9, fontFamily: 'monospace', padding: '1px 0',
+                          color: x.strike === r.recommended ? '#f9fafb' : '#6b7280',
+                          fontWeight: x.strike === r.recommended ? 800 : 400,
+                        }}>
+                          <span>{x.strike}</span>
+                          <span>{Math.abs(x.delta).toFixed(2)}</span>
+                          <span style={{ textAlign: 'right' }}>${x.cost}</span>
+                          <span style={{ textAlign: 'right' }}>{x.breakeven}</span>
+                          <span style={{ textAlign: 'right', color: x.withinExpectedMove ? '#6ee7b7' : '#ef4444' }}>
+                            {x.breakevenInExpectedMoves}
+                          </span>
+                          <span style={{ textAlign: 'right', color: probColor(x.probProfitPct) }}>{x.probProfitPct}%</span>
+                        </div>
+                      ))}
+                      <div style={{ fontSize: 8.5, color: '#4b5563', marginTop: 5, lineHeight: 1.5 }}>{r.recommendation}</div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* The part that decides whether any of this makes money */}
+          <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(245,158,11,0.05)', border: '1px solid rgba(245,158,11,0.2)' }}>
+            <div style={{ fontSize: 9, color: '#fbbf24', fontWeight: 800 }}>READ THIS BEFORE USING THE PICKS</div>
+            <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 3, lineHeight: 1.6 }}>
+              Notice that almost every probability of profit is under 50%. That is not a flaw in the picks — it is what paying premium costs, and it is true on every screen anywhere. Options are priced so that buying them is roughly break-even before costs and negative after the spread.
+              <br /><br />
+              So no strike on this table is profitable by itself. What the table actually does is stop you paying for moves the market prices as unlikely: a breakeven beyond 1.0 expected moves is a bet the market gives you worse than one-in-three odds on. Profit has to come from your directional read being better than the market's pricing on the occasions you take it — the ladder just makes sure you are not handing away the premium before your read even gets a chance.
+            </div>
+          </div>
+
+          <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.55 }}>{d.howToRead} {d.source}</div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── Options contract picker: which strike, which expiry ────────────────────
+
+// Container: the ladder answers "which strike, which day"; the builder answers
+// "how do I structure it". Different questions, so they get separate views.
+function OptionsPanel() {
+  const [view, setView] = useState('ladder');
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', gap: 4 }}>
+        {[['ladder', 'Strike ladder — by day'], ['build', 'Structure builder']].map(([k, label]) => (
+          <button key={k} onClick={() => setView(k)} style={{
+            padding: '5px 12px', borderRadius: 6, fontSize: 10, fontWeight: 800, border: 'none', cursor: 'pointer',
+            background: view === k ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.04)',
+            color: view === k ? '#a5b4fc' : '#4b5563',
+          }}>{label}</button>
+        ))}
+      </div>
+      {view === 'ladder' ? <StrikeLadderPanel /> : <OptionPickPanel />}
+    </div>
+  );
+}
 
 function OptionPickPanel({ symbol: symbolProp, target: targetProp, stop: stopProp, direction: dirProp }) {
   const [symbol, setSymbol] = useState(symbolProp || 'SPY');
@@ -7917,9 +8101,14 @@ function StockSetupPanel() {
 
       {/* Trade it as options, anchored to this exact plan */}
       {d && s && (
-        <div style={{ padding: '10px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
-          <OptionPickPanel symbol={d.symbol} target={s.tp1.price} stop={s.stop} direction={s.direction} />
-        </div>
+        <>
+          <div style={{ padding: '10px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+            <StrikeLadderPanel symbol={d.symbol} target={s.tp1.price} direction={s.direction} />
+          </div>
+          <div style={{ padding: '10px 11px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+            <OptionPickPanel symbol={d.symbol} target={s.tp1.price} stop={s.stop} direction={s.direction} />
+          </div>
+        </>
       )}
 
       {/* Forward record */}
@@ -9197,7 +9386,7 @@ export default function App() {
                 )}
                 {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                 {tab === "Setups" && <StockSetupPanel />}
-                {tab === "Contracts" && <OptionPickPanel />}
+                {tab === "Contracts" && <OptionsPanel />}
                 {tab === "Confluence" && <ConfluencePanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
@@ -9319,7 +9508,7 @@ export default function App() {
                 <div style={{ flex: 1, overflowY: "auto" }}>
                   {tab === "Signals" && <SignalsPanel scanResults={scanResults} scanning={scanning} scanProgress={scanProgress} watchlist={watchlist} onRescan={() => { scanResultsRef.current = {}; setScanResults({}); triggerScan(true); }} vixVal={vixVal} sectorData={sectorData} commodities={commodities} forexData={forexData} onTrade={brokerConnected ? (sym, price, side) => setTradeTarget({ symbol: sym, price, side }) : null} />}
                   {tab === "Setups" && <StockSetupPanel />}
-                  {tab === "Contracts" && <OptionPickPanel />}
+                  {tab === "Contracts" && <OptionsPanel />}
                   {tab === "Confluence" && <ConfluencePanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                 {tab === "ICT" && <ICTPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
                   {tab === "ORB" && <ORBPanel onChart={sym => setChartSymbol(sym)} livePrices={livePrices} />}
