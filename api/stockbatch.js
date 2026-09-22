@@ -34,13 +34,6 @@ export const config = { runtime: 'edge' };
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
 const CBOE = 'https://cdn.cboe.com/api/global/delayed_quotes/options/';
 
-// Yahoo is the fallback when CBOE rate-limits, and it is a good one for breadth:
-// measured at 30 chains in 592ms with every response a 200, and 30KB per chain
-// against CBOE's 790KB — 26x smaller. What it costs is depth. Yahoo returns one
-// expiry per request and carries no reliable bid/ask, so the call-premium factor
-// is unavailable and the GEX profile is front-expiry only. That is a real
-// quality drop, so rows say which source produced them and the confidence
-// ceiling falls accordingly rather than pretending parity.
 const npdf = x => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 function bsGamma(S, K, T, sigma, r = 0.04) {
   if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) return 0;
