@@ -7444,7 +7444,7 @@ function OptionPickPanel({ symbol: symbolProp, target: targetProp, stop: stopPro
   const load = useCallback(async (s) => {
     setLoading(true); setErr(''); setD(null);
     try {
-      const p = new URLSearchParams({ symbol: s, risk: String(riskBudget) });
+      const p = new URLSearchParams({ symbol: s, risk: String(riskBudget), riskPct: String(riskPct) });
       if (targetProp) p.set('target', String(targetProp));
       if (stopProp) p.set('stop', String(stopProp));
       if (dirProp) p.set('dir', dirProp);
@@ -7452,7 +7452,7 @@ function OptionPickPanel({ symbol: symbolProp, target: targetProp, stop: stopPro
       if (r.error) setErr(r.error); else setD(r);
     } catch (e) { setErr(e.message); }
     setLoading(false);
-  }, [riskBudget, targetProp, stopProp, dirProp]);
+  }, [riskBudget, riskPct, targetProp, stopProp, dirProp]);
 
   useEffect(() => { load(symbol); }, [symbol, load]);
 
@@ -7564,18 +7564,27 @@ function OptionPickPanel({ symbol: symbolProp, target: targetProp, stop: stopPro
                   {s.riskReward != null && <span>R:R {s.riskReward}</span>}
                   {s.thetaPerDay != null && <span style={{ color: s.thetaPerDay < 0 ? '#fca5a5' : '#6ee7b7' }}>theta {s.thetaPerDay}/day</span>}
                   {s.approxPopPct != null && <span>~{s.approxPopPct}% POP</span>}
-                  {s.suggestedContracts != null && (
+                  {s.suggestedContracts > 0 && (
                     <span style={{ color: '#c4b5fd' }}>{s.suggestedContracts} contract{s.suggestedContracts === 1 ? '' : 's'} = {money(s.actualRisk)} risk</span>
                   )}
                 </div>
 
+                {s.sizingNote && (
+                  <div style={{ fontSize: 8.5, color: '#fbbf24', marginTop: 4, lineHeight: 1.5 }}>{s.sizingNote}</div>
+                )}
                 <div style={{ fontSize: 8.5, color: '#374151', marginTop: 5, lineHeight: 1.5 }}>{s.note}</div>
               </div>
             );
           })}
 
+          {d.creditSkipped && (
+            <div style={{ fontSize: 9, color: '#6b7280', padding: '7px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', lineHeight: 1.5 }}>
+              <span style={{ color: '#4b5563', fontWeight: 800 }}>NO CREDIT SPREAD · </span>{d.creditSkipped}
+            </div>
+          )}
+
           <div style={{ fontSize: 9, color: '#374151', lineHeight: 1.55 }}>
-            {d.assumption} Prices shown are the offer on what you buy and the bid on what you sell, so the numbers are what you would actually pay rather than mid-market optimism. {d.source}
+            {d.quoteNote} {d.assumption}
           </div>
         </>
       )}
