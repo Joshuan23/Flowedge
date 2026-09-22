@@ -78,8 +78,10 @@ export default async function handler(req) {
     let maxAvailable = 0;
     const avail = (w, present) => { if (present) maxAvailable += w; };
 
-    // Dealer positioning is the anchor read, the way open interest is in crypto
-    const bias = Number(gam.biasScore);
+    // Dealer positioning is the anchor read, the way open interest is in crypto.
+    // gamma.js now returns null when its chain does not straddle spot, so a
+    // truncated feed drops the factor rather than scoring a phantom -1.00.
+    const bias = gam.biasScore == null ? NaN : Number(gam.biasScore);
     avail(2.0, Number.isFinite(bias));
     if (Number.isFinite(bias) && Math.abs(bias) > 0.05) {
       add(`Dealer GEX bias ${bias > 0 ? '+' : ''}${bias.toFixed(2)}`, bias * 2,
@@ -158,11 +160,13 @@ export default async function handler(req) {
     };
     const tag = (label, confirmed) => confirmed ? `${label} ✓confirmed` : label;
 
+    // Prefer whichever chain actually straddles spot for the option levels
+    const lv = gam.chainSpansSpot === false && gex2 && !gex2.error ? gex2 : gam;
     const entries = [
-      [gam.callWall,  tag('call wall', confirmedWalls.callWall)],
-      [gam.putWall,   tag('put wall', confirmedWalls.putWall)],
-      [gam.gammaWall, tag('gamma wall', confirmedWalls.gammaWall)],
-      [gam.flipLevel, tag('gamma flip', confirmedWalls.flipLevel)],
+      [lv.callWall,  tag('call wall', confirmedWalls.callWall)],
+      [lv.putWall,   tag('put wall', confirmedWalls.putWall)],
+      [lv.gammaWall, tag('gamma wall', confirmedWalls.gammaWall)],
+      [lv.flipLevel, tag('gamma flip', confirmedWalls.flipLevel)],
       [gam.buyKingNode?.strike,  'buy king node'],
       [gam.sellKingNode?.strike, 'sell king node'],
       [swingHigh, '20d swing high'],
@@ -198,7 +202,10 @@ export default async function handler(req) {
         darkPool: !!dpLevel,
         secondGex: !!gex2 && !gex2.error,
         structure: swingHigh != null,
-        note: flow?.totals?.pcVolume == null
+        chainSpansSpot: gam.chainSpansSpot !== false,
+        note: gam.chainSpansSpot === false
+          ? `The NASDAQ chain for ${symbol} only covers strikes ${gam.strikeRange?.[0]}-${gam.strikeRange?.[1]} against a spot of ${spot} — it does not straddle price, so the dealer-bias factor is unavailable and levels come from the Yahoo chain instead.`
+          : flow?.totals?.pcVolume == null
           ? `Option volume is zero — outside market hours the flow factors cannot fire, capping confluence at ${confidenceCeiling}%.`
           : (!gex2 || gex2.error)
             ? 'Second GEX source unavailable, so no level could be cross-confirmed this run.'

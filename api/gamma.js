@@ -204,9 +204,18 @@ export default async function handler(req) {
       .sort((a, b) => b.score - a.score)[0] ?? null;
     if (buyKingNode) buyKingNode.distancePct = +((buyKingNode.strike - spot) / spot * 100).toFixed(2);
     if (sellKingNode) sellKingNode.distancePct = +((spot - sellKingNode.strike) / spot * 100).toFixed(2);
-    // Normalised bias: +1 fully bullish, -1 fully bearish
+    // A chain that does not straddle spot cannot produce a bias, and must not
+    // pretend to. NASDAQ returns MU strikes only up to 995 against a spot of
+    // 1076 — no strikes above spot at all, even at limit=2000 — which left
+    // buyKingNode null and collapsed the formula to exactly -1.00, reading as
+    // maximum bearish conviction when it was really an absent half of a chain.
+    const hasAbove = gexByStrike.some(x => x.strike > spot);
+    const hasBelow = gexByStrike.some(x => x.strike < spot);
+    const chainSpansSpot = hasAbove && hasBelow;
     const totalScore = (buyKingNode?.score ?? 0) + (sellKingNode?.score ?? 0);
-    const biasScore = totalScore > 0 ? ((buyKingNode?.score ?? 0) - (sellKingNode?.score ?? 0)) / totalScore : 0;
+    const biasScore = !chainSpansSpot ? null
+      : totalScore > 0 ? ((buyKingNode?.score ?? 0) - (sellKingNode?.score ?? 0)) / totalScore
+      : 0;
 
     // Heatmap: per-(strike, expiry) GEX, independent of expiry filter
     const heatRaw = {};
@@ -248,6 +257,8 @@ export default async function handler(req) {
       totalCallVol, totalPutVol, pcVolumeRatio,
       availableExpiries, impliedVol: parseFloat((sigma * 100).toFixed(1)),
       gexByStrike, buyKingNode, sellKingNode, biasScore, heatmap, atr14,
+      chainSpansSpot,
+      strikeRange: gexByStrike.length ? [gexByStrike[0].strike, gexByStrike[gexByStrike.length - 1].strike] : null,
     }), {
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
     });
