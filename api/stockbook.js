@@ -83,11 +83,25 @@ export default async function handler(req) {
     const mid     = bid && ask ? (bid + ask) / 2 : last;
     const spread  = bid && ask ? ask - bid : null;
 
-    // Away from the open, exchanges leave stale one-lot quotes behind that can
-    // sit dollars wide. Flag that rather than presenting it as a live market.
+    // Two independent ways a quote is unusable, and the second one is the
+    // dangerous one because it LOOKS fine.
+    //   1. Wide or out of hours — obvious.
+    //   2. The quote does not bracket the last trade. Measured mid-session,
+    //      Yahoo returned QQQ bid 717.24 / ask 717.49 against a last of 744.08
+    //      — 27 points adrift, yet only 3.5bps wide, so a spread-width check
+    //      passed it straight through. If the market is real, last sits between
+    //      bid and ask.
     const marketState = q.marketState || 'UNKNOWN';
     const spreadBps = spread != null && mid ? (spread / mid) * 10000 : null;
-    const quoteStale = marketState !== 'REGULAR' || (spreadBps != null && spreadBps > 100);
+    const bracketsLast = bid != null && ask != null && last != null
+      ? last >= bid * 0.995 && last <= ask * 1.005
+      : false;
+    const quoteStale = marketState !== 'REGULAR'
+      || (spreadBps != null && spreadBps > 100)
+      || !bracketsLast;
+    const quoteProblem = !bracketsLast && marketState === 'REGULAR'
+      ? `Quote does not bracket the last trade (bid ${bid}, ask ${ask}, last ${last}) — the feed is publishing a stale or wrong book, so these sizes mean nothing.`
+      : null;
 
     // Top-of-book size imbalance: -100 (all offered) .. +100 (all bid)
     const totLots = bidLots + askLots;
@@ -121,6 +135,7 @@ export default async function handler(req) {
       bidNotional: bid ? bid * bidLots * 100 : 0,
       askNotional: ask ? ask * askLots * 100 : 0,
       imbalance,
+      quoteProblem,
       prevClose: Number(q.regularMarketPreviousClose) || null,
       dayHigh: Number(q.regularMarketDayHigh) || null,
       dayLow: Number(q.regularMarketDayLow) || null,
@@ -128,6 +143,9 @@ export default async function handler(req) {
       exchange: q.fullExchangeName || q.exchange || null,
       delayedBy: q.exchangeDataDelayedBy ?? null,
       prints: prints.slice(0, 30),
+      tapeAvailable: prints.length > 0,
+      tapeNote: prints.length > 0 ? null
+        : 'No prints. Verified mid-session at 11:56 ET: NASDAQ\'s realtime-trades endpoint returns totalRecords 0 for SPY, QQQ and AAPL alike, so this is the feed being empty rather than the market being quiet. There is no free stock tape behind this — treat the trade-flow half of this panel as unavailable, not as zero activity.',
       tape: {
         buyVol, sellVol, midVol,
         // Share of classified volume that lifted the offer
