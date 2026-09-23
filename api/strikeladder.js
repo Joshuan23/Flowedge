@@ -33,26 +33,7 @@ export const config = { runtime: 'edge' };
 // Magnets per expiry — max pain and the largest open-interest strikes — are
 // shown because they are where dealer hedging concentrates into that date.
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
-const CBOE = 'https://cdn.cboe.com/api/global/delayed_quotes/options/';
-
-const npdf = x => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
-function ncdf(x) {
-  const t = 1 / (1 + 0.2316419 * Math.abs(x));
-  const d = npdf(x);
-  const p = d * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
-  return x >= 0 ? 1 - p : p;
-}
-
-// Black-Scholes price, used to value a contract IF price reaches a level
-function bsPrice(S, K, T, sigma, isCall, r = 0.04) {
-  if (T <= 0 || sigma <= 0) return isCall ? Math.max(0, S - K) : Math.max(0, K - S);
-  const sq = sigma * Math.sqrt(T);
-  const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / sq;
-  const d2 = d1 - sq;
-  const disc = Math.exp(-r * T);
-  return isCall ? S * ncdf(d1) - K * disc * ncdf(d2) : K * disc * ncdf(-d2) - S * ncdf(-d1);
-}
+import { getChain, bsPrice, ncdf, npdf } from './_chains.js';
 
 // Probability spot TOUCHES a level at any point before expiry — a different and
 // usually much larger number than the probability it FINISHES beyond it. This is
@@ -83,41 +64,6 @@ function probBeyond(S, level, T, sigma, above, r = 0.04) {
   return above ? ncdf(d2) : ncdf(-d2);
 }
 
-// CBOE's delayed-quote feed can freeze. Measured 2026-09-23: every symbol's
-// file was stamped 03:00-04:00 while the market was open at 09:50 ET — ten
-// hours stale, with SLV 4.11% adrift from its live price. Nothing downstream
-// can detect that on its own, because a stale chain is internally consistent:
-// the strikes, greeks and probabilities all agree with a price that is simply
-// wrong. So the snapshot is cross-checked against a live quote before use.
-async function checkFreshness(symbol, cboeSpot, cboeTimestamp) {
-  try {
-    const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1m&range=1d`,
-      { headers: { 'User-Agent': UA } });
-    if (!r.ok) return { checked: false };
-    const meta = (await r.json())?.chart?.result?.[0]?.meta;
-    const live = Number(meta?.regularMarketPrice);
-    if (!live) return { checked: false };
-    const driftPct = (cboeSpot - live) / live * 100;
-    const ageMin = cboeTimestamp
-      ? (Date.now() - new Date(String(cboeTimestamp).replace(' ', 'T') + 'Z').getTime()) / 60000
-      : null;
-    return {
-      checked: true, livePrice: live, driftPct: +driftPct.toFixed(2),
-      ageMinutes: ageMin != null ? Math.round(ageMin) : null,
-      stale: Math.abs(driftPct) > 0.3,
-    };
-  } catch { return { checked: false }; }
-}
-
-function parseOcc(sym) {
-  const m = /^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(sym || '');
-  if (!m) return null;
-  return {
-    expMs: Date.UTC(2000 + Number(m[2]), Number(m[3]) - 1, Number(m[4]), 20, 0, 0),
-    isCall: m[5] === 'C',
-    strike: Number(m[6]) / 1000,
-  };
-}
 
 export default async function handler(req) {
   const u = new URL(req.url);
@@ -128,37 +74,18 @@ export default async function handler(req) {
   const target = Number(u.searchParams.get('target')) || null;
 
   try {
-    const res = await fetch(`${CBOE}${symbol}.json`, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
-    if (!res.ok) return json({ error: `CBOE HTTP ${res.status} — no chain for ${symbol}`, symbol }, res.status);
-    const data = await res.json();
-    const spot = Number(data?.data?.current_price) || null;
-    const raw = data?.data?.options || [];
-    if (!spot || !raw.length) return json({ error: `No chain data for ${symbol}`, symbol }, 404);
-
-    const freshness = await checkFreshness(symbol, spot, data?.timestamp);
-    if (freshness.stale) {
-      return json({
-        error: `Chain data is stale — CBOE has ${symbol} at ${spot} but it is trading at ${freshness.livePrice} (${freshness.driftPct > 0 ? '+' : ''}${freshness.driftPct}% adrift, snapshot ${freshness.ageMinutes} minutes old). Every strike distance and probability derived from it would be wrong, so nothing is returned rather than something confidently incorrect.`,
-        symbol, cboeSpot: spot, livePrice: freshness.livePrice, driftPct: freshness.driftPct,
-        ageMinutes: freshness.ageMinutes, stale: true,
-      }, 503);
-    }
+    const chain = await getChain(symbol, 12);
+    if (!chain) return json({ error: `No option chain available for ${symbol} from any source`, symbol }, 503);
+    const spot = chain.spot;
+    const raw = chain.contracts;
+    if (!spot || !raw.length) return json({ error: `No quoted contracts for ${symbol}`, symbol }, 404);
 
     const now = Date.now();
     const byExp = new Map();
-    for (const o of raw) {
-      const p = parseOcc(o.option);
-      if (!p) continue;
-      const bid = Number(o.bid) || 0, ask = Number(o.ask) || 0;
-      if (bid <= 0 || ask <= 0) continue;                    // real markets only
-      if (Math.abs(p.strike - spot) / spot > 0.30) continue;
-      if (!byExp.has(p.expMs)) byExp.set(p.expMs, []);
-      byExp.get(p.expMs).push({
-        ...p, bid, ask, mid: (bid + ask) / 2,
-        bidSize: Number(o.bid_size) || 0, askSize: Number(o.ask_size) || 0,
-        iv: Number(o.iv) || 0, delta: Number(o.delta) || 0, theta: Number(o.theta) || 0,
-        oi: Number(o.open_interest) || 0, volume: Number(o.volume) || 0,
-      });
+    for (const c of raw) {
+      if (Math.abs(c.strike - spot) / spot > 0.30) continue;
+      if (!byExp.has(c.expMs)) byExp.set(c.expMs, []);
+      byExp.get(c.expMs).push(c);
     }
 
     const expiries = [...byExp.entries()]
@@ -244,16 +171,20 @@ export default async function handler(req) {
           // Can you actually get filled here, and at what cost in slippage
           ...(() => {
             const spreadPct = (c.ask - c.bid) / c.mid * 100;
-            const deep = c.askSize >= 25 && c.oi >= 250 && spreadPct <= 3;
-            const ok   = c.askSize >= 10 && c.oi >= 50  && spreadPct <= 8;
+            // Yahoo publishes no size at the touch. Treating that 0 as "no
+            // liquidity" would mark every contract unfillable on the fallback
+            // path, so open interest and spread carry the judgement there.
+            const sizeOk = c.sizeUnknown ? c.oi >= 1000 : c.askSize >= 25;
+            const sizeMin = c.sizeUnknown ? c.oi >= 250 : c.askSize >= 10;
+            const deep = sizeOk && c.oi >= 250 && spreadPct <= 3;
+            const ok   = sizeMin && c.oi >= 50  && spreadPct <= 8;
             return {
               fillable: deep || ok,
               liquidity: deep ? 'deep' : ok ? 'ok' : 'thin',
-              liquidityNote: deep
-                ? `${c.askSize} contracts at the offer, ${c.oi} open interest, ${spreadPct.toFixed(1)}% spread — fills at the quote`
-                : ok
-                  ? `${c.askSize} at the offer, ${c.oi} open interest, ${spreadPct.toFixed(1)}% spread — workable, use a limit`
-                  : `only ${c.askSize} at the offer, ${c.oi} open interest, ${spreadPct.toFixed(1)}% spread — you will pay up or not get filled`,
+              liquidityNote: (c.sizeUnknown
+                ? `${c.oi} open interest, ${c.volume} traded, ${spreadPct.toFixed(1)}% spread (size at the touch not published by this source)`
+                : `${c.askSize} at the offer, ${c.oi} open interest, ${spreadPct.toFixed(1)}% spread`)
+                + (deep ? ' — fills at the quote' : ok ? ' — workable, use a limit' : ' — you will pay up or not get filled'),
             };
           })(),
           breakeven: +breakeven.toFixed(2),
@@ -316,7 +247,7 @@ export default async function handler(req) {
       const sideSpreads = liqSample.map(c => (c.ask - c.bid) / c.mid * 100);
       const medSpread = +med(sideSpreads).toFixed(1);
       const medOi = med(liqSample.map(c => c.oi));
-      const sized = liqSample.filter(c => c.askSize >= 10).length;
+      const sized = liqSample.filter(c => c.sizeUnknown ? c.oi >= 250 : c.askSize >= 10).length;
       const dayLiquidity = (medOi >= 250 && medSpread <= 3) ? 'deep'
         : (medOi >= 50 && medSpread <= 8) ? 'ok' : 'thin';
 
@@ -379,8 +310,11 @@ export default async function handler(req) {
 
     return json({
       symbol, spot, direction: dir, target,
-      cboeTimestamp: data?.timestamp || null,
-      freshness,
+      source: chain.source,
+      degraded: !!chain.degraded,
+      sourceNote: chain.note || null,
+      livePrice: chain.livePrice ?? null,
+      cboeTimestamp: chain.timestamp || null,
       earliestReasonableExpiry,
       expiryAdvice,
       expiryCount: rows.length,
@@ -388,7 +322,7 @@ export default async function handler(req) {
       probabilityGuide: 'Two different probabilities are reported per strike. probTouchStrikePct is the chance price REACHES that strike at any point before expiry — the number that matters if you intend to sell into a move. probItmPct is the chance it is still beyond the strike at the bell, and probProfitPct the chance it is beyond your BREAKEVEN then. Touch is always the largest and, near the money, runs close to double the finish probability. Selling a touch and holding to expiry are different trades with materially different odds.',
       howToRead: 'For each date: expected move is that expiry\'s own implied 1-standard-deviation range, so roughly a 2-in-3 chance price lands inside it. A strike is only listed as recommended when its BREAKEVEN — not its strike — sits inside that range. Probability of profit is risk-neutral N(d2) from the same implied vol: the market\'s own odds, carrying no view of its own.',
       caveat: 'These are the market\'s implied odds, not a forecast, and they already include the premium you pay. No strike is reliably profitable on its own — profitability comes from taking these only when your directional read disagrees with the market\'s pricing, and sizing so the losers do not compound.',
-      source: `CBOE delayed quotes, live two-sided markets, ${data?.timestamp || 'n/a'}`,
+      dataSource: chain.source === 'cboe' ? `CBOE delayed quotes, ${chain.timestamp}` : 'Yahoo live chain, implied vol and greeks solved from each contract mid',
       ts: Date.now(),
     });
   } catch (e) {

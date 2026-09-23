@@ -27,35 +27,9 @@ export const config = { runtime: 'edge' };
 // when IV collapses — which is exactly what happens after earnings — so the
 // response flags any expiry that spans an earnings date.
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
-const CBOE = 'https://cdn.cboe.com/api/global/delayed_quotes/options/';
+import { getChain, bsPrice, bsGreeks, ncdf, npdf } from './_chains.js';
 
 // SPY261231C00631000 -> { expiry, isCall, strike }
-// CBOE's delayed-quote feed can freeze. Measured 2026-09-23: every symbol's
-// file was stamped 03:00-04:00 while the market was open at 09:50 ET — ten
-// hours stale, with SLV 4.11% adrift from its live price. Nothing downstream
-// can detect that on its own, because a stale chain is internally consistent:
-// the strikes, greeks and probabilities all agree with a price that is simply
-// wrong. So the snapshot is cross-checked against a live quote before use.
-async function checkFreshness(symbol, cboeSpot, cboeTimestamp) {
-  try {
-    const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1m&range=1d`,
-      { headers: { 'User-Agent': UA } });
-    if (!r.ok) return { checked: false };
-    const meta = (await r.json())?.chart?.result?.[0]?.meta;
-    const live = Number(meta?.regularMarketPrice);
-    if (!live) return { checked: false };
-    const driftPct = (cboeSpot - live) / live * 100;
-    const ageMin = cboeTimestamp
-      ? (Date.now() - new Date(String(cboeTimestamp).replace(' ', 'T') + 'Z').getTime()) / 60000
-      : null;
-    return {
-      checked: true, livePrice: live, driftPct: +driftPct.toFixed(2),
-      ageMinutes: ageMin != null ? Math.round(ageMin) : null,
-      stale: Math.abs(driftPct) > 0.3,
-    };
-  } catch { return { checked: false }; }
-}
 
 function parseOccSymbol(sym) {
   const m = /^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(sym || '');
@@ -65,15 +39,6 @@ function parseOccSymbol(sym) {
     isCall: m[5] === 'C',
     strike: Number(m[6]) / 1000,
   };
-}
-
-// ---- Black-Scholes ---------------------------------------------------------
-const npdf = x => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
-function ncdf(x) {
-  const t = 1 / (1 + 0.2316419 * Math.abs(x));
-  const d = npdf(x);
-  const p = d * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
-  return x >= 0 ? 1 - p : p;
 }
 
 function bs(S, K, T, sigma, isCall, r = 0.04) {
@@ -105,24 +70,13 @@ export default async function handler(req) {
   const riskPctOf = Number(u.searchParams.get('riskPct')) || null;
 
   try {
-    const [sigRes, cboeRes] = await Promise.all([
+    const [sigRes, chain] = await Promise.all([
       fetch(`${u.origin}/api/stocksignal?symbol=${symbol}`).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`${CBOE}${symbol}.json`, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } }),
+      getChain(symbol, 10),
     ]);
-    if (!cboeRes.ok) return json({ error: `CBOE HTTP ${cboeRes.status} — no chain for ${symbol}`, symbol }, cboeRes.status);
-    const cboe = await cboeRes.json();
-    const rawOptions = cboe?.data?.options || [];
-    const spot = Number(cboe?.data?.current_price) || null;
-    if (!spot || !rawOptions.length) return json({ error: `No chain data for ${symbol}`, symbol }, 404);
-
-    const freshness = await checkFreshness(symbol, spot, cboe?.timestamp);
-    if (freshness.stale) {
-      return json({
-        error: `Chain data is stale — CBOE has ${symbol} at ${spot} but it is trading at ${freshness.livePrice} (${freshness.driftPct > 0 ? '+' : ''}${freshness.driftPct}% adrift, snapshot ${freshness.ageMinutes} minutes old). Contract prices and greeks from it would be wrong, so nothing is returned.`,
-        symbol, cboeSpot: spot, livePrice: freshness.livePrice, driftPct: freshness.driftPct,
-        ageMinutes: freshness.ageMinutes, stale: true,
-      }, 503);
-    }
+    if (!chain) return json({ error: `No option chain available for ${symbol} from any source`, symbol }, 503);
+    const spot = chain.spot;
+    if (!spot) return json({ error: 'No spot price', symbol }, 404);
 
     const setup = sigRes?.setup || null;
     const direction = (dirParam || setup?.direction || sigRes?.direction || 'LONG').toUpperCase();
@@ -146,21 +100,7 @@ export default async function handler(req) {
     const now = Date.now();
 
     // Parse once, keep only quoted contracts in a sane strike band
-    const parsed = [];
-    for (const o of rawOptions) {
-      const p = parseOccSymbol(o.option);
-      if (!p) continue;
-      const bid = Number(o.bid) || 0, ask = Number(o.ask) || 0;
-      if (bid <= 0 || ask <= 0) continue;            // real markets only
-      if (Math.abs(p.strike - spot) / spot > 0.25) continue;
-      parsed.push({
-        ...p, bid, ask,
-        bidSize: Number(o.bid_size) || 0, askSize: Number(o.ask_size) || 0,
-        iv: Number(o.iv) || 0,
-        delta: Number(o.delta) || 0, theta: Number(o.theta) || 0, vega: Number(o.vega) || 0,
-        oi: Number(o.open_interest) || 0, volume: Number(o.volume) || 0,
-      });
-    }
+    const parsed = chain.contracts.filter(c => Math.abs(c.strike - spot) / spot <= 0.25);
     if (!parsed.length) return json({ error: `No quoted contracts near the money for ${symbol}`, symbol, spot }, 422);
 
     const expirySet = [...new Set(parsed.map(p => p.expMs))].sort((a, b) => a - b)
@@ -324,9 +264,13 @@ export default async function handler(req) {
     return json({
       symbol, spot, direction, target, stop,
       quoteQuality,
-      cboeTimestamp: cboe?.timestamp || null,
+      source: chain.source,
+      degraded: !!chain.degraded,
+      sourceNote: chain.note || null,
+      livePrice: chain.livePrice ?? null,
+      cboeTimestamp: chain.timestamp || null,
       creditSkipped,
-      quoteNote: `Live two-sided quotes on all ${quotedCount} contracts, CBOE timestamp ${cboe?.timestamp || 'n/a'}. Buys priced at the ask and sells at the bid — what you would actually pay, not mid-market optimism.`,
+      quoteNote: `Live two-sided quotes on all ${quotedCount} contracts from ${chain.source === 'cboe' ? `CBOE (${chain.timestamp})` : 'the live Yahoo chain'}. Buys priced at the ask and sells at the bid — what you would actually pay, not mid-market optimism.`,
       expiry: new Date(chosen.ts).toISOString().slice(0, 10),
       dte: +chosen.dte.toFixed(1),
       expirySelection: {
@@ -341,7 +285,9 @@ export default async function handler(req) {
       atmIv: atm?.iv ?? null,
       structures,
       assumption: 'Value at target assumes implied vol is UNCHANGED and the move arrives in about ' + arriveDays.toFixed(1) + ' days. Both are estimates: a correct directional call can still lose money if IV collapses, which is what typically happens right after earnings.',
-      source: 'Yahoo option chain. Implied vol solved from each contract mid by bisection rather than taken from the feed, which returns unusable values. Contracts without a two-sided quote are excluded.',
+      dataSource: chain.source === 'cboe'
+        ? `CBOE delayed quotes (${chain.timestamp}), exchange-published greeks.`
+        : 'Live Yahoo chain. Implied vol and greeks solved from each contract mid by bisection, because the feed publishes neither reliably. Contracts without a two-sided quote are excluded.',
       ts: Date.now(),
     });
   } catch (e) {
