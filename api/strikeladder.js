@@ -83,6 +83,32 @@ function probBeyond(S, level, T, sigma, above, r = 0.04) {
   return above ? ncdf(d2) : ncdf(-d2);
 }
 
+// CBOE's delayed-quote feed can freeze. Measured 2026-09-23: every symbol's
+// file was stamped 03:00-04:00 while the market was open at 09:50 ET — ten
+// hours stale, with SLV 4.11% adrift from its live price. Nothing downstream
+// can detect that on its own, because a stale chain is internally consistent:
+// the strikes, greeks and probabilities all agree with a price that is simply
+// wrong. So the snapshot is cross-checked against a live quote before use.
+async function checkFreshness(symbol, cboeSpot, cboeTimestamp) {
+  try {
+    const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1m&range=1d`,
+      { headers: { 'User-Agent': UA } });
+    if (!r.ok) return { checked: false };
+    const meta = (await r.json())?.chart?.result?.[0]?.meta;
+    const live = Number(meta?.regularMarketPrice);
+    if (!live) return { checked: false };
+    const driftPct = (cboeSpot - live) / live * 100;
+    const ageMin = cboeTimestamp
+      ? (Date.now() - new Date(String(cboeTimestamp).replace(' ', 'T') + 'Z').getTime()) / 60000
+      : null;
+    return {
+      checked: true, livePrice: live, driftPct: +driftPct.toFixed(2),
+      ageMinutes: ageMin != null ? Math.round(ageMin) : null,
+      stale: Math.abs(driftPct) > 0.3,
+    };
+  } catch { return { checked: false }; }
+}
+
 function parseOcc(sym) {
   const m = /^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(sym || '');
   if (!m) return null;
@@ -108,6 +134,15 @@ export default async function handler(req) {
     const spot = Number(data?.data?.current_price) || null;
     const raw = data?.data?.options || [];
     if (!spot || !raw.length) return json({ error: `No chain data for ${symbol}`, symbol }, 404);
+
+    const freshness = await checkFreshness(symbol, spot, data?.timestamp);
+    if (freshness.stale) {
+      return json({
+        error: `Chain data is stale — CBOE has ${symbol} at ${spot} but it is trading at ${freshness.livePrice} (${freshness.driftPct > 0 ? '+' : ''}${freshness.driftPct}% adrift, snapshot ${freshness.ageMinutes} minutes old). Every strike distance and probability derived from it would be wrong, so nothing is returned rather than something confidently incorrect.`,
+        symbol, cboeSpot: spot, livePrice: freshness.livePrice, driftPct: freshness.driftPct,
+        ageMinutes: freshness.ageMinutes, stale: true,
+      }, 503);
+    }
 
     const now = Date.now();
     const byExp = new Map();
@@ -345,6 +380,7 @@ export default async function handler(req) {
     return json({
       symbol, spot, direction: dir, target,
       cboeTimestamp: data?.timestamp || null,
+      freshness,
       earliestReasonableExpiry,
       expiryAdvice,
       expiryCount: rows.length,

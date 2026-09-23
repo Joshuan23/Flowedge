@@ -31,6 +31,32 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/
 const CBOE = 'https://cdn.cboe.com/api/global/delayed_quotes/options/';
 
 // SPY261231C00631000 -> { expiry, isCall, strike }
+// CBOE's delayed-quote feed can freeze. Measured 2026-09-23: every symbol's
+// file was stamped 03:00-04:00 while the market was open at 09:50 ET — ten
+// hours stale, with SLV 4.11% adrift from its live price. Nothing downstream
+// can detect that on its own, because a stale chain is internally consistent:
+// the strikes, greeks and probabilities all agree with a price that is simply
+// wrong. So the snapshot is cross-checked against a live quote before use.
+async function checkFreshness(symbol, cboeSpot, cboeTimestamp) {
+  try {
+    const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1m&range=1d`,
+      { headers: { 'User-Agent': UA } });
+    if (!r.ok) return { checked: false };
+    const meta = (await r.json())?.chart?.result?.[0]?.meta;
+    const live = Number(meta?.regularMarketPrice);
+    if (!live) return { checked: false };
+    const driftPct = (cboeSpot - live) / live * 100;
+    const ageMin = cboeTimestamp
+      ? (Date.now() - new Date(String(cboeTimestamp).replace(' ', 'T') + 'Z').getTime()) / 60000
+      : null;
+    return {
+      checked: true, livePrice: live, driftPct: +driftPct.toFixed(2),
+      ageMinutes: ageMin != null ? Math.round(ageMin) : null,
+      stale: Math.abs(driftPct) > 0.3,
+    };
+  } catch { return { checked: false }; }
+}
+
 function parseOccSymbol(sym) {
   const m = /^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(sym || '');
   if (!m) return null;
@@ -88,6 +114,15 @@ export default async function handler(req) {
     const rawOptions = cboe?.data?.options || [];
     const spot = Number(cboe?.data?.current_price) || null;
     if (!spot || !rawOptions.length) return json({ error: `No chain data for ${symbol}`, symbol }, 404);
+
+    const freshness = await checkFreshness(symbol, spot, cboe?.timestamp);
+    if (freshness.stale) {
+      return json({
+        error: `Chain data is stale — CBOE has ${symbol} at ${spot} but it is trading at ${freshness.livePrice} (${freshness.driftPct > 0 ? '+' : ''}${freshness.driftPct}% adrift, snapshot ${freshness.ageMinutes} minutes old). Contract prices and greeks from it would be wrong, so nothing is returned.`,
+        symbol, cboeSpot: spot, livePrice: freshness.livePrice, driftPct: freshness.driftPct,
+        ageMinutes: freshness.ageMinutes, stale: true,
+      }, 503);
+    }
 
     const setup = sigRes?.setup || null;
     const direction = (dirParam || setup?.direction || sigRes?.direction || 'LONG').toUpperCase();
